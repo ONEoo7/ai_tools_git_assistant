@@ -270,6 +270,18 @@ def has_changes(repo: str | Path, mode: str) -> bool:
     return bool(get_diffstat(repo, mode).strip())
 
 
+def list_tracked_files(repo: str | Path) -> list[str]:
+    """Return repo-relative paths of all tracked files (respects .gitignore).
+
+    Uses ``-z`` so filenames with spaces or newlines are handled correctly.
+    Raises GitError if git refuses (e.g. dubious-ownership block).
+    """
+    res = _run(repo, ["ls-files", "-z"])
+    if not res.ok:
+        raise GitError(res.stderr.strip() or "git ls-files failed")
+    return [p for p in res.stdout.split("\0") if p]
+
+
 def commit(repo: str | Path, message: str) -> GitResult:
     """Create a commit with the given (multi-line) message.
 

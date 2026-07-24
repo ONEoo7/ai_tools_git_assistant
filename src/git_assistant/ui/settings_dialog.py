@@ -173,7 +173,9 @@ class SettingsDialog(QDialog):
 
     def _build_advanced_tab(self) -> QWidget:
         w = QWidget()
-        form = QFormLayout(w)
+        outer = QVBoxLayout(w)
+        form_container = QWidget()
+        form = QFormLayout(form_container)
 
         self.diff_mode_combo = QComboBox()
         self.diff_mode_combo.addItem("Staged changes (git diff --cached)", "cached")
@@ -211,6 +213,10 @@ class SettingsDialog(QDialog):
         # Keep the Connection tab's effective-budget readout in sync.
         self.ctx_size_spin.valueChanged.connect(self._update_budget_label)
         self.margin_spin.valueChanged.connect(self._update_budget_label)
+
+        # Pin the form to the top; extra vertical space goes to the stretch below.
+        outer.addWidget(form_container)
+        outer.addStretch(1)
         return w
 
     # ---- load / save -------------------------------------------------------

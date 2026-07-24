@@ -93,6 +93,8 @@ class TrayApp:
         self.menu.addSeparator()
         gen = self.menu.addAction("Generate commit message")
         gen.triggered.connect(self._on_generate)
+        metrics_act = self.menu.addAction("Metrics...")
+        metrics_act.triggered.connect(self._on_metrics)
         settings_act = self.menu.addAction("Settings...")
         settings_act.triggered.connect(self._on_settings)
         self.menu.addSeparator()
@@ -132,6 +134,11 @@ class TrayApp:
             return
         dialog = PreviewDialog(self.settings)
         dialog.exec()
+
+    def _on_metrics(self) -> None:
+        from git_assistant.ui.metrics_dialog import MetricsDialog
+
+        MetricsDialog(self.settings).exec()
 
     def _on_settings(self) -> None:
         # Pause watching while the dialog is open so it can't mutate settings.repos

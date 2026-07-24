@@ -15,6 +15,9 @@ Its first feature generates git commit messages; more Git helpers are planned.
 - Output: an **editable preview** you can **Copy** to the clipboard or **Commit** directly.
 - Default format: **Conventional Commits**, with a fully **editable prompt template**.
 - **Handles diffs larger than the model's context window** (see below).
+- **Metrics** window: count lines of code across selected repos or a scanned
+  directory, broken down by file type (uses `git ls-files`, so `.gitignore` is
+  respected and binaries are skipped).
 
 ## Handling large diffs (context overflow)
 
