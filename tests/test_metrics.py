@@ -74,3 +74,13 @@ def test_analyze_repo_counts_tracked_files(repo):
     assert m.by_ext[".py"].code == 2
     assert m.by_ext[".md"].lines == 3
     assert m.totals.files == 3  # app.py, notes.md, .gitignore (binary skipped)
+
+
+def test_icon_resource_bundled():
+    """The generated multi-resolution .ico ships with the package."""
+    from git_assistant.ui.icon import icon_file
+
+    path = icon_file()
+    assert path.is_file(), f"missing {path}; run: uv run python tools/make_icon.py"
+    # ICO magic: reserved=0, type=1 (icon)
+    assert path.read_bytes()[:4] == b"\x00\x00\x01\x00"

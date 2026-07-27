@@ -1,13 +1,40 @@
-"""Tray icon drawn at runtime with QPainter (no bundled image file needed)."""
+"""Application icon.
+
+Prefers the bundled multi-resolution ``resources/icon.ico`` (regenerate with
+``uv run python tools/make_icon.py``) so Windows can pick the right size for the
+taskbar, alt-tab and Explorer. Falls back to drawing the badge at runtime, which
+keeps the app working from a plain source checkout with no build step.
+"""
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
 from PyQt6.QtCore import QRectF, Qt
-from PyQt6.QtGui import QBrush, QColor, QFont, QIcon, QPainter, QPixmap
+from PyQt6.QtGui import QBrush, QColor, QIcon, QPainter, QPixmap
+
+
+def icon_file() -> Path:
+    """Path to the bundled .ico, working both from source and PyInstaller."""
+    base = getattr(sys, "_MEIPASS", None)  # set inside a PyInstaller bundle
+    if base:
+        return Path(base) / "git_assistant" / "resources" / "icon.ico"
+    return Path(__file__).resolve().parent.parent / "resources" / "icon.ico"
 
 
 def app_icon(size: int = 64) -> QIcon:
-    """Return a simple round 'commit' badge icon."""
+    """Return the application icon (bundled .ico if available, else drawn)."""
+    path = icon_file()
+    if path.is_file():
+        icon = QIcon(str(path))
+        if not icon.isNull():
+            return icon
+    return draw_icon(size)
+
+
+def draw_icon(size: int = 64) -> QIcon:
+    """Draw a simple round 'commit' badge icon with QPainter."""
     pm = QPixmap(size, size)
     pm.fill(Qt.GlobalColor.transparent)
 

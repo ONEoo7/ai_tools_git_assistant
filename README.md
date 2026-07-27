@@ -62,6 +62,23 @@ uv run git-assistant
 3. Stage your changes, pick the **active repo** from the tray menu, and choose
    **Generate commit message**. Edit if needed, then **Copy** or **Commit**.
 
+## Build a standalone .exe
+
+Produces a single `dist/GitAssistant.exe` (no console window) that can be
+double-clicked or pinned to the taskbar with the app's own icon:
+
+```bash
+uv run --extra build pyinstaller git-assistant.spec
+```
+
+The icon is a multi-resolution `.ico` at
+`src/git_assistant/resources/icon.ico`. Regenerate it after changing the artwork
+in `ui/icon.py`:
+
+```bash
+uv run python tools/make_icon.py
+```
+
 ## Development
 
 ```bash

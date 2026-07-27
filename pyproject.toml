@@ -20,6 +20,9 @@ git-assistant = "git_assistant.app:main"
 dev = [
     "pytest>=8.0",
 ]
+build = [
+    "pyinstaller>=6.0",
+]
 
 [build-system]
 requires = ["hatchling"]

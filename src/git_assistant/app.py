@@ -8,8 +8,28 @@ from PyQt6.QtWidgets import QApplication, QMessageBox, QSystemTrayIcon
 
 from git_assistant.ui.icon import app_icon
 
+APP_ID = "ONEoo7.GitAssistant"
+
+
+def _set_windows_app_id() -> None:
+    """Give the process its own taskbar identity on Windows.
+
+    Without an explicit AppUserModelID, Windows groups the window under the
+    host interpreter (python.exe) and shows *its* icon in the taskbar instead
+    of the one Qt sets. Must run before any window is created. No-op elsewhere.
+    """
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP_ID)
+    except Exception:
+        pass  # cosmetic only - never block startup over the taskbar icon
+
 
 def main() -> int:
+    _set_windows_app_id()
     app = QApplication(sys.argv)
     app.setApplicationName("git-assistant")
     # Use the tray icon for window title bars / taskbar too, so they match.
