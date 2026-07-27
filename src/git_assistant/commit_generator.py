@@ -37,6 +37,8 @@ from git_assistant.tokenizer import (
 DEFAULT_CONTEXT_WINDOW = 8192
 MAP_OUTPUT_TOKENS = 384
 MAX_REDUCE_DEPTH = 3
+# Never shrink a parallel request's share of the context below this.
+MIN_PARALLEL_CONTEXT = 1024
 
 ProgressFn = Callable[[str], None]
 CancelFn = Callable[[], bool]
@@ -174,6 +176,8 @@ class CommitGenerator:
         context = self._context_window()
         usable = self._usable(context)
         out_tokens = self._reserved_output(context)
+        # Concurrency is bounded by the context: parallel slots share the window.
+        self._workers = self.effective_parallel(context)
 
         # Does the full single-shot prompt fit?
         full_prompt = render_template(
@@ -213,9 +217,15 @@ class CommitGenerator:
             )
 
         # --- Overflow: map-reduce ------------------------------------------
+        requested = max(1, int(s.parallel_calls or 1))
+        capped = (
+            f" (parallel capped {requested}->{self._workers} to fit context)"
+            if self._workers < requested
+            else ""
+        )
         progress(
             f"Diff too large ({full_tokens} > {usable} tokens) - "
-            "switching to map-reduce..."
+            f"switching to map-reduce{capped}..."
         )
         notes, omitted_by_path = self._map(
             files, context, branch, diffstat, progress, is_cancelled
@@ -284,7 +294,9 @@ class CommitGenerator:
         give a near-linear speed-up on the independent map/reduce calls.
         """
         total = len(items)
-        workers = max(1, min(int(self.settings.parallel_calls or 1), total))
+        # Never exceed the concurrency the context window can service - the
+        # chunks were sized for exactly this many slots.
+        workers = max(1, min(self._workers, total))
         self._check_cancel(is_cancelled)
 
         if workers == 1 or total == 1:
@@ -320,12 +332,32 @@ class CommitGenerator:
 
     # ---- map / reduce ------------------------------------------------------
     _last_chunk_count: int = 0
+    _workers: int = 1  # set from the context window before any parallel work
+
+    def effective_parallel(self, context: int) -> int:
+        """How many requests we may safely run at once for this context size.
+
+        LM Studio (llama.cpp) divides the loaded context across parallel slots,
+        so N in-flight requests each get roughly ``context / N`` tokens. Running
+        more than the context can service makes the server abort with
+        "Context size has been exceeded", so cap concurrency by the window.
+        """
+        requested = max(1, int(self.settings.parallel_calls or 1))
+        affordable = max(1, context // MIN_PARALLEL_CONTEXT)
+        return min(requested, affordable)
+
+    def per_request_context(self, context: int) -> int:
+        """Context a single request may use when running concurrently."""
+        return context // self.effective_parallel(context)
 
     def _map_budget(self, context: int, scaffold: str) -> int:
         overhead = estimate_tokens(scaffold)
         # Map summaries are short, so reserve only a small fixed output here to
-        # keep each chunk as large as possible.
-        return input_budget(context, MAP_OUTPUT_TOKENS, overhead)
+        # keep each chunk as large as possible - but stay inside this request's
+        # share of the context when several run in parallel.
+        return input_budget(
+            self.per_request_context(context), MAP_OUTPUT_TOKENS, overhead
+        )
 
     def _map(
         self, files, context, branch, diffstat, progress, is_cancelled

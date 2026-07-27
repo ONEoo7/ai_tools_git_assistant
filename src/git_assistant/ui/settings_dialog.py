@@ -28,6 +28,7 @@ from PyQt6.QtWidgets import (
 )
 
 from git_assistant import git_ops
+from git_assistant.commit_generator import MIN_PARALLEL_CONTEXT
 from git_assistant.config import RepoEntry, Settings, config_path
 from git_assistant.lmstudio_client import LMStudioClient, ModelInfo
 from git_assistant.prompts import DEFAULT_TEMPLATE
@@ -94,9 +95,11 @@ class SettingsDialog(QDialog):
         self.parallel_spin.setRange(1, 32)
         self.parallel_spin.setToolTip(
             "How many LLM requests to run at once when a large diff is split "
-            "into chunks (map-reduce). Higher is faster but uses more VRAM and "
-            "CPU on the LM Studio host. 1 = sequential."
+            "into chunks (map-reduce). Higher is faster, but concurrent requests "
+            "SHARE the model's context window, so each chunk gets a smaller "
+            "slice. 1 = sequential (largest chunks)."
         )
+        self.parallel_spin.valueChanged.connect(self._update_budget_label)
 
         self.budget_label = QLabel("")
         self.budget_label.setWordWrap(True)
@@ -768,8 +771,22 @@ class SettingsDialog(QDialog):
         out = reserved_output(window, margin)
         diff_budget = input_budget(window, out)
         note = ", clamped to model max" if clamped else ""
-        self.budget_label.setText(
+        text = (
             f"~{diff_budget:,} tokens for the diff  "
             f"(window {window:,} [{source}{note}] "
             f"- {out:,} output @ {int(margin * 100)}%)"
         )
+        # Parallel requests share the model's context window, so each concurrent
+        # chunk gets a fraction of it.
+        requested = self.parallel_spin.value()
+        affordable = max(1, window // MIN_PARALLEL_CONTEXT)
+        workers = min(requested, affordable)
+        if workers > 1:
+            per_req = window // workers
+            text += (
+                f"\nParallel: {workers} request(s) share the window "
+                f"-> ~{per_req:,} tokens each per chunk"
+            )
+            if workers < requested:
+                text += f"  (capped from {requested}: window too small)"
+        self.budget_label.setText(text)

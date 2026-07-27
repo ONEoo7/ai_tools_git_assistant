@@ -95,7 +95,10 @@ def test_input_budget_overhead_subtracted():
 # ---- parallel execution ------------------------------------------------------
 def _par_gen(parallel):
     settings = Settings(selected_model="m", parallel_calls=parallel)
-    return CommitGenerator(settings, _StubClient(None))
+    g = CommitGenerator(settings, _StubClient(None))
+    # generate() derives this from the context window; set it directly here.
+    g._workers = parallel
+    return g
 
 
 def test_run_parallel_preserves_order():
@@ -156,3 +159,36 @@ def test_run_parallel_cancellation():
     g = _par_gen(4)
     with pytest.raises(CancelledError):
         g._run_parallel([1, 2, 3], lambda x: x, lambda _m: None, lambda: True, "t")
+
+
+# ---- parallel slots share the context window ---------------------------------
+def _ctx_gen(parallel, window):
+    settings = Settings(
+        selected_model="m", parallel_calls=parallel, context_window=window
+    )
+    return CommitGenerator(settings, _StubClient(None))
+
+
+def test_per_request_context_divides_window():
+    g = _ctx_gen(4, 32768)
+    assert g.effective_parallel(32768) == 4
+    assert g.per_request_context(32768) == 32768 // 4
+
+
+def test_sequential_uses_full_window():
+    g = _ctx_gen(1, 8192)
+    assert g.per_request_context(8192) == 8192
+
+
+def test_parallelism_capped_by_small_window():
+    # 4192 context can only service 4 slots of >=1024 tokens.
+    g = _ctx_gen(8, 4192)
+    workers = g.effective_parallel(4192)
+    assert workers == 4
+    assert g.per_request_context(4192) >= 1024
+
+
+def test_tiny_window_falls_back_to_sequential():
+    g = _ctx_gen(8, 900)
+    assert g.effective_parallel(900) == 1
+    assert g.per_request_context(900) == 900

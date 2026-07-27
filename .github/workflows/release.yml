@@ -52,20 +52,90 @@ jobs:
       - name: Install dependencies
         run: uv sync --locked --extra build
 
+      # dist-client carries the TUF verifier and is not on an index yet, so it
+      # is injected rather than resolved. Both the URL and the expected digest
+      # live in .github/dist-client.lock -- in the repository, so changing what
+      # verifies every future update is a commit someone reviews rather than a
+      # CI setting someone can flip unseen.
+      #
+      # Without the file the build proceeds with no updater. That is a real
+      # difference in what ships, so it goes in the job summary rather than
+      # passing unnoticed.
+      - name: Install the update verifier
+        id: updater
+        run: |
+          $lock = ".github/dist-client.lock"
+          if (-not (Test-Path $lock)) {
+            "present=false" >> $env:GITHUB_OUTPUT
+            $msg = "No $lock - this build ships WITHOUT self-update."
+            Write-Warning $msg
+            "### Self-update: not included`n`n$msg" >> $env:GITHUB_STEP_SUMMARY
+            exit 0
+          }
+
+          $config = @{}
+          foreach ($line in Get-Content $lock) {
+            if ($line -match '^\s*([a-z0-9]+)\s*=\s*(\S+)\s*$') {
+              $config[$Matches[1]] = $Matches[2]
+            }
+          }
+          foreach ($key in @("url", "sha256")) {
+            if (-not $config.ContainsKey($key)) { throw "$lock has no '$key'" }
+          }
+
+          # Keep the published filename: a wheel must be named
+          # <name>-<version>-<tags>.whl or pip refuses to install it, and
+          # renaming it to something tidy like dist_client.whl fails with an
+          # error about the version that says nothing about the rename.
+          $name = Split-Path -Leaf ([uri]$config.url).AbsolutePath
+          Invoke-WebRequest -Uri $config.url -OutFile $name
+
+          $actual = (Get-FileHash $name -Algorithm SHA256).Hash.ToLower()
+          if ($actual -ne $config.sha256.ToLower()) {
+            throw "verifier wheel digest mismatch`nexpected $($config.sha256)`ngot      $actual"
+          }
+
+          uv pip install $name
+          "present=true" >> $env:GITHUB_OUTPUT
+          "### Self-update: included`n`n``$name```n`nSHA-256 ``$actual`` (matches the pin)" >> $env:GITHUB_STEP_SUMMARY
+
+      # The trusted root must exist before the build, or the packaged
+      # application has an updater that trusts nothing.
+      - name: Check the trusted root is present
+        if: steps.updater.outputs.present == 'true'
+        run: |
+          if (-not (Test-Path "src/git_assistant/updating/root.json")) {
+            throw "root.json is missing; see src/git_assistant/updating/README.md"
+          }
+
       # --onedir, not --onefile: a onefile build unpacks to %TEMP% on every
       # launch, which defeats both A/B slot installs and Authenticode pinning of
       # the files actually executed.
       #
       # --add-data is separate from --icon and both are needed: --icon sets the
       # executable's shell icon, while the tray loads icon.ico at runtime.
+      #
+      # --collect-all dist_client pulls in the verifier library that travels
+      # inside that wheel. PyInstaller does not follow a ctypes load, so
+      # without it the packaged application would import dist_client and then
+      # fail to find the library it wraps.
       - name: Build
-        run: >
-          uv run pyinstaller --noconfirm --windowed
-          --name git-assistant
-          --paths src
-          --icon src/git_assistant/resources/icon.ico
-          --add-data "src/git_assistant/resources;git_assistant/resources"
-          src/git_assistant/__main__.py
+        run: |
+          $args = @(
+            "--noconfirm", "--windowed",
+            "--name", "git-assistant",
+            "--paths", "src",
+            "--icon", "src/git_assistant/resources/icon.ico",
+            "--add-data", "src/git_assistant/resources;git_assistant/resources"
+          )
+          if ("${{ steps.updater.outputs.present }}" -eq "true") {
+            $args += @(
+              "--collect-all", "dist_client",
+              "--add-data", "src/git_assistant/updating/root.json;git_assistant/updating"
+            )
+          }
+          $args += "src/git_assistant/__main__.py"
+          uv run pyinstaller @args
 
       - name: Package
         id: pkg

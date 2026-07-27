@@ -18,7 +18,9 @@ from git_assistant.ui.icon import app_icon
 from git_assistant.ui.preview_dialog import PreviewDialog
 from git_assistant.ui.repo_watcher import RepoWatcher
 from git_assistant.ui.settings_dialog import SettingsDialog
+from git_assistant.ui.update_prompt import UpdateCheckWorker, ask_to_install
 from git_assistant.ui.workers import FunctionWorker, run_worker
+from git_assistant.updating import UpdateConfig
 
 # How many recent repos to show inline in the tray before the "More..." submenu.
 RECENT_COUNT = 3
@@ -38,6 +40,14 @@ class TrayApp:
         self.tray.setToolTip("Git Assistant")
         self.tray.activated.connect(self._on_activated)
 
+        # Self-update. Read before the menu is built, because the menu asks
+        # whether updating is configured. Disabled unless
+        # GIT_ASSISTANT_UPDATE_URL is set, so a developer checkout never
+        # reaches for the network.
+        self._update_config = UpdateConfig.from_env()
+        self._update_worker = None
+        self._update_thread = None
+
         self.menu = QMenu()
         self.tray.setContextMenu(self.menu)
         self._rebuild_menu()
@@ -53,6 +63,9 @@ class TrayApp:
         # Fill in any missing repo owners (e.g. from configs saved before owners
         # were resolved, or repos unblocked since) so the tray shows owner\name.
         self._backfill_owners()
+
+        if self._update_config.enabled:
+            self._check_for_update(announce_nothing=False)
 
     # ---- menu --------------------------------------------------------------
     def _rebuild_menu(self) -> None:
@@ -97,6 +110,11 @@ class TrayApp:
         metrics_act.triggered.connect(self._on_metrics)
         settings_act = self.menu.addAction("Settings...")
         settings_act.triggered.connect(self._on_settings)
+        if self._update_config.enabled:
+            update_act = self.menu.addAction("Check for updates...")
+            update_act.triggered.connect(
+                lambda: self._check_for_update(announce_nothing=True)
+            )
         self.menu.addSeparator()
         quit_act = self.menu.addAction("Quit")
         quit_act.triggered.connect(self.app.quit)
@@ -160,6 +178,64 @@ class TrayApp:
             self.tray.showMessage(title, message)
         else:
             QMessageBox.information(None, title, message)
+
+    # ---- self-update -------------------------------------------------------
+    def _check_for_update(self, *, announce_nothing: bool) -> None:
+        """Run one update check off-thread.
+
+        ``announce_nothing`` separates the automatic check at startup, which
+        should stay quiet when there is nothing to say, from the menu item,
+        where silence would look like a broken button.
+        """
+        if self._update_thread is not None:
+            return  # one at a time
+
+        worker = UpdateCheckWorker(self._update_config)
+        worker.found.connect(self._on_update_found)
+        worker.error.connect(
+            lambda message: self._notify("Update check failed", message)
+        )
+        if announce_nothing:
+            worker.none_available.connect(
+                lambda: self._notify("Up to date", "You have the latest version.")
+            )
+
+        thread = run_worker(worker)
+
+        # Both references must outlive the call, for two different reasons, and
+        # dropping either looks like "the check silently never runs":
+        #  - the worker is a local, and once it is collected the queued
+        #    thread.started -> worker.run never arrives;
+        #  - the QThread must not be destroyed while it is still running.
+        # Released on thread.finished, not worker.finished: the latter fires
+        # first, since it is what asks the thread to quit.
+        self._update_worker = worker
+        self._update_thread = thread
+        thread.finished.connect(self._forget_update_worker)
+
+    def _forget_update_worker(self) -> None:
+        self._update_worker = None
+        self._update_thread = None
+
+    def _on_update_found(self, result) -> None:
+        from git_assistant.updating.client import current_version
+
+        self._notify(
+            "Update available",
+            f"Git Assistant {result.version} is ready to install.",
+        )
+        if not ask_to_install(result, current_version()):
+            return
+
+        # Finding and verifying an update works; installing it does not yet.
+        # The installer has to close the running application, swap the A/B
+        # slot and relaunch, which needs the launcher shim from the
+        # distribution platform. Saying so beats a button that looks like it
+        # worked.
+        self._notify(
+            "Not yet supported",
+            "This build can find and verify updates but cannot install them yet.",
+        )
 
     # ---- owner backfill ----------------------------------------------------
     def _backfill_owners(self) -> None:
