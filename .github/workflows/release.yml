@@ -1,0 +1,98 @@
+name: release
+
+# Cutting a release is `git push origin v0.1.0` and nothing else. Everything
+# below runs on a clean runner so the artifact is not "whatever was on a laptop".
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write # create the release and upload the asset
+  id-token: write # OIDC token, used to obtain a Sigstore signing certificate
+  attestations: write # store the SLSA provenance against the artifact digest
+
+defaults:
+  run:
+    shell: pwsh
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      # Third-party actions are pinned by commit SHA, not by tag. A tag is
+      # mutable: whoever controls the repository can repoint v9.0.0 at new code
+      # and it lands in this build silently.
+      - name: Check out the tagged commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install uv and Python 3.13
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          python-version: "3.13"
+          enable-cache: true
+
+      # A tag that disagrees with pyproject.toml would publish under a version
+      # the application does not report at runtime, and the updater compares
+      # exactly those two numbers to decide whether an update exists.
+      - name: Resolve the version and check it against pyproject.toml
+        id: v
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $version = $tag -replace '^v', ''
+          $line = Select-String -Path pyproject.toml -Pattern '^version = "(.+)"' | Select-Object -First 1
+          if (-not $line) { throw "no version found in pyproject.toml" }
+          $declared = $line.Matches[0].Groups[1].Value
+          if ($version -ne $declared) {
+            throw "tag $tag implies version $version, but pyproject.toml declares $declared"
+          }
+          "version=$version" >> $env:GITHUB_OUTPUT
+
+      # --locked fails if uv.lock has drifted from pyproject.toml, rather than
+      # quietly resolving something different from what was tested.
+      - name: Install dependencies
+        run: uv sync --locked --extra build
+
+      # --onedir, not --onefile: a onefile build unpacks to %TEMP% on every
+      # launch, which defeats both A/B slot installs and Authenticode pinning of
+      # the files actually executed.
+      #
+      # --add-data is separate from --icon and both are needed: --icon sets the
+      # executable's shell icon, while the tray loads icon.ico at runtime.
+      - name: Build
+        run: >
+          uv run pyinstaller --noconfirm --windowed
+          --name git-assistant
+          --paths src
+          --icon src/git_assistant/resources/icon.ico
+          --add-data "src/git_assistant/resources;git_assistant/resources"
+          src/git_assistant/__main__.py
+
+      - name: Package
+        id: pkg
+        run: |
+          $name = "git-assistant-${{ steps.v.outputs.version }}-windows-x64.zip"
+          uv run python -m zipfile -c $name dist/git-assistant/
+          $sha = (Get-FileHash $name -Algorithm SHA256).Hash.ToLower()
+          "name=$name" >> $env:GITHUB_OUTPUT
+          "sha256=$sha" >> $env:GITHUB_OUTPUT
+          Write-Host "$sha  $name"
+
+      # Emits an in-toto Statement v1 carrying a SLSA Provenance v1 predicate,
+      # wrapped in a DSSE envelope. Must run before the release is published so
+      # the attestation exists by the time anything can download the asset.
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-path: ${{ steps.pkg.outputs.name }}
+
+      # gh is preinstalled on the runner. Using it rather than a release action
+      # keeps one less third-party dependency in the path that produces the
+      # artifact everyone downstream trusts.
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >
+          gh release create "${{ github.ref_name }}"
+          "${{ steps.pkg.outputs.name }}"
+          --title "${{ github.ref_name }}"
+          --notes "Automated build. SHA-256 ${{ steps.pkg.outputs.sha256 }}"
