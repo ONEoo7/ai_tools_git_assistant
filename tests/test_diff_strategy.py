@@ -1,10 +1,13 @@
 from git_assistant.diff_strategy import (
     FileDiff,
     build_units,
+    build_units_with_coverage,
     filter_files,
     pack_units,
     split_diff,
     split_into_hunks,
+    split_into_hunks_indexed,
+    truncate_indexed,
     truncate_to_budget,
 )
 
@@ -88,3 +91,56 @@ def test_truncate_to_budget_inserts_marker():
 def test_truncate_noop_when_small():
     text = "diff --git a/x b/x\n@@\n+one\n"
     assert truncate_to_budget(text, budget=1000, count_tokens=_count) == text
+
+
+def test_split_into_hunks_indexed_covers_all_lines():
+    files = split_diff(SAMPLE_DIFF)
+    app = next(f for f in files if f.path == "src/app.py")
+    pieces = split_into_hunks_indexed(app)
+    assert len(pieces) == 2
+    n = len(app.text.splitlines(keepends=True))
+    covered = set()
+    for text, idxs in pieces:
+        covered |= set(idxs)
+        # the piece text is exactly the lines at those indices
+        lines = app.text.splitlines(keepends=True)
+        assert text == "".join(lines[i] for i in idxs)
+    assert covered == set(range(n))  # every original line appears somewhere
+
+
+def test_truncate_indexed_reports_kept_lines():
+    text = "".join(f"line {i}\n" for i in range(50))
+    out, kept = truncate_indexed(text, budget=10, count_tokens=_count)
+    assert "lines truncated" in out
+    n = len(text.splitlines(keepends=True))
+    assert kept[-1] == n - 1          # tail line preserved
+    assert len(kept) < n              # something was dropped
+
+
+def test_truncate_indexed_keeps_all_when_small():
+    text = "a\nb\nc\n"
+    out, kept = truncate_indexed(text, budget=1000, count_tokens=_count)
+    assert out == text
+    assert kept == [0, 1, 2]
+
+
+def test_coverage_empty_when_everything_fits():
+    files, _ = filter_files(split_diff(SAMPLE_DIFF), ["*.lock"])
+    units, omitted = build_units_with_coverage(files, budget=10_000, count_tokens=_count)
+    assert units
+    assert all(not v for v in omitted.values())
+
+
+def test_coverage_reports_omitted_lines_when_truncating():
+    big = FileDiff(
+        path="big.py",
+        text="diff --git a/big.py b/big.py\n--- a/big.py\n+++ b/big.py\n"
+        + "@@ -1,1 +1,1 @@\n"
+        + "".join(f"+line {i}\n" for i in range(200)),
+    )
+    units, omitted = build_units_with_coverage([big], budget=20, count_tokens=_count)
+    assert units
+    # Some lines could not be sent, and they are real indices of the file.
+    n = len(big.text.splitlines(keepends=True))
+    assert omitted["big.py"]
+    assert all(0 <= i < n for i in omitted["big.py"])

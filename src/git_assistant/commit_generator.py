@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from git_assistant import git_ops, prompts
 from git_assistant.config import Settings
 from git_assistant.diff_strategy import (
-    build_units,
+    build_units_with_coverage,
     filter_files,
     pack_units,
     split_diff,
@@ -41,6 +41,24 @@ CancelFn = Callable[[], bool]
 
 
 @dataclass
+class FileCoverage:
+    """What of a file's diff actually reached the model."""
+
+    path: str
+    lines: list[str]  # the file's diff lines (keepends)
+    omitted: set[int]  # indices of lines NOT sent to the model
+    reason: str  # "sent" | "truncated" | "filtered"
+
+    @property
+    def omitted_count(self) -> int:
+        return len(self.omitted)
+
+    @property
+    def fully_sent(self) -> bool:
+        return not self.omitted
+
+
+@dataclass
 class GenerationResult:
     message: str
     strategy: str  # "single-shot" | "map-reduce"
@@ -49,6 +67,7 @@ class GenerationResult:
     input_tokens: int
     num_chunks: int = 1
     dropped_files: list[str] = field(default_factory=list)
+    file_coverage: list[FileCoverage] = field(default_factory=list)
 
 
 class CancelledError(RuntimeError):
@@ -126,13 +145,25 @@ class CommitGenerator:
             mode = "staged" if s.diff_mode == "cached" else "uncommitted"
             raise ValueError(f"No {mode} changes to describe in this repository.")
 
-        files, dropped = filter_files(split_diff(raw_diff), s.ignore_globs)
+        all_files = split_diff(raw_diff)
+        files, dropped = filter_files(all_files, s.ignore_globs)
         if not files:
             raise ValueError(
                 "All changed files were filtered out as noise "
                 "(lockfiles/binaries). Adjust ignore globs in Settings."
             )
         filtered_diff = "\n".join(f.text for f in files)
+        # Files removed by the noise filter never reach the model at all.
+        filtered_coverage = [
+            FileCoverage(
+                path=f.path,
+                lines=f.text.splitlines(keepends=True),
+                omitted=set(range(len(f.text.splitlines(keepends=True)))),
+                reason="filtered",
+            )
+            for f in all_files
+            if f.path in set(dropped)
+        ]
 
         context = self._context_window()
         usable = self._usable(context)
@@ -155,6 +186,16 @@ class CommitGenerator:
                 user=full_prompt,
                 max_tokens=out_tokens,
             )
+            # Single-shot: every kept file was sent in full.
+            coverage = [
+                FileCoverage(
+                    path=f.path,
+                    lines=f.text.splitlines(keepends=True),
+                    omitted=set(),
+                    reason="sent",
+                )
+                for f in files
+            ] + filtered_coverage
             return GenerationResult(
                 message=message,
                 strategy="single-shot",
@@ -162,6 +203,7 @@ class CommitGenerator:
                 input_budget=usable,
                 input_tokens=full_tokens,
                 dropped_files=dropped,
+                file_coverage=coverage,
             )
 
         # --- Overflow: map-reduce ------------------------------------------
@@ -169,7 +211,9 @@ class CommitGenerator:
             f"Diff too large ({full_tokens} > {usable} tokens) - "
             "switching to map-reduce..."
         )
-        notes = self._map(files, context, branch, diffstat, progress, is_cancelled)
+        notes, omitted_by_path = self._map(
+            files, context, branch, diffstat, progress, is_cancelled
+        )
         notes = self._reduce_if_needed(
             notes, context, branch, diffstat, progress, is_cancelled
         )
@@ -193,6 +237,18 @@ class CommitGenerator:
             user=final_prompt,
             max_tokens=out_tokens,
         )
+        coverage = []
+        for f in files:
+            omitted = omitted_by_path.get(f.path, set())
+            coverage.append(
+                FileCoverage(
+                    path=f.path,
+                    lines=f.text.splitlines(keepends=True),
+                    omitted=omitted,
+                    reason="truncated" if omitted else "sent",
+                )
+            )
+        coverage += filtered_coverage
         return GenerationResult(
             message=message,
             strategy="map-reduce",
@@ -202,6 +258,7 @@ class CommitGenerator:
             + estimate_tokens(final_prompt),
             num_chunks=self._last_chunk_count,
             dropped_files=dropped,
+            file_coverage=coverage,
         )
 
     # ---- map / reduce ------------------------------------------------------
@@ -215,12 +272,14 @@ class CommitGenerator:
 
     def _map(
         self, files, context, branch, diffstat, progress, is_cancelled
-    ) -> list[str]:
+    ) -> tuple[list[str], dict[str, set[int]]]:
         scaffold = prompts.MAP_SYSTEM + prompts.MAP_TEMPLATE.replace(
             "{files}", ""
         ).replace("{diff}", "")
         budget = self._map_budget(context, scaffold)
-        units = build_units(files, budget, estimate_tokens)
+        units, omitted_by_path = build_units_with_coverage(
+            files, budget, estimate_tokens
+        )
         chunks = pack_units(units, budget, estimate_tokens)
         self._last_chunk_count = len(chunks)
 
@@ -239,7 +298,7 @@ class CommitGenerator:
                 max_tokens=MAP_OUTPUT_TOKENS,
             )
             notes.append(note)
-        return notes
+        return notes, omitted_by_path
 
     def _reduce_if_needed(
         self, notes, context, branch, diffstat, progress, is_cancelled

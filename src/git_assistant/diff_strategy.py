@@ -173,6 +173,91 @@ def pack_units(units: list[str], budget: int, count_tokens: TokenFn) -> list[str
     return chunks
 
 
+def split_into_hunks_indexed(file_diff: FileDiff) -> list[tuple[str, list[int]]]:
+    """Like :func:`split_into_hunks`, but also report each piece's line indices.
+
+    Indices refer to positions in ``file_diff.text.splitlines(keepends=True)``,
+    so callers can track exactly which original lines a piece carries.
+    """
+    lines = file_diff.text.splitlines(keepends=True)
+    header_idx: list[int] = []
+    hunks: list[list[int]] = []
+    current: list[int] | None = None
+    for i, line in enumerate(lines):
+        if line.startswith("@@"):
+            if current is not None:
+                hunks.append(current)
+            current = [i]
+        elif current is None:
+            header_idx.append(i)
+        else:
+            current.append(i)
+    if current is not None:
+        hunks.append(current)
+
+    if not hunks:
+        return [(file_diff.text, list(range(len(lines))))]
+    out: list[tuple[str, list[int]]] = []
+    for h in hunks:
+        idxs = header_idx + h
+        out.append(("".join(lines[i] for i in idxs), idxs))
+    return out
+
+
+def truncate_indexed(
+    text: str, budget: int, count_tokens: TokenFn
+) -> tuple[str, list[int]]:
+    """Truncate ``text`` and report which of its lines were kept.
+
+    Mirrors :func:`truncate_to_budget`; the returned indices are positions in
+    ``text.splitlines(keepends=True)``.
+    """
+    lines = text.splitlines(keepends=True)
+    everything = list(range(len(lines)))
+    if count_tokens(text) <= budget or len(lines) <= 4:
+        return text, everything
+    head_keep = max(1, len(lines) // 2)
+    while head_keep > 1:
+        if count_tokens("".join(lines[:head_keep])) <= budget - 32:
+            break
+        head_keep = head_keep * 2 // 3
+    cut = len(lines) - head_keep - 1
+    if cut <= 0:
+        return text, everything
+    marker = f"\n[... {cut} lines truncated to fit the model context ...]\n"
+    out = "".join(lines[:head_keep]) + marker + lines[-1]
+    return out, [*range(head_keep), len(lines) - 1]
+
+
+def build_units_with_coverage(
+    files: list[FileDiff], budget: int, count_tokens: TokenFn
+) -> tuple[list[str], dict[str, set[int]]]:
+    """Build budget-sized units and report omitted lines per file.
+
+    Returns ``(units, omitted)`` where ``omitted[path]`` holds the indices of
+    lines that did **not** make it into any unit (and so never reach the model).
+    """
+    units: list[str] = []
+    omitted_by_path: dict[str, set[int]] = {}
+    for f in files:
+        n_lines = len(f.text.splitlines(keepends=True))
+        if count_tokens(f.text) <= budget:
+            units.append(f.text)
+            omitted_by_path[f.path] = set()
+            continue
+        omitted = set(range(n_lines))  # start pessimistic; clear what we send
+        for piece_text, idxs in split_into_hunks_indexed(f):
+            if count_tokens(piece_text) <= budget:
+                units.append(piece_text)
+                omitted -= set(idxs)
+            else:
+                trimmed, kept_rel = truncate_indexed(piece_text, budget, count_tokens)
+                units.append(trimmed)
+                omitted -= {idxs[i] for i in kept_rel if i < len(idxs)}
+        omitted_by_path[f.path] = omitted
+    return units, omitted_by_path
+
+
 def build_units(
     files: list[FileDiff], budget: int, count_tokens: TokenFn
 ) -> list[str]:

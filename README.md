@@ -42,6 +42,12 @@ A `git diff` can easily exceed a local model's context window. The tool uses a
 It never hard-fails on size — the preview window reports which strategy ran and the
 token counts involved.
 
+**Transparency:** the preview shows the commit message side by side with the
+staged files. Selecting a file displays its diff with any content that was
+**omitted from the prompt highlighted in red**, so it is obvious exactly what the
+model did *not* see when a diff overflows the budget (truncated hunks, or files
+dropped by the noise filter).
+
 ## Install & run
 
 ```bash
