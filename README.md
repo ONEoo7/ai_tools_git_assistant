@@ -38,6 +38,9 @@ A `git diff` can easily exceed a local model's context window. The tool uses a
    hard-truncated if a single hunk is still too big. Each budget-sized chunk is
    summarized ("map"), the notes are condensed if they overflow ("reduce"), and a
    final Conventional-Commits message is synthesized from the notes.
+   The map/reduce calls are independent, so they run **in parallel** —
+   4 at a time by default, configurable via *Settings → Connection & Model →
+   Parallel requests* (1 = sequential).
 
 It never hard-fails on size — the preview window reports which strategy ran and the
 token counts involved.

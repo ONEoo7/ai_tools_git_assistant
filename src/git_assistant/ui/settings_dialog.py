@@ -90,6 +90,14 @@ class SettingsDialog(QDialog):
         self.model_combo.setMinimumWidth(360)
         self.model_combo.currentIndexChanged.connect(self._update_budget_label)
 
+        self.parallel_spin = QSpinBox()
+        self.parallel_spin.setRange(1, 32)
+        self.parallel_spin.setToolTip(
+            "How many LLM requests to run at once when a large diff is split "
+            "into chunks (map-reduce). Higher is faster but uses more VRAM and "
+            "CPU on the LM Studio host. 1 = sequential."
+        )
+
         self.budget_label = QLabel("")
         self.budget_label.setWordWrap(True)
         self.budget_label.setStyleSheet("color: #8ab;")
@@ -98,6 +106,7 @@ class SettingsDialog(QDialog):
         form.addRow("Port:", self.port_spin)
         form.addRow("", self.test_btn)
         form.addRow("Model:", self.model_combo)
+        form.addRow("Parallel requests:", self.parallel_spin)
         form.addRow("Status:", self.conn_status)
         form.addRow("Effective budget:", self.budget_label)
         return w
@@ -224,6 +233,7 @@ class SettingsDialog(QDialog):
         s = self.settings
         self.ip_edit.setText(s.lmstudio_ip)
         self.port_spin.setValue(s.lmstudio_port)
+        self.parallel_spin.setValue(s.parallel_calls)
         if s.selected_model:
             self.model_combo.addItem(s.selected_model, s.selected_model)
             self.model_combo.setCurrentIndex(0)
@@ -244,6 +254,7 @@ class SettingsDialog(QDialog):
         s.lmstudio_ip = self.ip_edit.text().strip() or "127.0.0.1"
         s.lmstudio_port = self.port_spin.value()
         s.selected_model = self.model_combo.currentData() or self.model_combo.currentText()
+        s.parallel_calls = self.parallel_spin.value()
 
         repos, roots, watched = self._collect_repos_and_roots()
         s.repos = repos

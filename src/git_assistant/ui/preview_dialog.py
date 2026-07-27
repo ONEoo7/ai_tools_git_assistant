@@ -159,10 +159,16 @@ class PreviewDialog(QDialog):
 
         total_omitted = sum(c.omitted_count for c in self._coverage)
         incomplete = sum(1 for c in self._coverage if not c.fully_sent)
+        summarized = sum(1 for c in self._coverage if c.reason == "summarized")
         if total_omitted:
             self.files_label.setText(
                 f"Staged files ({len(self._coverage)}) - {incomplete} with omitted "
                 f"content, {total_omitted} line(s) not sent"
+            )
+        elif summarized:
+            self.files_label.setText(
+                f"Staged files ({len(self._coverage)}) - all content reached the "
+                f"model, {summarized} via summary (no raw diff omitted)"
             )
         else:
             self.files_label.setText(
@@ -174,12 +180,16 @@ class PreviewDialog(QDialog):
                 suffix = "  [filtered as noise - fully omitted]"
             elif cov.omitted_count:
                 suffix = f"  [{cov.omitted_count}/{len(cov.lines)} lines omitted]"
+            elif cov.reason == "summarized":
+                suffix = "  [fully sent - as summary]"
             else:
                 suffix = "  [fully sent]"
             item = QListWidgetItem(f"{cov.path}{suffix}")
             item.setToolTip(cov.path)
             if cov.omitted_count:
                 item.setForeground(Qt.GlobalColor.red)
+            elif cov.reason == "summarized":
+                item.setForeground(Qt.GlobalColor.darkYellow)
             self.file_list.addItem(item)
 
         if self._coverage:

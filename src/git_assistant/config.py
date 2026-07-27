@@ -77,6 +77,7 @@ class Settings:
     lmstudio_ip: str = "127.0.0.1"
     lmstudio_port: int = 1234
     selected_model: str = ""
+    parallel_calls: int = 4  # concurrent LLM requests during map-reduce
     repos: list[RepoEntry] = field(default_factory=list)
     active_repo: str = ""  # path of the active RepoEntry
     recent_repos: list[str] = field(default_factory=list)  # paths, most-recent first

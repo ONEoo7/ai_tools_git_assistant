@@ -90,3 +90,69 @@ def test_input_budget_overhead_subtracted():
     a = input_budget(8192, 819, overhead_tokens=0)
     b = input_budget(8192, 819, overhead_tokens=500)
     assert b == a - 500
+
+
+# ---- parallel execution ------------------------------------------------------
+def _par_gen(parallel):
+    settings = Settings(selected_model="m", parallel_calls=parallel)
+    return CommitGenerator(settings, _StubClient(None))
+
+
+def test_run_parallel_preserves_order():
+    g = _par_gen(4)
+    items = list(range(10))
+    out = g._run_parallel(items, lambda x: x * 2, lambda _m: None, lambda: False, "t")
+    assert out == [x * 2 for x in items]
+
+
+def test_run_parallel_sequential_when_one():
+    g = _par_gen(1)
+    out = g._run_parallel(["a", "b"], str.upper, lambda _m: None, lambda: False, "t")
+    assert out == ["A", "B"]
+
+
+def test_run_parallel_actually_concurrent():
+    import threading
+    import time
+
+    g = _par_gen(4)
+    active = 0
+    peak = 0
+    lock = threading.Lock()
+
+    def slow(_x):
+        nonlocal active, peak
+        with lock:
+            active += 1
+            peak = max(peak, active)
+        time.sleep(0.05)
+        with lock:
+            active -= 1
+        return _x
+
+    g._run_parallel(list(range(8)), slow, lambda _m: None, lambda: False, "t")
+    assert peak > 1, "calls did not overlap"
+    assert peak <= 4, f"exceeded configured concurrency: {peak}"
+
+
+def test_run_parallel_propagates_errors():
+    import pytest
+
+    g = _par_gen(4)
+
+    def boom(x):
+        if x == 3:
+            raise RuntimeError("chunk failed")
+        return x
+
+    with pytest.raises(RuntimeError, match="chunk failed"):
+        g._run_parallel(list(range(8)), boom, lambda _m: None, lambda: False, "t")
+
+
+def test_run_parallel_cancellation():
+    from git_assistant.commit_generator import CancelledError
+    import pytest
+
+    g = _par_gen(4)
+    with pytest.raises(CancelledError):
+        g._run_parallel([1, 2, 3], lambda x: x, lambda _m: None, lambda: True, "t")

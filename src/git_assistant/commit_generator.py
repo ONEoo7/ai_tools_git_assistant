@@ -13,7 +13,9 @@ Rendering avoids ``str.format`` so literal braces in a diff never raise.
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 
 from git_assistant import git_ops, prompts
@@ -47,7 +49,11 @@ class FileCoverage:
     path: str
     lines: list[str]  # the file's diff lines (keepends)
     omitted: set[int]  # indices of lines NOT sent to the model
-    reason: str  # "sent" | "truncated" | "filtered"
+    # "sent"       - raw diff went to the model verbatim (single-shot)
+    # "summarized" - fully sent, but only via a map-reduce summary pass
+    # "truncated"  - part of the file never reached the model
+    # "filtered"   - dropped as noise before the prompt was built
+    reason: str
 
     @property
     def omitted_count(self) -> int:
@@ -245,7 +251,9 @@ class CommitGenerator:
                     path=f.path,
                     lines=f.text.splitlines(keepends=True),
                     omitted=omitted,
-                    reason="truncated" if omitted else "sent",
+                    # Even when nothing is dropped, map-reduce reaches the model
+                    # as a summary rather than the raw diff.
+                    reason="truncated" if omitted else "summarized",
                 )
             )
         coverage += filtered_coverage
@@ -260,6 +268,55 @@ class CommitGenerator:
             dropped_files=dropped,
             file_coverage=coverage,
         )
+
+    # ---- parallel execution ------------------------------------------------
+    def _run_parallel(
+        self,
+        items: list,
+        fn: Callable,
+        progress: ProgressFn,
+        is_cancelled: CancelFn,
+        label: str,
+    ) -> list:
+        """Apply ``fn`` to every item, up to ``parallel_calls`` at a time.
+
+        Results keep the input order. Network I/O releases the GIL, so threads
+        give a near-linear speed-up on the independent map/reduce calls.
+        """
+        total = len(items)
+        workers = max(1, min(int(self.settings.parallel_calls or 1), total))
+        self._check_cancel(is_cancelled)
+
+        if workers == 1 or total == 1:
+            results = []
+            for i, item in enumerate(items, start=1):
+                self._check_cancel(is_cancelled)
+                progress(f"map-reduce: {label} {i}/{total}...")
+                results.append(fn(item))
+            return results
+
+        results: list = [None] * total
+        done = 0
+        lock = threading.Lock()
+        progress(f"map-reduce: {label} 0/{total} ({workers} in parallel)...")
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {pool.submit(fn, item): i for i, item in enumerate(items)}
+            try:
+                for fut in as_completed(futures):
+                    if is_cancelled():
+                        pool.shutdown(wait=False, cancel_futures=True)
+                        raise CancelledError("Generation cancelled.")
+                    results[futures[fut]] = fut.result()
+                    with lock:
+                        done += 1
+                        progress(
+                            f"map-reduce: {label} {done}/{total} "
+                            f"({workers} in parallel)..."
+                        )
+            except BaseException:
+                pool.shutdown(wait=False, cancel_futures=True)
+                raise
+        return results
 
     # ---- map / reduce ------------------------------------------------------
     _last_chunk_count: int = 0
@@ -283,21 +340,20 @@ class CommitGenerator:
         chunks = pack_units(units, budget, estimate_tokens)
         self._last_chunk_count = len(chunks)
 
-        notes: list[str] = []
-        for i, chunk in enumerate(chunks, start=1):
-            self._check_cancel(is_cancelled)
-            progress(f"map-reduce: summarizing chunk {i}/{len(chunks)}...")
-            file_names = _files_in_chunk(chunk)
-            user = prompts.MAP_TEMPLATE.replace("{files}", file_names).replace(
-                "{diff}", chunk
-            )
-            note = self.client.chat(
+        def summarize(chunk: str) -> str:
+            user = prompts.MAP_TEMPLATE.replace(
+                "{files}", _files_in_chunk(chunk)
+            ).replace("{diff}", chunk)
+            return self.client.chat(
                 model=self.settings.selected_model,
                 system=prompts.MAP_SYSTEM,
                 user=user,
                 max_tokens=MAP_OUTPUT_TOKENS,
             )
-            notes.append(note)
+
+        notes = self._run_parallel(
+            chunks, summarize, progress, is_cancelled, "summarizing chunk"
+        )
         return notes, omitted_by_path
 
     def _reduce_if_needed(
@@ -322,17 +378,17 @@ class CommitGenerator:
             groups = pack_units(notes, reduce_budget, estimate_tokens)
             if len(groups) >= len(notes):
                 break  # not converging; hard-truncate happens downstream
-            new_notes: list[str] = []
-            for group in groups:
-                user = prompts.REDUCE_TEMPLATE.replace("{notes}", group)
-                new_notes.append(
-                    self.client.chat(
-                        model=self.settings.selected_model,
-                        system=prompts.REDUCE_SYSTEM,
-                        user=user,
-                        max_tokens=MAP_OUTPUT_TOKENS,
-                    )
+            def condense(group: str) -> str:
+                return self.client.chat(
+                    model=self.settings.selected_model,
+                    system=prompts.REDUCE_SYSTEM,
+                    user=prompts.REDUCE_TEMPLATE.replace("{notes}", group),
+                    max_tokens=MAP_OUTPUT_TOKENS,
                 )
+
+            new_notes = self._run_parallel(
+                groups, condense, progress, is_cancelled, "condensing notes"
+            )
             notes = new_notes
             depth += 1
         return notes
