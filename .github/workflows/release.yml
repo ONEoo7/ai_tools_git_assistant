@@ -154,18 +154,117 @@ jobs:
           "sha256=$sha" >> $env:GITHUB_OUTPUT
           Write-Host "$sha  $name"
 
-      # NSIS ships on the windows runner image, but that is an image detail
-      # rather than a promise, so fall back to installing it instead of failing
-      # a release build over it.
+      # NSIS is not guaranteed on the runner image, and the Chocolatey community
+      # feed answers 504 often enough to have already broken a release here. So:
+      # look in every plausible place first, and retry the install rather than
+      # failing the build on one bad response.
       - name: Ensure NSIS is available
         run: |
-          $makensis = "C:\Program Files (x86)\NSIS\makensis.exe"
-          if (-not (Test-Path $makensis)) {
-            Write-Host "NSIS not on the image; installing."
-            choco install nsis -y --no-progress
+          function Find-MakeNsis {
+            $cmd = Get-Command makensis -ErrorAction SilentlyContinue
+            if ($cmd) { return $cmd.Source }
+            foreach ($p in @(
+              "C:\Program Files (x86)\NSIS\makensis.exe",
+              "C:\Program Files\NSIS\makensis.exe",
+              "$env:ChocolateyInstall\bin\makensis.exe"
+            )) { if (Test-Path $p) { return $p } }
+            return $null
           }
-          if (-not (Test-Path $makensis)) { throw "makensis not found after install" }
+
+          $makensis = Find-MakeNsis
+          if ($makensis) {
+            Write-Host "Found NSIS on the image: $makensis"
+          } else {
+            foreach ($attempt in 1..2) {
+              Write-Host "NSIS not present; choco attempt $attempt of 2."
+              choco install nsis -y --no-progress --no-color
+              $makensis = Find-MakeNsis
+              if ($makensis) { break }
+              if ($attempt -lt 2) { Start-Sleep -Seconds 15 }
+            }
+          }
+
+          # Chocolatey's community feed is a single point of failure and has
+          # already 504'd a release here. Fall back to NSIS's own zip, which
+          # needs no installer and no admin: makensis runs from the extracted
+          # folder. Pinned by digest in .github/nsis.lock when that file exists,
+          # following the same rule as the update verifier -- makensis compiles
+          # the artifact users run, so what it is matters.
+          if (-not $makensis) {
+            $lock = ".github/nsis.lock"
+            $url = "https://downloads.sourceforge.net/project/nsis/NSIS%203/3.10/nsis-3.10.zip"
+            $sha256 = ""
+            if (Test-Path $lock) {
+              foreach ($line in Get-Content $lock) {
+                if ($line -match '^\s*([a-z0-9]+)\s*=\s*(\S+)\s*$') {
+                  if ($Matches[1] -eq "url")    { $url = $Matches[2] }
+                  if ($Matches[1] -eq "sha256") { $sha256 = $Matches[2] }
+                }
+              }
+            }
+
+            # SourceForge answers some requests with an HTML interstitial that
+            # Invoke-WebRequest saves happily. Without this check the build
+            # would "download NSIS", then fail deep in Expand-Archive - or
+            # worse, pin the digest of a web page.
+            function Test-IsZip($path) {
+              if (-not (Test-Path $path)) { return $false }
+              try {
+                $fs = [System.IO.File]::OpenRead($path)
+                try {
+                  $sig = New-Object byte[] 2
+                  $null = $fs.Read($sig, 0, 2)
+                  return ($sig[0] -eq 0x50 -and $sig[1] -eq 0x4B)  # "PK"
+                } finally { $fs.Dispose() }
+              } catch {
+                return $false  # unreadable or partial download is not a zip
+              }
+            }
+
+            $zip = "nsis-dist.zip"
+            foreach ($attempt in 1..3) {
+              try {
+                Write-Host "Downloading NSIS ($attempt of 3): $url"
+                Invoke-WebRequest -Uri $url -OutFile $zip -MaximumRedirection 10
+                if (Test-IsZip $zip) { break }
+                Write-Host "  response was not a zip (interstitial or error page); discarding."
+                Remove-Item $zip -Force -ErrorAction SilentlyContinue
+              } catch {
+                Write-Host "  failed: $($_.Exception.Message)"
+              }
+              if ($attempt -lt 3) { Start-Sleep -Seconds (10 * $attempt) }
+            }
+
+            if (Test-IsZip $zip) {
+              $actual = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
+              if ($sha256) {
+                if ($actual -ne $sha256.ToLower()) {
+                  throw "NSIS zip digest mismatch`nexpected $sha256`ngot      $actual"
+                }
+                Write-Host "NSIS digest matches the pin in $lock."
+              } else {
+                $msg = ("NSIS was fetched UNPINNED (no $lock). SHA-256 ``$actual``. " +
+                        "Add that digest to $lock to pin the tool that builds the installer.")
+                Write-Warning $msg
+                "### NSIS: unpinned`n`n$msg" >> $env:GITHUB_STEP_SUMMARY
+              }
+              Expand-Archive -Path $zip -DestinationPath "nsis-dist" -Force
+              $makensis = (Get-ChildItem "nsis-dist" -Recurse -Filter "makensis.exe" |
+                           Select-Object -First 1).FullName
+            }
+          }
+
+          if (-not $makensis) {
+            throw ("makensis could not be obtained. Searched PATH, both " +
+                   "Program Files\NSIS locations and the Chocolatey bin, then " +
+                   "tried choco (2x) and the NSIS zip (3x). Both sources may be " +
+                   "down; re-run this job.")
+          }
+          & $makensis /VERSION
           "NSIS_EXE=$makensis" >> $env:GITHUB_ENV
+          # choco leaves a non-zero exit code behind even when a later attempt
+          # succeeded, and pwsh steps fail on the trailing $LASTEXITCODE.
+          exit 0
 
       # Wraps the same onedir tree the zip contains, so the portable and
       # installed builds are the identical binaries.
