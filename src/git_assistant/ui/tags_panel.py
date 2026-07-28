@@ -92,8 +92,16 @@ class TagsPanel(QWidget):
         self.push_btn = QPushButton("Push tag")
         self.push_btn.setToolTip("Publish the tag to the remote (asks first).")
         self.push_btn.clicked.connect(self._on_push)
+        self.delete_btn = QPushButton("Delete tag")
+        self.delete_btn.setToolTip(
+            "Delete a local tag that has not been pushed yet.\n"
+            "Tags already on the remote are refused - removing a published tag "
+            "breaks anyone who fetched it."
+        )
+        self.delete_btn.clicked.connect(self._on_delete)
         btn_row.addWidget(self.create_btn)
         btn_row.addWidget(self.push_btn)
+        btn_row.addWidget(self.delete_btn)
         btn_row.addStretch(1)
         layout.addLayout(btn_row)
 
@@ -153,6 +161,7 @@ class TagsPanel(QWidget):
     def _set_enabled(self, on: bool) -> None:
         self.create_btn.setEnabled(on)
         self.push_btn.setEnabled(on)
+        self.delete_btn.setEnabled(on)
         self.tag_edit.setEnabled(on)
 
     def _selected_part(self) -> str:
@@ -272,3 +281,81 @@ class TagsPanel(QWidget):
         self.push_btn.setEnabled(True)
         self.status.setText("Push failed.")
         QMessageBox.critical(self, "Push failed", message)
+
+    # ---- delete ------------------------------------------------------------
+    def _on_delete(self) -> None:
+        repo, name = self._repo_path(), self.tag_edit.text().strip()
+        if not name:
+            self.status.setText("Enter or select a tag to delete.")
+            return
+        if not git_ops.tag_exists(repo, name):
+            QMessageBox.warning(
+                self, "No such tag", f"'{name}' does not exist in this repository."
+            )
+            return
+
+        # Whether it was pushed decides if deleting is safe, and answering that
+        # means asking the remote - so it runs off the UI thread.
+        self.delete_btn.setEnabled(False)
+        self.status.setText(f"Checking whether '{name}' was pushed...")
+        worker = FunctionWorker(
+            lambda r=repo, n=name: git_ops.remote_tag_exists(r, n)
+        )
+        worker.finished.connect(lambda pushed, n=name: self._on_delete_checked(pushed, n))
+        worker.error.connect(lambda m, n=name: self._on_delete_checked(None, n))
+        self._worker = worker
+        self._thread = run_worker(worker)
+
+    def _on_delete_checked(self, pushed: bool | None, name: str) -> None:
+        self.delete_btn.setEnabled(True)
+        repo = self._repo_path()
+
+        if pushed is True:
+            self.status.setText("")
+            QMessageBox.warning(
+                self,
+                "Tag already pushed",
+                f"'{name}' has already been pushed to the remote, so it is not "
+                f"deleted here.\n\nRemoving a published tag breaks anyone who "
+                f"already fetched it. If you are certain, delete it deliberately "
+                f"with:\n\n    git tag -d {name}\n"
+                f"    git push origin :refs/tags/{name}",
+            )
+            return
+
+        if pushed is None:
+            # Cannot confirm; say so rather than guess in either direction.
+            confirm = QMessageBox.question(
+                self,
+                "Could not reach the remote",
+                f"Could not check whether '{name}' was already pushed.\n\n"
+                f"Delete the local tag anyway? If it was pushed, the remote "
+                f"copy stays and will come back on the next fetch.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel,
+            )
+        else:
+            confirm = QMessageBox.question(
+                self,
+                "Delete tag",
+                f"Delete the local tag '{name}'?\n\n"
+                f"It has not been pushed, so nothing on the remote changes.\n"
+                f"Repository: {repo}",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel,
+            )
+        if confirm != QMessageBox.StandardButton.Yes:
+            self.status.setText("")
+            return
+
+        result = git_ops.delete_tag(repo, name)
+        if result.ok:
+            self.status.setText(f"Deleted local tag '{name}'.")
+            self.tag_edit.clear()
+            self._reload_tags()
+        else:
+            QMessageBox.critical(
+                self,
+                "Could not delete tag",
+                result.stderr.strip() or "git tag -d failed.",
+            )

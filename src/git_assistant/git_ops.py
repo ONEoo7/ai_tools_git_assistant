@@ -333,6 +333,23 @@ def delete_tag(repo: str | Path, name: str) -> GitResult:
     return _run(repo, ["tag", "-d", name])
 
 
+def remote_tag_exists(
+    repo: str | Path, name: str, remote: str = "origin"
+) -> bool | None:
+    """Has ``name`` been pushed? None when the remote could not be reached.
+
+    None is distinct from False on purpose: "not published" and "cannot tell"
+    call for different answers before deleting a tag.
+    """
+    names = _run(repo, ["remote"])
+    if not names.ok or not names.stdout.split():
+        return False  # no remote at all, so nothing was ever pushed
+    res = _run(repo, ["ls-remote", "--tags", remote, f"refs/tags/{name}"])
+    if not res.ok:
+        return None
+    return bool(res.stdout.strip())
+
+
 def push_tag(repo: str | Path, name: str, remote: str = "origin") -> GitResult:
     """Publish a single tag to ``remote``."""
     return _run(repo, ["push", remote, f"refs/tags/{name}"])

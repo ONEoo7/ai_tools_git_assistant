@@ -256,3 +256,40 @@ def test_list_tags_with_dates(repo):
 
 def test_list_tags_with_dates_empty(repo):
     assert git_ops.list_tags_with_dates(repo) == []
+
+
+def test_remote_tag_exists_false_without_remote(repo):
+    (repo / "f.txt").write_text("x\n", encoding="utf-8")
+    _git(repo, "add", "f.txt")
+    _git(repo, "commit", "-m", "init")
+    git_ops.create_tag(repo, "v0.1.0")
+    # No remote configured at all -> definitively "never pushed", not "unknown".
+    assert git_ops.remote_tag_exists(repo, "v0.1.0") is False
+
+
+def test_remote_tag_exists_tracks_push(repo_with_remote):
+    git_ops.create_tag(repo_with_remote, "v1.0.0")
+    assert git_ops.remote_tag_exists(repo_with_remote, "v1.0.0") is False
+    assert git_ops.push_tag(repo_with_remote, "v1.0.0").ok
+    assert git_ops.remote_tag_exists(repo_with_remote, "v1.0.0") is True
+
+
+def test_remote_tag_exists_unknown_when_remote_unreachable(repo):
+    (repo / "f.txt").write_text("x\n", encoding="utf-8")
+    _git(repo, "add", "f.txt")
+    _git(repo, "commit", "-m", "init")
+    git_ops.create_tag(repo, "v0.1.0")
+    # A configured but unreachable remote must report None, not False: deleting
+    # on a failed lookup would be deleting on a guess.
+    _git(repo, "remote", "add", "origin", str(repo / "does-not-exist.git"))
+    assert git_ops.remote_tag_exists(repo, "v0.1.0") is None
+
+
+def test_delete_tag_removes_only_that_tag(repo):
+    (repo / "f.txt").write_text("x\n", encoding="utf-8")
+    _git(repo, "add", "f.txt")
+    _git(repo, "commit", "-m", "init")
+    git_ops.create_tag(repo, "v0.1.0")
+    git_ops.create_tag(repo, "v0.2.0")
+    assert git_ops.delete_tag(repo, "v0.1.0").ok
+    assert git_ops.list_tags(repo) == ["v0.2.0"]
