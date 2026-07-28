@@ -31,6 +31,10 @@ MANIFEST
 #   before PyInstaller builds the exe, so as to inject date/other infos into it.
 *.manifest
 *.spec
+# ...except this project's hand-authored build specs, which are source, not
+# generated artefacts. Without these a fresh clone cannot build.
+!git-assistant.spec
+!git-assistant-onedir.spec
 
 # Installer logs
 pip-log.txt

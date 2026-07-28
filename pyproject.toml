@@ -1,6 +1,10 @@
 [project]
 name = "git-assistant"
-version = "0.2.0"
+# Derived from `src/git_assistant/__init__.py`, not declared here. A packaged
+# build carries no distribution metadata, so that literal is what the running
+# application reports and what the updater compares against; declaring the
+# number twice let them drift.
+dynamic = ["version"]
 description = "System-tray Git assistant powered by a local LLM served by LM Studio"
 readme = "README.md"
 requires-python = ">=3.13"
@@ -40,6 +44,9 @@ build = [
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.hatch.version]
+path = "src/git_assistant/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/git_assistant"]

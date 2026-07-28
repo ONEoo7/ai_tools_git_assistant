@@ -50,6 +50,13 @@ class SettingsDialog(QDialog):
         self._scan_worker = None
         self._model_contexts: dict[str, int] = {}  # model id -> detected ctx
         self.setWindowTitle("Git Assistant")
+        # QDialog shows only a Close button by default; this is a real app
+        # window, so give it the usual minimise/maximise chrome too.
+        self.setWindowFlags(
+            self.windowFlags()
+            | Qt.WindowType.WindowMinimizeButtonHint
+            | Qt.WindowType.WindowMaximizeButtonHint
+        )
         self.setMinimumSize(1100, 620)  # the commit tab needs side-by-side room
 
         tabs = QTabWidget()

@@ -152,10 +152,6 @@ class CommitPanel(QWidget):
 
         if auto_start:
             self._start()
-        else:
-            self.status.setText(
-                "Press Generate to create a commit message for the active repository."
-            )
 
     # ---- repository selection ----------------------------------------------
     def refresh_repos(self) -> None:
@@ -190,7 +186,7 @@ class CommitPanel(QWidget):
         self.files_label.setText("Staged files")
         self.progress.setText("")
         self.regen_btn.setText("Generate")
-        self.status.setText("Press Generate to create a commit message for this repository.")
+        self.status.setText("")
 
     # ---- generation --------------------------------------------------------
     def _start(self) -> None:
@@ -423,6 +419,11 @@ class PreviewDialog(QDialog):
             f"Commit message - {repo.display() if repo else 'no repo'}"
         )
         self.setMinimumSize(1100, 560)
+        self.setWindowFlags(
+            self.windowFlags()
+            | Qt.WindowType.WindowMinimizeButtonHint
+            | Qt.WindowType.WindowMaximizeButtonHint
+        )
 
         self.panel = CommitPanel(settings, auto_start=True, parent=self)
         self.panel.committed.connect(self.accept)

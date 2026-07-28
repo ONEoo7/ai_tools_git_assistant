@@ -34,6 +34,11 @@ class MetricsDialog(QDialog):
         self._worker = None
         self.setWindowTitle("Git Assistant - Metrics")
         self.setMinimumSize(720, 560)
+        self.setWindowFlags(
+            self.windowFlags()
+            | Qt.WindowType.WindowMinimizeButtonHint
+            | Qt.WindowType.WindowMaximizeButtonHint
+        )
 
         layout = QVBoxLayout(self)
         layout.addWidget(

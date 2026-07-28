@@ -30,6 +30,25 @@ enforces those rules when `ENV=production`; it cannot enforce the human part.
 **Before shipping to anyone but yourself**, run the production ceremony and
 replace this file.
 
+## When updating is offered at all
+
+Three conditions, all required, all in `UpdateConfig.unavailable_reason`:
+
+1. `GIT_ASSISTANT_UPDATE_URL` is set — the repository root, not its `metadata`
+   directory.
+2. This is a **packaged build** (`sys.frozen`), not a source checkout.
+3. `dist_client` is importable, so there is something to verify with.
+
+The second is the one worth explaining. Self-update replaces the files it is
+running from; in a packaged build those files *are* the build, and in a `git
+clone` they are a working tree with uncommitted work in it. There is
+deliberately no environment variable to force it on in a checkout, because a
+switch like that is one somebody eventually leaves on.
+
+To exercise the updater during development, run a packaged build — or drive
+`dist_client` directly, which is the layer that resolves the channel pointer
+and checks every signature.
+
 ## Rotating it
 
 Replacing this file changes what the *next* build trusts. Installations already

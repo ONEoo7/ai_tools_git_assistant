@@ -57,6 +57,23 @@ def verifier_available() -> bool:
         return False
 
 
+def is_installed() -> bool:
+    """Is this a packaged build rather than a source checkout?
+
+    Self-update replaces the files it is running from. In a packaged build
+    those files are the build; in a `git clone` they are a working tree, and
+    unpacking a release over one would destroy uncommitted work and leave a
+    directory that is neither a checkout nor an install. The check exists
+    because that is not a thing to get wrong once.
+
+    `sys.frozen` is the honest signal: PyInstaller sets it, and nothing else
+    running out of a source tree does. Deliberately no environment variable to
+    override it — a switch that turns self-update on in a working tree is a
+    switch someone eventually leaves on.
+    """
+    return bool(getattr(sys, "frozen", False))
+
+
 @dataclass(frozen=True, slots=True)
 class UpdateConfig:
     """Where to look for updates.
@@ -76,13 +93,32 @@ class UpdateConfig:
     def enabled(self) -> bool:
         """Can this build check for updates at all?
 
-        Both halves are required: somewhere to look, and the verifier to check
-        what comes back. `dist-client` is an optional dependency, so a build
-        without it hides the feature entirely rather than offering a menu item
+        Three things are required: somewhere to look, the verifier to check
+        what comes back, and a packaged build to install into. A build missing
+        any of them hides the feature entirely rather than offering a menu item
         that fails — and, more to the point, there is no path here that falls
         back to fetching updates without verifying them.
         """
-        return bool(self.base_url) and verifier_available()
+        return self.unavailable_reason() is None
+
+    def unavailable_reason(self) -> str | None:
+        """Why updating is off, or `None` if it is on.
+
+        One place, so the menu and the error message cannot disagree. They did:
+        every disabled reason used to surface as "no update URL is configured",
+        which sends someone editing environment variables when the actual
+        answer is that they are running from a checkout.
+        """
+        if not self.base_url:
+            return "no update URL is configured"
+        if not is_installed():
+            return (
+                "this is a source checkout, not an installed build; "
+                "self-update only applies to a packaged install"
+            )
+        if not verifier_available():
+            return "this build was packaged without the update verifier"
+        return None
 
     @classmethod
     def from_env(cls) -> UpdateConfig:
@@ -111,17 +147,24 @@ class UpdateResult:
 
 
 def current_version() -> str:
-    """This build's version.
+    """This build's version — the number an update is compared against.
 
-    `importlib.metadata` works when installed; a frozen build has no
-    distribution metadata, so fall back to what the freezer recorded.
+    Read from `git_assistant.__version__`, which is the single place the
+    version is written: `pyproject.toml` derives from it, so the packaged
+    version and the reported one cannot drift.
+
+    This used to try `importlib.metadata` first and fall back to
+    `__version__`, defaulting to `"0.0.0"`. Both halves were wrong. A frozen
+    build has no distribution metadata unless PyInstaller is told to copy it,
+    so the fallback was in fact the only path that ever ran — and it silently
+    reported whatever number `__init__.py` happened to hold, which was a
+    release behind. Worse, `"0.0.0"` is the most dangerous possible default:
+    it makes every published release look newer, including one the user has
+    already declined or rolled back from.
     """
-    try:
-        from importlib.metadata import version
+    from git_assistant import __version__
 
-        return version("git-assistant")
-    except Exception:  # any failure means "use the fallback"
-        return getattr(sys.modules.get("git_assistant"), "__version__", "0.0.0")
+    return __version__
 
 
 def _platform_arch() -> tuple[str, str]:
@@ -218,8 +261,9 @@ def check_for_update(config: UpdateConfig) -> UpdateResult | None:
             metadata that did not verify, and the caller should say so rather
             than report "no updates".
     """
-    if not config.enabled:
-        raise UpdateUnavailableError("no update URL is configured")
+    reason = config.unavailable_reason()
+    if reason is not None:
+        raise UpdateUnavailableError(reason)
 
     from dist_client.update import Channel, UpdateCheck
 

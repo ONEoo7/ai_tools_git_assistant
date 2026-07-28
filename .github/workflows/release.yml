@@ -33,17 +33,24 @@ jobs:
 
       # A tag that disagrees with pyproject.toml would publish under a version
       # the application does not report at runtime, and the updater compares
-      # exactly those two numbers to decide whether an update exists.
-      - name: Resolve the version and check it against pyproject.toml
+      # exactly those two numbers to decide whether an update exists. Get it
+      # wrong low and the build offers itself as an update forever; wrong high
+      # and a real update is never offered.
+      #
+      # Checked against `__init__.py`, not `pyproject.toml`: pyproject now
+      # derives its version from that literal, and the literal is what a frozen
+      # build reports, since PyInstaller ships no distribution metadata.
+      - name: Resolve the version and check it against the source
         id: v
         run: |
           $tag = "${{ github.ref_name }}"
           $version = $tag -replace '^v', ''
-          $line = Select-String -Path pyproject.toml -Pattern '^version = "(.+)"' | Select-Object -First 1
-          if (-not $line) { throw "no version found in pyproject.toml" }
+          $source = "src/git_assistant/__init__.py"
+          $line = Select-String -Path $source -Pattern '^__version__ = "(.+)"' | Select-Object -First 1
+          if (-not $line) { throw "no __version__ found in $source" }
           $declared = $line.Matches[0].Groups[1].Value
           if ($version -ne $declared) {
-            throw "tag $tag implies version $version, but pyproject.toml declares $declared"
+            throw "tag $tag implies version $version, but $source declares $declared"
           }
           "version=$version" >> $env:GITHUB_OUTPUT
 
@@ -147,13 +154,58 @@ jobs:
           "sha256=$sha" >> $env:GITHUB_OUTPUT
           Write-Host "$sha  $name"
 
+      # NSIS ships on the windows runner image, but that is an image detail
+      # rather than a promise, so fall back to installing it instead of failing
+      # a release build over it.
+      - name: Ensure NSIS is available
+        run: |
+          $makensis = "C:\Program Files (x86)\NSIS\makensis.exe"
+          if (-not (Test-Path $makensis)) {
+            Write-Host "NSIS not on the image; installing."
+            choco install nsis -y --no-progress
+          }
+          if (-not (Test-Path $makensis)) { throw "makensis not found after install" }
+          "NSIS_EXE=$makensis" >> $env:GITHUB_ENV
+
+      # Wraps the same onedir tree the zip contains, so the portable and
+      # installed builds are the identical binaries.
+      #
+      # SRC_DIR/EXE_NAME are passed because this workflow names the build
+      # git-assistant, while the local spec uses GitAssistant; the script
+      # defaults to the latter.
+      #
+      # The .nsi path must be ABSOLUTE. Given a relative one, NSIS resolves
+      # ${__FILEDIR__} to <cwd>\installer\installer -- the script's own
+      # directory appended twice -- and the LICENSE and icon lookups fail.
+      - name: Build the installer
+        id: inst
+        run: |
+          $name = "git-assistant-${{ steps.v.outputs.version }}-windows-x64-setup.exe"
+          $root = $PWD.Path
+          & $env:NSIS_EXE `
+            "/DVERSION=${{ steps.v.outputs.version }}" `
+            "/DSRC_DIR=$root\dist\git-assistant" `
+            "/DEXE_NAME=git-assistant.exe" `
+            "/DOUT_FILE=$root\$name" `
+            "$root\installer\git-assistant.nsi"
+          if ($LASTEXITCODE -ne 0) { throw "makensis failed with $LASTEXITCODE" }
+          if (-not (Test-Path $name)) { throw "installer was not produced: $name" }
+          $sha = (Get-FileHash $name -Algorithm SHA256).Hash.ToLower()
+          "name=$name" >> $env:GITHUB_OUTPUT
+          "sha256=$sha" >> $env:GITHUB_OUTPUT
+          Write-Host "$sha  $name"
+
       # Emits an in-toto Statement v1 carrying a SLSA Provenance v1 predicate,
       # wrapped in a DSSE envelope. Must run before the release is published so
       # the attestation exists by the time anything can download the asset.
+      # Both assets are attested: a signed provenance for the zip that did not
+      # cover the installer would leave the easier-to-run download unvouched.
       - name: Attest build provenance
         uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
         with:
-          subject-path: ${{ steps.pkg.outputs.name }}
+          subject-path: |
+            ${{ steps.pkg.outputs.name }}
+            ${{ steps.inst.outputs.name }}
 
       # gh is preinstalled on the runner. Using it rather than a release action
       # keeps one less third-party dependency in the path that produces the
@@ -161,8 +213,21 @@ jobs:
       - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: >
-          gh release create "${{ github.ref_name }}"
-          "${{ steps.pkg.outputs.name }}"
-          --title "${{ github.ref_name }}"
-          --notes "Automated build. SHA-256 ${{ steps.pkg.outputs.sha256 }}"
+        run: |
+          # Literal here-string: backticks are escapes in a "@ ... "@ one, and
+          # the values are substituted by Actions before PowerShell parses this.
+          $notes = @'
+          Automated build.
+
+          | Download | SHA-256 |
+          | --- | --- |
+          | `${{ steps.inst.outputs.name }}` (installer) | `${{ steps.inst.outputs.sha256 }}` |
+          | `${{ steps.pkg.outputs.name }}` (portable zip) | `${{ steps.pkg.outputs.sha256 }}` |
+
+          The installer is per-user (no admin) and can start Git Assistant with Windows.
+          '@
+          gh release create "${{ github.ref_name }}" `
+            "${{ steps.inst.outputs.name }}" `
+            "${{ steps.pkg.outputs.name }}" `
+            --title "${{ github.ref_name }}" `
+            --notes $notes

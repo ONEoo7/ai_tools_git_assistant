@@ -117,6 +117,10 @@ class TrayApp:
 
         MetricsDialog(self.settings).exec()
 
+    def show_main_window(self) -> None:
+        """Open (or raise) the main window. Entry point for a second launch."""
+        self._on_settings()
+
     def _on_settings(self) -> None:
         # exec() runs a nested event loop, so further tray clicks still arrive.
         # Raise the existing window instead of opening a second one.

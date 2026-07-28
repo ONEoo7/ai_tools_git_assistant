@@ -4,11 +4,18 @@ from __future__ import annotations
 
 import sys
 
+from PyQt6.QtCore import QTimer
+from PyQt6.QtNetwork import QLocalServer, QLocalSocket
 from PyQt6.QtWidgets import QApplication, QMessageBox, QSystemTrayIcon
 
 from git_assistant.ui.icon import app_icon
 
 APP_ID = "ONEoo7.GitAssistant"
+# Named pipe used to detect an instance that is already running.
+IPC_NAME = "git-assistant-single-instance"
+# Passed by the "start with Windows" entry: come up in the tray only, without
+# popping the window in front of someone who just signed in.
+STARTUP_FLAG = "--startup"
 
 
 def _set_windows_app_id() -> None:
@@ -28,6 +35,44 @@ def _set_windows_app_id() -> None:
         pass  # cosmetic only - never block startup over the taskbar icon
 
 
+def _signal_running_instance() -> bool:
+    """Ask an already-running instance to show itself. True if one answered.
+
+    Launching the shortcut again should raise the existing window, not add a
+    second tray icon.
+    """
+    sock = QLocalSocket()
+    sock.connectToServer(IPC_NAME)
+    if not sock.waitForConnected(500):
+        return False
+    sock.write(b"show")
+    sock.flush()
+    sock.waitForBytesWritten(500)
+    sock.disconnectFromServer()
+    return True
+
+
+def _listen_for_other_instances(on_show) -> QLocalServer:
+    """Serve the pipe later launches connect to."""
+    # A crash can leave the pipe behind; without this the new instance cannot
+    # listen and every subsequent launch would spawn another tray icon.
+    QLocalServer.removeServer(IPC_NAME)
+    server = QLocalServer()
+    server.listen(IPC_NAME)
+
+    def _handle() -> None:
+        conn = server.nextPendingConnection()
+        if conn is None:
+            return
+        conn.disconnected.connect(conn.deleteLater)
+        # The connection itself is the message: waiting on readyRead races with
+        # the client disconnecting, which silently dropped the request.
+        on_show()
+
+    server.newConnection.connect(_handle)
+    return server
+
+
 def main() -> int:
     _set_windows_app_id()
     app = QApplication(sys.argv)
@@ -45,11 +90,24 @@ def main() -> int:
         )
         return 1
 
+    # A second launch hands off to the running instance and exits, so the
+    # shortcut never stacks up tray icons.
+    if _signal_running_instance():
+        return 0
+
     # Import after QApplication exists (widgets require a running app object).
     from git_assistant.ui.tray import TrayApp
 
     tray_app = TrayApp(app)  # keep a reference so it isn't garbage-collected
+    server = _listen_for_other_instances(tray_app.show_main_window)
+
+    # Launched from a shortcut (not the startup entry): show the window, since
+    # clicking an icon that only adds a tray entry looks like nothing happened.
+    if STARTUP_FLAG not in sys.argv[1:]:
+        QTimer.singleShot(0, tray_app.show_main_window)
+
     exit_code = app.exec()
+    server.close()
     del tray_app
     return exit_code
 

@@ -71,14 +71,32 @@ uv run git-assistant
 3. Stage your changes, pick the **active repo** from the tray menu, and choose
    **Generate commit message**. Edit if needed, then **Copy** or **Commit**.
 
-## Build a standalone .exe
+## Build
 
-Produces a single `dist/GitAssistant.exe` (no console window) that can be
-double-clicked or pinned to the taskbar with the app's own icon:
+Two distributables, both driven by one script (the version is read from
+`src/git_assistant/__init__.py`, so the installer cannot drift from the app):
 
 ```bash
-uv run --extra build pyinstaller git-assistant.spec
+uv run --extra build python tools/build.py
 ```
+
+| Target | Output | Notes |
+| --- | --- | --- |
+| `portable` | `dist/GitAssistant.exe` | Single file, no install, run from anywhere |
+| `installer` | `dist/GitAssistant-<version>-setup.exe` | Per-user NSIS installer |
+
+Build just one with `python tools/build.py portable` or `... installer`.
+The installer needs NSIS (`winget install NSIS.NSIS`).
+
+The installer is deliberately **per-user** (`%LOCALAPPDATA%\Programs\GitAssistant`,
+no admin): the app self-updates by replacing the files it runs from, and a
+Program Files install would demand a UAC prompt for every update. It offers a
+desktop shortcut and a **Start with Windows** option (on by default - it is a
+tray app), and the uninstaller asks before removing your settings.
+
+The installed build uses PyInstaller's *onedir* layout rather than onefile, so
+startup does not re-extract the whole bundle each launch and the updater can
+replace individual files.
 
 The icon is a multi-resolution `.ico` at
 `src/git_assistant/resources/icon.ico`. Regenerate it after changing the artwork

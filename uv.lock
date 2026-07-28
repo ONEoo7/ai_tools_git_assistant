@@ -91,7 +91,6 @@ wheels = [
 
 [[package]]
 name = "git-assistant"
-version = "0.2.0"
 source = { editable = "." }
 dependencies = [
     { name = "httpx" },
@@ -117,7 +116,7 @@ requires-dist = [
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
     { name = "tiktoken", specifier = ">=0.7" },
 ]
-provides-extras = ["dev", "build"]
+provides-extras = ["build", "dev"]
 
 [[package]]
 name = "h11"
