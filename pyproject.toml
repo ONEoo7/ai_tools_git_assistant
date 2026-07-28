@@ -1,6 +1,6 @@
 [project]
 name = "git-assistant"
-version = "0.1.0"
+version = "0.2.0"
 description = "System-tray Git assistant powered by a local LLM served by LM Studio"
 readme = "README.md"
 requires-python = ">=3.13"
