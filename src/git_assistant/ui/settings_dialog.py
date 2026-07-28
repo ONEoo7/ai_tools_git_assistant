@@ -33,6 +33,11 @@ from git_assistant.lmstudio_client import LMStudioClient, ModelInfo
 from git_assistant.prompts import DEFAULT_TEMPLATE
 from git_assistant.ui.preview_dialog import CommitPanel
 from git_assistant.ui.tags_panel import TagsPanel
+from git_assistant.updating.client import (
+    UpdateConfig,
+    ensure_update_config,
+    update_config_path,
+)
 from git_assistant.tokenizer import input_budget, reserved_output
 from git_assistant.ui.workers import FunctionWorker, run_worker
 
@@ -300,10 +305,28 @@ class SettingsDialog(QDialog):
         self.ignore_edit.setPlaceholderText("One glob per line, e.g. *.lock")
         self.ignore_edit.setMaximumHeight(140)
 
+        # Where updates come from. Read-only here on purpose: this dialog saves
+        # automatically, and the update address is the one setting that must
+        # not be changed by a stray keystroke in a window that writes as you
+        # type. The button opens the file instead, so changing it is a
+        # deliberate act.
+        update_row = QHBoxLayout()
+        self.update_source = QLabel()
+        self.update_source.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        self.update_source.setWordWrap(True)
+        edit_update_btn = QPushButton("Edit...")
+        edit_update_btn.setToolTip(str(update_config_path()))
+        edit_update_btn.clicked.connect(self._on_edit_update_config)
+        update_row.addWidget(self.update_source, 1)
+        update_row.addWidget(edit_update_btn)
+
         form.addRow("Diff source:", self.diff_mode_combo)
         form.addRow("Context window size:", self.ctx_size_spin)
         form.addRow("Output reserve (margin):", self.margin_spin)
         form.addRow("Ignore globs:", self.ignore_edit)
+        form.addRow("Update service:", update_row)
 
         # Keep the Connection tab's effective-budget readout in sync.
         self.ctx_size_spin.valueChanged.connect(self._update_budget_label)
@@ -334,6 +357,7 @@ class SettingsDialog(QDialog):
         self.margin_spin.setValue(s.safety_margin)
         self.ignore_edit.setPlainText("\n".join(s.ignore_globs))
         self._update_budget_label()
+        self._refresh_update_source()
 
     # ---- autosave ----------------------------------------------------------
     def _connect_autosave(self) -> None:
@@ -803,6 +827,47 @@ class SettingsDialog(QDialog):
         folder = config_path().parent
         folder.mkdir(parents=True, exist_ok=True)
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
+
+    # ---- update service ----------------------------------------------------
+    def _refresh_update_source(self) -> None:
+        """Show where this installation looks for updates, and why.
+
+        "It is checking the wrong server" and "it is not checking at all" look
+        identical from the outside otherwise -- the menu item is simply absent
+        -- which leaves no way to tell a missing address from a typo in one.
+        """
+        config = UpdateConfig.load()
+        if config.problem:
+            self.update_source.setText(config.problem)
+            self.update_source.setStyleSheet("color: #c0392b;")
+            return
+
+        reason = config.unavailable_reason()
+        if config.base_url:
+            text = config.base_url
+            if config.origin:
+                text += f"  (from {config.origin})"
+            if reason:
+                # Configured, but something else disables updating: a source
+                # checkout, or a build packaged without the verifier.
+                text += f"\nUpdates are off: {reason}"
+        else:
+            text = reason or "not configured"
+
+        self.update_source.setText(text)
+        self.update_source.setStyleSheet("color: #888;")
+
+    def _on_edit_update_config(self) -> None:
+        """Open `update.json`, creating an inert template if it is absent.
+
+        The template overrides nothing, so this cannot change where updates
+        come from -- it only gives somebody a file to edit. Without it the
+        answer to "where do I change the URL" was "create this JSON file by
+        hand in a directory the application never mentions".
+        """
+        path = ensure_update_config()
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+        self._refresh_update_source()
 
     def _on_trust_all(self) -> None:
         box = QMessageBox(self)

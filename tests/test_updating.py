@@ -268,3 +268,56 @@ def test_a_missing_root_is_still_refused(monkeypatch: pytest.MonkeyPatch) -> Non
 
     with pytest.raises(client.UpdateUnavailableError, match="not bundled"):
         client._trusted_root()
+
+
+def test_the_template_overrides_nothing(
+    monkeypatch: pytest.MonkeyPatch, no_user_config: Path
+) -> None:
+    """Creating the file must not change where updates come from.
+
+    Pre-filling `url` with the address currently in use would pin this
+    installation to whatever the build shipped with, so a later build pointing
+    somewhere else would be quietly ignored.
+    """
+    monkeypatch.setattr(client, "packaged_update_url", lambda: "https://updates.example")
+
+    before = client.UpdateConfig.load()
+    created = client.ensure_update_config()
+    after = client.UpdateConfig.load()
+
+    assert created == no_user_config
+    assert created.is_file()
+    assert after.base_url == before.base_url == "https://updates.example"
+    assert not after.problem
+
+
+def test_the_template_is_the_documented_shape(no_user_config: Path) -> None:
+    client.ensure_update_config()
+    data = json.loads(no_user_config.read_text(encoding="utf-8"))
+
+    assert data["url"] == ""
+    assert data["channel"] == client.DEFAULT_CHANNEL
+    assert "url" in data["_comment"]
+
+
+def test_an_existing_file_is_never_overwritten(no_user_config: Path) -> None:
+    """It holds a hand-edited address. Replacing it with a template would be
+    the worst possible time to lose it -- the service is already down."""
+    no_user_config.write_text('{"url": "https://mirror.example"}', encoding="utf-8")
+
+    client.ensure_update_config()
+
+    assert client.UpdateConfig.load().base_url == "https://mirror.example"
+
+
+def test_an_unknown_key_is_ignored_not_rejected(no_user_config: Path) -> None:
+    # `_comment` is in the template, so parsing must tolerate it -- otherwise
+    # the file this application writes is one it refuses to read.
+    no_user_config.write_text(
+        json.dumps({"_comment": "hi", "url": "https://updates.example", "future": 1}),
+        encoding="utf-8",
+    )
+
+    config = client.UpdateConfig.load()
+    assert config.base_url == "https://updates.example"
+    assert not config.problem

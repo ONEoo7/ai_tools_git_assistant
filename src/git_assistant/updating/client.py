@@ -153,6 +153,44 @@ def user_update_config() -> UserUpdateConfig:
     )
 
 
+#: An override that overrides nothing, so creating it is safe.
+#:
+#: `url` is empty on purpose rather than pre-filled with the address currently
+#: in use: writing that in would pin this installation to whatever the build
+#: happened to ship with, and a later build pointing somewhere else would be
+#: quietly ignored. Empty means "use the build's address", which is what
+#: someone who has not edited the file wants.
+_TEMPLATE = {
+    "_comment": (
+        "Set 'url' to change where this installation looks for updates, for "
+        "example if the usual service is down. Leave it empty to use the "
+        "address this build was published with. The repository root, not its "
+        "metadata directory."
+    ),
+    "url": "",
+    "channel": DEFAULT_CHANNEL,
+}
+
+
+def ensure_update_config() -> Path:
+    """Create `update.json` with an inert template if it is not there.
+
+    The single place this application writes that file, and it is reached only
+    by someone explicitly asking to edit it. The template overrides nothing, so
+    calling this cannot change where updates come from — which is what keeps
+    "the application only ever reads this" true in the sense that matters.
+
+    Returns the path either way, so a caller can open it.
+    """
+    path = update_config_path()
+    if path.is_file():
+        return path
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(_TEMPLATE, indent=2) + "\n", encoding="utf-8")
+    return path
+
+
 @dataclass(frozen=True, slots=True)
 class UpdateConfig:
     """Where to look for updates.

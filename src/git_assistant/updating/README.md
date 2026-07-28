@@ -51,7 +51,12 @@ inherits the *user* environment, so a variable exported in a terminal reached a
 checkout, where updating is refused, and reached nothing else.
 
 **`update.json`**, in the platform config directory beside `settings.json`
-(`%LOCALAPPDATA%\git-assistant\update.json` on Windows):
+(`%LOCALAPPDATA%\git-assistant\update.json` on Windows). Reach it from
+**Settings → Advanced → Update service → Edit…**, which creates it from an
+inert template if it is not there and opens it. That row also shows the address
+currently in use and where it came from — "it is checking the wrong server" and
+"it is not checking at all" are otherwise indistinguishable, since both show up
+as the menu item simply being absent.
 
 ```json
 {
@@ -66,10 +71,13 @@ address dies.
 
 Three things about it:
 
-- **The application only ever reads it.** It is a separate file rather than a
-  key in `settings.json` precisely because the application rewrites that one,
-  and a file the application rewrites is a poor place to keep the thing that
-  decides where its code comes from. A hand edit here cannot be clobbered.
+- **The application never rewrites it.** It is a separate file rather than a
+  key in `settings.json` precisely because the application rewrites that one on
+  every edit, and a file the application rewrites is a poor place to keep the
+  thing that decides where its code comes from. The single write is creating
+  the template on request, whose `url` is empty — so it overrides nothing, and
+  an existing file is never touched. A hand-edited address cannot be clobbered,
+  least of all at the moment it is needed.
 - **A broken override does not fall back.** If `url` is missing a scheme or the
   JSON does not parse, updating is disabled and the reason says so. Falling
   back to the packaged address would hide the mistake behind the failure the

@@ -42,6 +42,10 @@ _SENT_STYLE = "color:#cfcfcf;"
 # is for related widgets, not for separating sections).
 SECTION_GAP = 12
 
+# Compared against the status text to clear it once repositories exist, so a
+# generation result shown in the same label is not wiped by a refresh.
+NO_REPOS_MESSAGE = "No repositories configured - add one in Repositories."
+
 
 class CommitPanel(QWidget):
     """Generate, review and commit a message for the active repository.
@@ -179,8 +183,12 @@ class CommitPanel(QWidget):
         self.repo_combo.blockSignals(False)
         self._set_busy(False)
         if self.repo_combo.count() == 0:
-            self.status.setText("No repositories configured - add one in Repositories.")
+            self.status.setText(NO_REPOS_MESSAGE)
             self._set_busy(True)  # nothing to generate against
+        elif self.status.text() == NO_REPOS_MESSAGE:
+            # Repositories have since been added; drop the stale warning without
+            # clobbering a generation result that may be shown here.
+            self.status.setText("")
 
     def _on_repo_changed(self, _index: int) -> None:
         path = self.repo_combo.currentData()
