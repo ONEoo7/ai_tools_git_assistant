@@ -1,0 +1,51 @@
+#!/bin/sh
+# Refuse to push a release tag whose version disagrees with the source.
+#
+# Git has no pre-tag hook, and a local tag costs nothing to fix; pushing it is
+# the step that hurts, because the release workflow then fails on a tag that
+# already exists on the remote. So the check lives here.
+#
+# Enable once per clone:
+#     git config core.hooksPath .githooks
+#
+# Bypass (not recommended) with: git push --no-verify
+
+repo_root=$(git rev-parse --show-toplevel) || exit 0
+checker="$repo_root/tools/check_tag_version.py"
+[ -f "$checker" ] || exit 0
+
+# Prefer the project's interpreter so the check runs the same way CI does.
+if command -v uv >/dev/null 2>&1; then
+    run_py="uv run --no-sync --project $repo_root python"
+elif command -v python >/dev/null 2>&1; then
+    run_py="python"
+elif command -v python3 >/dev/null 2>&1; then
+    run_py="python3"
+else
+    echo "pre-push: no Python found; skipping the tag version check." >&2
+    exit 0
+fi
+
+status=0
+# stdin: <local ref> <local sha> <remote ref> <remote sha>
+while read -r local_ref local_sha _remote_ref _remote_sha; do
+    # Deletions push the all-zero sha and need no check.
+    case "$local_sha" in *[!0]*) ;; *) continue ;; esac
+
+    case "$local_ref" in
+        refs/tags/*)
+            tag=${local_ref#refs/tags/}
+            # Only release tags carry a version.
+            case "$tag" in
+                v[0-9]*)
+                    if ! $run_py "$checker" "$tag"; then
+                        echo "pre-push: refusing to push tag $tag." >&2
+                        status=1
+                    fi
+                    ;;
+            esac
+            ;;
+    esac
+done
+
+exit $status

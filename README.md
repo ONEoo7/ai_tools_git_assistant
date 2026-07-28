@@ -112,6 +112,21 @@ uv run python tools/make_icon.py
 uv run pytest
 ```
 
+Enable the repository's git hooks once per clone:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+The `pre-push` hook refuses to push a release tag whose version disagrees with
+`__version__` in `src/git_assistant/__init__.py`. The release workflow checks the
+same thing, but only after the tag is on the remote - by which point fixing it
+means deleting a published tag. Run the check by hand with:
+
+```bash
+uv run python tools/check_tag_version.py v0.3.1
+```
+
 Config is stored as JSON in your platform's user-config directory
 (`platformdirs`, app name `git-assistant`). Settings from the previous
 `git-commit-assistant` name are migrated automatically on first launch.
