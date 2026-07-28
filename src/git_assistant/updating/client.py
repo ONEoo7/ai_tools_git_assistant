@@ -9,7 +9,7 @@ find an update, or fetch the wrong URL, but it cannot install unsigned code.
 
 from __future__ import annotations
 
-import os
+import json
 import platform
 import secrets
 import sys
@@ -25,6 +25,19 @@ from git_assistant.config import APP_NAME
 #: fetched: fetching it would open a trust-on-first-use window in which a
 #: network attacker could hand us a root of their own.
 ROOT_FILENAME = "root.json"
+
+#: Where this build looks for updates, written at package time. Not committed:
+#: it names a particular deployment, and a build made outside one should have
+#: no default rather than somebody else's address.
+UPDATE_URL_FILE = "update_url.txt"
+
+#: A user-editable override, in the platform config directory beside
+#: `settings.json`. Its own file rather than a key in `settings.json`, because
+#: the application *writes* that one — and a file the application rewrites is a
+#: poor place to keep the thing that decides where its code comes from. This
+#: one is only ever read, so a hand edit cannot be clobbered and no code path
+#: can redirect updates.
+UPDATE_CONFIG_FILE = "update.json"
 
 #: Identifies this application to the distribution service. Must match the
 #: `app_id` the server publishes under.
@@ -74,6 +87,72 @@ def is_installed() -> bool:
     return bool(getattr(sys, "frozen", False))
 
 
+def update_config_path() -> Path:
+    """The user-editable update configuration, beside `settings.json`."""
+    return Path(user_config_dir(APP_NAME, appauthor=False)) / UPDATE_CONFIG_FILE
+
+
+def _clean_url(value: object) -> str:
+    """A URL we are willing to fetch from, or `""`.
+
+    Only `http` and `https`. Plain `http` is allowed on purpose: TUF signs the
+    metadata and pins the target hashes, so the transport is not what makes an
+    update trustworthy, and a loopback deployment is a normal way to run this.
+    Anything else — `file:`, `javascript:`, a bare hostname — reads as absent.
+    """
+    if not isinstance(value, str):
+        return ""
+    url = value.strip()
+    return url if url.startswith(("https://", "http://")) else ""
+
+
+@dataclass(frozen=True, slots=True)
+class UserUpdateConfig:
+    """What `update.json` said, and whether it could be read at all."""
+
+    url: str = ""
+    channel: str = ""
+    problem: str = ""
+
+
+def user_update_config() -> UserUpdateConfig:
+    """Read `update.json`. Never written by this application.
+
+    Exists so an installation can be pointed somewhere else when its usual
+    service is unreachable — a build whose only address is compiled in cannot
+    recover when that address dies.
+
+    A malformed file is reported, not raised. This is called while building the
+    tray menu, and a JSON typo should not stop the application starting; but it
+    should not silently look like "no override" either, or someone edits a file
+    and watches nothing happen.
+
+    Changing this cannot change what is trusted. The keys a release must be
+    signed by are fixed by the root bundled in the build, so pointing this at a
+    hostile server produces verification failures rather than bad code.
+    """
+    path = update_config_path()
+    if not path.is_file():
+        return UserUpdateConfig()
+
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError) as exc:
+        return UserUpdateConfig(problem=f"{path} could not be read: {exc}")
+    if not isinstance(data, dict):
+        return UserUpdateConfig(problem=f"{path} does not contain a JSON object")
+
+    url = _clean_url(data.get("url"))
+    if data.get("url") and not url:
+        return UserUpdateConfig(problem=f"{path} has a 'url' that is not http(s)")
+
+    channel = data.get("channel")
+    return UserUpdateConfig(
+        url=url,
+        channel=channel.strip() if isinstance(channel, str) else "",
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class UpdateConfig:
     """Where to look for updates.
@@ -88,6 +167,14 @@ class UpdateConfig:
     base_url: str = ""
     channel: str = DEFAULT_CHANNEL
     app_id: str = APP_ID
+    #: Where `base_url` came from, for messages. "It is looking at the wrong
+    #: server" is a question the answer to which should not require reading
+    #: the source.
+    origin: str = ""
+    #: Set when `update.json` exists but could not be used. Reported rather
+    #: than raised: a JSON typo must not stop the application starting, and
+    #: must not look like "no override" either.
+    problem: str = ""
 
     @property
     def enabled(self) -> bool:
@@ -110,7 +197,10 @@ class UpdateConfig:
         answer is that they are running from a checkout.
         """
         if not self.base_url:
-            return "no update URL is configured"
+            # A broken override is a different problem from an absent one, and
+            # saying so is the difference between fixing a typo and hunting for
+            # a setting that was there all along.
+            return self.problem or "no update URL is configured"
         if not is_installed():
             return (
                 "this is a source checkout, not an installed build; "
@@ -121,17 +211,48 @@ class UpdateConfig:
         return None
 
     @classmethod
-    def from_env(cls) -> UpdateConfig:
-        """Read configuration from the environment.
+    def load(cls) -> UpdateConfig:
+        """Where this build looks for updates: `update.json`, else the build.
 
-        Deliberately not from `settings.json`: the update source is an
-        operator decision, not a user preference, and a settings file the
-        application itself rewrites is a poor place to keep something that
-        determines where code comes from.
+        Two sources, each with one owner:
+
+        - **The build** carries the address of the service that published it,
+          written at package time. This is what makes a fresh install work with
+          no configuration at all — and it has to be the build rather than the
+          environment, because an installed desktop application never sees a
+          shell's. It is launched from the Start Menu and inherits the *user*
+          environment, so a variable exported in a terminal reached a checkout,
+          where updating is refused, and reached nothing else.
+        - **`update.json`** lets the person running it override that, which is
+          the whole point: a build whose only address is compiled in cannot
+          recover when that address goes down.
+
+        Neither is a trust decision. The keys a release must be signed by are
+        fixed by the root bundled in the build, so the worst a wrong address
+        can do is fail to verify.
         """
+        user = user_update_config()
+
+        # An unusable `update.json` does *not* fall back to the packaged
+        # address. Somebody wrote that file because the packaged one was not
+        # working; quietly using it anyway hides their mistake behind the
+        # failure they were trying to escape, and they get "could not reach the
+        # update service" when the truth is "your override has a typo".
+        if user.problem:
+            return cls(problem=user.problem)
+
+        if user.url:
+            return cls(
+                base_url=user.url.rstrip("/"),
+                channel=user.channel or DEFAULT_CHANNEL,
+                origin=str(update_config_path()),
+            )
+
+        packaged = packaged_update_url()
         return cls(
-            base_url=os.environ.get("GIT_ASSISTANT_UPDATE_URL", "").rstrip("/"),
-            channel=os.environ.get("GIT_ASSISTANT_UPDATE_CHANNEL", DEFAULT_CHANNEL),
+            base_url=packaged.rstrip("/"),
+            channel=user.channel or DEFAULT_CHANNEL,
+            origin="the address this build was published with" if packaged else "",
         )
 
 
@@ -204,6 +325,47 @@ def install_id() -> str:
     return generated
 
 
+def _packaged_file(name: str) -> Path | None:
+    """A data file shipped beside this module, wherever it ended up.
+
+    PyInstaller puts `--add-data` under `sys._MEIPASS`, so the frozen location
+    is checked first and the source tree second. One place, because getting it
+    right for the root and wrong for anything else is how a build ends up
+    behaving differently from the checkout it was made from.
+    """
+    candidates = [Path(__file__).resolve().parent / name]
+    frozen = getattr(sys, "_MEIPASS", None)
+    if frozen:
+        candidates.insert(0, Path(frozen) / "git_assistant" / "updating" / name)
+
+    return next((c for c in candidates if c.is_file()), None)
+
+
+def packaged_update_url() -> str:
+    """The update service this build was published to, or `""`.
+
+    Written at package time from `UPDATE_URL_FILE`. Absent means this build has
+    no default, which is the correct state for one produced outside a
+    distribution pipeline: it simply has no updater unless an environment
+    variable supplies an address.
+
+    Only `http` and `https` are accepted, and anything else is treated as
+    absent rather than raising — a malformed build-time constant should not
+    stop the application starting. Plain `http` is allowed on purpose: TUF
+    signs the metadata and pins the target hashes, so the transport is not what
+    makes an update trustworthy, and a loopback deployment is a normal way to
+    run this.
+    """
+    path = _packaged_file(UPDATE_URL_FILE)
+    if path is None:
+        return ""
+    try:
+        url = path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+    return url if url.startswith(("https://", "http://")) else ""
+
+
 def _trusted_root() -> bytes:
     """The root shipped inside this build.
 
@@ -212,18 +374,12 @@ def _trusted_root() -> bytes:
             was packaged without it. Failing here is correct — proceeding would
             mean trusting whatever the server sent.
     """
-    candidates = [Path(__file__).resolve().parent / ROOT_FILENAME]
-    frozen = getattr(sys, "_MEIPASS", None)
-    if frozen:
-        candidates.insert(0, Path(frozen) / "git_assistant" / "updating" / ROOT_FILENAME)
-
-    for candidate in candidates:
-        if candidate.is_file():
-            return candidate.read_bytes()
-
-    raise UpdateUnavailableError(
-        f"{ROOT_FILENAME} is not bundled with this build; updates are disabled"
-    )
+    path = _packaged_file(ROOT_FILENAME)
+    if path is None:
+        raise UpdateUnavailableError(
+            f"{ROOT_FILENAME} is not bundled with this build; updates are disabled"
+        )
+    return path.read_bytes()
 
 
 def _fetcher(config: UpdateConfig, client: httpx.Client):  # type: ignore[no-untyped-def]

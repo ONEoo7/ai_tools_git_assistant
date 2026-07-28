@@ -9,6 +9,7 @@ not.
 
 from __future__ import annotations
 
+import json
 import tomllib
 from pathlib import Path
 
@@ -118,3 +119,152 @@ def test_the_version_is_written_in_exactly_one_place() -> None:
     )
     assert "version" in pyproject["project"]["dynamic"]
     assert pyproject["tool"]["hatch"]["version"]["path"] == "src/git_assistant/__init__.py"
+
+
+# ------------------------------------------------- where the build looks
+
+
+@pytest.fixture
+def no_user_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    """Point `update.json` at an empty directory, so the real one is untouched."""
+    path = tmp_path / client.UPDATE_CONFIG_FILE
+    monkeypatch.setattr(client, "update_config_path", lambda: path)
+    return path
+
+
+def test_a_build_with_neither_source_has_no_url(no_user_config: Path) -> None:
+    """A checkout: no `update_url.txt`, no `update.json`."""
+    assert client.packaged_update_url() == ""
+    assert client.UpdateConfig.load().base_url == ""
+
+
+def test_the_packaged_url_is_the_default(
+    monkeypatch: pytest.MonkeyPatch, no_user_config: Path
+) -> None:
+    """The case that made a packaged default necessary.
+
+    An installed application is launched from the Start Menu and inherits the
+    user environment, not a shell's, so an environment variable never reached
+    it. A fresh install has to work with no configuration at all.
+    """
+    monkeypatch.setattr(client, "packaged_update_url", lambda: "https://updates.example/")
+
+    config = client.UpdateConfig.load()
+    assert config.base_url == "https://updates.example"
+    assert "published with" in config.origin
+
+
+def test_the_user_file_overrides_the_packaged_url(
+    monkeypatch: pytest.MonkeyPatch, no_user_config: Path
+) -> None:
+    """The whole point: a build whose only address is compiled in cannot
+    recover when that address goes down."""
+    monkeypatch.setattr(client, "packaged_update_url", lambda: "https://updates.example")
+    no_user_config.write_text(json.dumps({"url": "http://127.0.0.1:8080"}), encoding="utf-8")
+
+    config = client.UpdateConfig.load()
+    assert config.base_url == "http://127.0.0.1:8080"
+    assert config.origin == str(no_user_config)
+
+
+def test_the_user_file_can_set_the_channel(
+    monkeypatch: pytest.MonkeyPatch, no_user_config: Path
+) -> None:
+    no_user_config.write_text(
+        json.dumps({"url": "https://updates.example", "channel": "beta"}), encoding="utf-8"
+    )
+    assert client.UpdateConfig.load().channel == "beta"
+
+
+def test_an_absent_channel_stays_on_stable(no_user_config: Path) -> None:
+    no_user_config.write_text(json.dumps({"url": "https://updates.example"}), encoding="utf-8")
+    assert client.UpdateConfig.load().channel == client.DEFAULT_CHANNEL
+
+
+@pytest.mark.parametrize(
+    "written",
+    ["{ not json", '["a", "list"]', '{"url": "file:///etc/passwd"}', '{"url": "updates.example"}'],
+)
+def test_an_unusable_user_file_is_reported_not_raised(
+    no_user_config: Path, written: str
+) -> None:
+    """A JSON typo must not stop the application starting.
+
+    It must not look like "no override" either, or someone edits a file and
+    watches nothing happen with no idea why.
+    """
+    no_user_config.write_text(written, encoding="utf-8")
+
+    config = client.UpdateConfig.load()
+    assert config.base_url == ""
+    assert config.problem
+    assert config.unavailable_reason() == config.problem
+
+
+def test_a_broken_user_file_does_not_silently_fall_back(
+    monkeypatch: pytest.MonkeyPatch, no_user_config: Path
+) -> None:
+    """Falling back to the packaged address would hide the mistake.
+
+    Someone who edited this file did so because the packaged address was not
+    working; quietly using it anyway is the least useful thing to do.
+    """
+    monkeypatch.setattr(client, "packaged_update_url", lambda: "https://updates.example")
+    no_user_config.write_text('{"url": "ftp://mirror.example"}', encoding="utf-8")
+
+    config = client.UpdateConfig.load()
+    assert config.base_url == ""
+    assert "not http(s)" in config.problem
+
+
+def test_the_application_never_writes_the_update_config(no_user_config: Path) -> None:
+    """The reason this is not a key in `settings.json`.
+
+    That file is rewritten by the application, so a hand-edited address could
+    be clobbered — and a code path that can change where updates come from is
+    one more thing that has to be right.
+    """
+    source = (REPO_ROOT / "src" / "git_assistant").rglob("*.py")
+    for path in source:
+        text = path.read_text(encoding="utf-8")
+        assert f'"{client.UPDATE_CONFIG_FILE}"' not in text or path.name == "client.py"
+
+    client.UpdateConfig.load()
+    assert not no_user_config.exists(), "reading the config must not create it"
+
+
+@pytest.mark.parametrize(
+    "written, expected",
+    [
+        ("https://updates.example/", "https://updates.example/"),
+        ("http://127.0.0.1:8080", "http://127.0.0.1:8080"),
+        ("  https://updates.example  \n", "https://updates.example"),
+        # Plain http is allowed on purpose: TUF signs the metadata and pins the
+        # target hashes, so a loopback deployment is a normal way to run this.
+        ("", ""),
+        ("file:///etc/passwd", ""),
+        ("javascript:alert(1)", ""),
+        ("updates.example", ""),
+    ],
+)
+def test_a_packaged_url_must_look_like_one(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, written: str, expected: str
+) -> None:
+    """A malformed build-time constant must not stop the application starting.
+
+    It reads as "no default", which disables the updater, rather than raising
+    out of `load` on the path that builds the tray menu.
+    """
+    packaged = tmp_path / client.UPDATE_URL_FILE
+    packaged.write_text(written, encoding="utf-8")
+    monkeypatch.setattr(client, "_packaged_file", lambda name: packaged)
+
+    assert client.packaged_update_url() == expected
+
+
+def test_a_missing_root_is_still_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The shared file lookup must not have made the root optional.
+    monkeypatch.setattr(client, "_packaged_file", lambda name: None)
+
+    with pytest.raises(client.UpdateUnavailableError, match="not bundled"):
+        client._trusted_root()

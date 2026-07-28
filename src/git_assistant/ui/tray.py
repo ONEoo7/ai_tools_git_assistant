@@ -37,10 +37,10 @@ class TrayApp:
         self.tray.activated.connect(self._on_activated)
 
         # Self-update. Read before the menu is built, because the menu asks
-        # whether updating is configured. Disabled unless
-        # GIT_ASSISTANT_UPDATE_URL is set, so a developer checkout never
-        # reaches for the network.
-        self._update_config = UpdateConfig.from_env()
+        # whether updating is configured. The address comes from `update.json`
+        # if the user wrote one, otherwise from the build. A developer checkout
+        # has neither and is refused anyway, so it never reaches the network.
+        self._update_config = UpdateConfig.load()
         self._update_worker = None
         self._update_thread = None
 

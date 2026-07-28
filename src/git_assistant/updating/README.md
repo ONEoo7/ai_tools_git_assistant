@@ -34,10 +34,51 @@ replace this file.
 
 Three conditions, all required, all in `UpdateConfig.unavailable_reason`:
 
-1. `GIT_ASSISTANT_UPDATE_URL` is set — the repository root, not its `metadata`
-   directory.
+1. There is an update URL — the repository root, not its `metadata` directory.
 2. This is a **packaged build** (`sys.frozen`), not a source checkout.
 3. `dist_client` is importable, so there is something to verify with.
+
+### Where the URL comes from
+
+Two sources, each with one owner.
+
+**The build.** `update_url.txt` is written at package time from the
+`UPDATE_URL` repository variable and bundled beside `root.json`. This is what
+makes a fresh install work with no configuration at all. It has to be the build
+rather than an environment variable, because **an installed desktop application
+never sees a shell's environment** — it is launched from the Start Menu and
+inherits the *user* environment, so a variable exported in a terminal reached a
+checkout, where updating is refused, and reached nothing else.
+
+**`update.json`**, in the platform config directory beside `settings.json`
+(`%LOCALAPPDATA%\git-assistant\update.json` on Windows):
+
+```json
+{
+  "url": "https://updates.example",
+  "channel": "stable"
+}
+```
+
+It exists so an installation can be pointed elsewhere when its usual service is
+unreachable. A build whose only address is compiled in cannot recover when that
+address dies.
+
+Three things about it:
+
+- **The application only ever reads it.** It is a separate file rather than a
+  key in `settings.json` precisely because the application rewrites that one,
+  and a file the application rewrites is a poor place to keep the thing that
+  decides where its code comes from. A hand edit here cannot be clobbered.
+- **A broken override does not fall back.** If `url` is missing a scheme or the
+  JSON does not parse, updating is disabled and the reason says so. Falling
+  back to the packaged address would hide the mistake behind the failure the
+  user was trying to escape.
+- **Editing it cannot change what is trusted.** The keys a release must be
+  signed by are fixed by `root.json` above, so pointing this at a hostile
+  server produces verification failures, not bad code. That is also why plain
+  `http` is accepted: TUF signs the metadata and pins the target hashes, so a
+  loopback deployment is a normal way to run this.
 
 The second is the one worth explaining. Self-update replaces the files it is
 running from; in a packaged build those files *are* the build, and in a `git

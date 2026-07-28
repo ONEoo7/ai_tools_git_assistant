@@ -63,7 +63,7 @@ class SettingsDialog(QDialog):
         self.tabs = tabs
         self._ready = False  # set once every tab's widgets exist
         tabs.currentChanged.connect(self._on_tab_changed)
-        tabs.addTab(self._build_commit_tab(), "Generate commit message")
+        tabs.addTab(self._build_commit_tab(), "Generate Commit Message")
         tabs.addTab(self._build_tags_tab(), "Tags")
         tabs.addTab(self._build_connection_tab(), "Connection && Model")
         tabs.addTab(self._build_repos_tab(), "Repositories")

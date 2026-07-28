@@ -38,6 +38,10 @@ MAX_RENDER_LINES = 4000
 _OMITTED_STYLE = "background-color:#5c1f1f; color:#ffb3b3;"
 _SENT_STYLE = "color:#cfcfcf;"
 
+# Vertical gap between distinct groups within a pane (the default ~6px spacing
+# is for related widgets, not for separating sections).
+SECTION_GAP = 12
+
 
 class CommitPanel(QWidget):
     """Generate, review and commit a message for the active repository.
@@ -103,14 +107,16 @@ class CommitPanel(QWidget):
         # ---- left pane: the commit message -------------------------------
         left = QWidget()
         left_box = QVBoxLayout(left)
-        left_box.setContentsMargins(0, 0, 0, 0)
+        # Keep the panes off the splitter handle; without this the labels and
+        # boxes sit flush against the divider.
+        left_box.setContentsMargins(0, 0, SECTION_GAP, 0)
         left_box.addWidget(QLabel("Commit message"))
         left_box.addWidget(self.editor)
 
         # ---- right pane: staged files + what was omitted ------------------
         right = QWidget()
         right_box = QVBoxLayout(right)
-        right_box.setContentsMargins(0, 0, 0, 0)
+        right_box.setContentsMargins(SECTION_GAP, 0, 0, 0)
         self.files_label = QLabel("Staged files")
         right_box.addWidget(self.files_label)
 
@@ -118,6 +124,11 @@ class CommitPanel(QWidget):
         self.file_list.setMaximumHeight(150)
         self.file_list.currentRowChanged.connect(self._on_file_selected)
         right_box.addWidget(self.file_list)
+
+        # The file list and the diff below it are two separate things; without a
+        # gap the legend reads as a caption of the list rather than a heading
+        # for the diff.
+        right_box.addSpacing(SECTION_GAP)
 
         legend = QLabel(
             'Diff sent to the model - <span style="%s">&nbsp;red = omitted '
@@ -140,8 +151,9 @@ class CommitPanel(QWidget):
         splitter.setStretchFactor(0, 3)
         splitter.setStretchFactor(1, 4)
 
+        # Default margins, matching the other tabs. PreviewDialog zeroes its own
+        # layout instead, so the standalone window keeps a single set of margins.
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
         layout.addLayout(repo_row)
         layout.addWidget(self.status)
         layout.addWidget(splitter, 1)
@@ -433,4 +445,5 @@ class PreviewDialog(QDialog):
         self.panel.btn_row.addWidget(close_btn)
 
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)  # the panel already has margins
         layout.addWidget(self.panel)

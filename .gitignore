@@ -220,3 +220,8 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Written at package time by the release workflow. It names one deployment,
+# and a build made outside that pipeline should have no default rather than
+# somebody else's update service.
+src/git_assistant/updating/update_url.txt

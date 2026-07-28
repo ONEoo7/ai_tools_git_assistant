@@ -115,6 +115,44 @@ jobs:
             throw "root.json is missing; see src/git_assistant/updating/README.md"
           }
 
+      # An installed desktop application never sees a shell's environment: it
+      # is launched from the Start Menu and inherits the *user* environment, so
+      # configuring this through an environment variable reached a checkout,
+      # where self-update is refused, and reached nothing else. Writing the
+      # address into the build is what makes a fresh install work with no
+      # configuration at all.
+      #
+      # Users override it in `update.json` beside their settings, so a service
+      # that goes down does not strand every installation.
+      #
+      # A repository *variable*, not a secret: it is a URL, it is visible in
+      # any packaged build, and putting it in a secret would only hide it from
+      # the people reviewing this workflow. Unset means the build ships with no
+      # default and updates unless someone supplies one — a real difference in
+      # what ships, so it goes in the job summary.
+      - name: Set the update service address
+        if: steps.updater.outputs.present == 'true'
+        run: |
+          $url = "${{ vars.UPDATE_URL }}".Trim()
+          $file = "src/git_assistant/updating/update_url.txt"
+          if (-not $url) {
+            $msg = "No UPDATE_URL repository variable - this build has no default update service."
+            Write-Warning $msg
+            "### Update service: not configured`n`n$msg" >> $env:GITHUB_STEP_SUMMARY
+            exit 0
+          }
+          if ($url -notmatch '^https?://') {
+            throw "UPDATE_URL must start with http:// or https://, got '$url'"
+          }
+          # The repository root, not its metadata directory. Getting this wrong
+          # produces 404s on every metadata fetch and an error that talks about
+          # timestamp.json rather than about the URL.
+          if ($url -match '/metadata/?$') {
+            throw "UPDATE_URL is the repository root, not its metadata directory: '$url'"
+          }
+          $url | Set-Content -Path $file -NoNewline -Encoding utf8
+          "### Update service`n`n``$url``" >> $env:GITHUB_STEP_SUMMARY
+
       # --onedir, not --onefile: a onefile build unpacks to %TEMP% on every
       # launch, which defeats both A/B slot installs and Authenticode pinning of
       # the files actually executed.
@@ -140,6 +178,14 @@ jobs:
               "--collect-all", "dist_client",
               "--add-data", "src/git_assistant/updating/root.json;git_assistant/updating"
             )
+            # Only when the previous step wrote one. Bundling a file that does
+            # not exist is a PyInstaller error, and an absent default is a
+            # supported state rather than a failure.
+            if (Test-Path "src/git_assistant/updating/update_url.txt") {
+              $args += @(
+                "--add-data", "src/git_assistant/updating/update_url.txt;git_assistant/updating"
+              )
+            }
           }
           $args += "src/git_assistant/__main__.py"
           uv run pyinstaller @args
