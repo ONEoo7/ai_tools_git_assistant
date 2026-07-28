@@ -1,12 +1,18 @@
-"""Editable commit-message preview with Regenerate / Copy / Commit actions."""
+"""Commit-message generation UI.
+
+``CommitPanel`` is the reusable widget (message editor + per-file view of what
+was omitted from the prompt). It is embedded both in the main window's first tab
+and in ``PreviewDialog``, the standalone window the tray's quick action opens.
+"""
 
 from __future__ import annotations
 
 import html
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QFontDatabase, QGuiApplication
 from PyQt6.QtWidgets import (
+    QComboBox,
     QDialog,
     QHBoxLayout,
     QLabel,
@@ -24,7 +30,7 @@ from PyQt6.QtWidgets import (
 from git_assistant import git_ops
 from git_assistant.commit_generator import FileCoverage, GenerationResult
 from git_assistant.config import Settings
-from git_assistant.ui.workers import GeneratorWorker, run_worker
+from git_assistant.ui.workers import FunctionWorker, GeneratorWorker, run_worker
 
 # Cap rendered lines per file so a huge diff can't freeze the view.
 MAX_RENDER_LINES = 4000
@@ -33,18 +39,39 @@ _OMITTED_STYLE = "background-color:#5c1f1f; color:#ffb3b3;"
 _SENT_STYLE = "color:#cfcfcf;"
 
 
-class PreviewDialog(QDialog):
-    def __init__(self, settings: Settings, parent=None) -> None:
+class CommitPanel(QWidget):
+    """Generate, review and commit a message for the active repository.
+
+    ``auto_start`` immediately kicks off a generation (the tray quick action);
+    the tabbed view leaves it False so opening the window costs nothing.
+    ``before_generate`` lets the host apply pending edits (e.g. unsaved settings)
+    just before a run starts.
+    """
+
+    committed = pyqtSignal()  # a commit was created successfully
+
+    def __init__(
+        self,
+        settings: Settings,
+        auto_start: bool = True,
+        before_generate=None,
+        parent=None,
+    ) -> None:
         super().__init__(parent)
         self.settings = settings
+        self._before_generate = before_generate
         self._thread = None
         self._worker: GeneratorWorker | None = None
-
-        repo = settings.active_repo_entry()
-        title = repo.display() if repo else "no repo"
-        self.setWindowTitle(f"Commit message - {title}")
-        self.setMinimumSize(1100, 560)
+        self._push_thread = None
+        self._push_worker = None
         self._coverage: list[FileCoverage] = []
+
+        self.repo_combo = QComboBox()
+        self.repo_combo.setMinimumWidth(320)
+        self.repo_combo.currentIndexChanged.connect(self._on_repo_changed)
+        repo_row = QHBoxLayout()
+        repo_row.addWidget(QLabel("Repository:"))
+        repo_row.addWidget(self.repo_combo, 1)
 
         self.status = QLabel("")
         self.status.setWordWrap(True)
@@ -54,21 +81,24 @@ class PreviewDialog(QDialog):
         self.editor = QPlainTextEdit()
         self.editor.setPlaceholderText("The generated commit message will appear here...")
 
-        self.regen_btn = QPushButton("Regenerate")
+        self.regen_btn = QPushButton("Regenerate" if auto_start else "Generate")
         self.copy_btn = QPushButton("Copy")
         self.commit_btn = QPushButton("Commit")
-        self.close_btn = QPushButton("Close")
+        self.push_btn = QPushButton("Push")
+        self.push_btn.setToolTip(
+            "Push the current branch to its remote (asks for confirmation first)."
+        )
         self.regen_btn.clicked.connect(self._start)
         self.copy_btn.clicked.connect(self._on_copy)
         self.commit_btn.clicked.connect(self._on_commit)
-        self.close_btn.clicked.connect(self.reject)
+        self.push_btn.clicked.connect(self._on_push)
 
-        btn_row = QHBoxLayout()
-        btn_row.addWidget(self.regen_btn)
-        btn_row.addStretch(1)
-        btn_row.addWidget(self.copy_btn)
-        btn_row.addWidget(self.commit_btn)
-        btn_row.addWidget(self.close_btn)
+        self.btn_row = QHBoxLayout()
+        self.btn_row.addWidget(self.regen_btn)
+        self.btn_row.addStretch(1)
+        self.btn_row.addWidget(self.copy_btn)
+        self.btn_row.addWidget(self.commit_btn)
+        self.btn_row.addWidget(self.push_btn)
 
         # ---- left pane: the commit message -------------------------------
         left = QWidget()
@@ -111,16 +141,64 @@ class PreviewDialog(QDialog):
         splitter.setStretchFactor(1, 4)
 
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addLayout(repo_row)
         layout.addWidget(self.status)
         layout.addWidget(splitter, 1)
         layout.addWidget(self.progress)
-        layout.addLayout(btn_row)
+        layout.addLayout(self.btn_row)
 
-        self._start()
+        self.refresh_repos()
+
+        if auto_start:
+            self._start()
+        else:
+            self.status.setText(
+                "Press Generate to create a commit message for the active repository."
+            )
+
+    # ---- repository selection ----------------------------------------------
+    def refresh_repos(self) -> None:
+        """Reload the repo list (call after repositories are added/removed)."""
+        self.repo_combo.blockSignals(True)
+        self.repo_combo.clear()
+        for entry in self.settings.ordered_repos():
+            self.repo_combo.addItem(entry.display(), entry.path)
+        idx = self.repo_combo.findData(self.settings.active_repo)
+        if idx >= 0:
+            self.repo_combo.setCurrentIndex(idx)
+        self.repo_combo.setToolTip(self.repo_combo.currentData() or "")
+        self.repo_combo.blockSignals(False)
+        self._set_busy(False)
+        if self.repo_combo.count() == 0:
+            self.status.setText("No repositories configured - add one in Repositories.")
+            self._set_busy(True)  # nothing to generate against
+
+    def _on_repo_changed(self, _index: int) -> None:
+        path = self.repo_combo.currentData()
+        if not path:
+            return
+        self.settings.active_repo = path
+        self.settings.mark_recent(path)
+        self.settings.save()
+        self.repo_combo.setToolTip(path)
+        # Results belong to the previous repo - clear them rather than mislead.
+        self.editor.clear()
+        self.file_list.clear()
+        self.diff_view.clear()
+        self._coverage = []
+        self.files_label.setText("Staged files")
+        self.progress.setText("")
+        self.regen_btn.setText("Generate")
+        self.status.setText("Press Generate to create a commit message for this repository.")
 
     # ---- generation --------------------------------------------------------
     def _start(self) -> None:
+        if self._before_generate is not None:
+            # Pick up any settings edited in sibling tabs but not yet saved.
+            self._before_generate()
         self._set_busy(True)
+        self.regen_btn.setText("Regenerate")
         self.progress.setText("Starting...")
         self.status.setText("")
         worker = GeneratorWorker(self.settings)
@@ -241,6 +319,66 @@ class PreviewDialog(QDialog):
         QGuiApplication.clipboard().setText(text)
         self.progress.setText("Copied to clipboard.")
 
+    def _on_push(self) -> None:
+        repo = self.settings.active_repo_entry()
+        if not repo:
+            QMessageBox.warning(self, "No repo", "No active repository is selected.")
+            return
+
+        branch = git_ops.current_branch(repo.path)
+        upstream = git_ops.get_upstream(repo.path)
+        ahead = git_ops.unpushed_count(repo.path)
+
+        if upstream:
+            target = f"its upstream '{upstream}'"
+            if ahead == 0:
+                QMessageBox.information(
+                    self,
+                    "Nothing to push",
+                    f"'{branch}' is already up to date with {upstream}.",
+                )
+                return
+            count = f"{ahead} commit(s)" if ahead is not None else "commits"
+        else:
+            target = "a new upstream branch on 'origin'"
+            count = "this branch"
+
+        confirm = QMessageBox.question(
+            self,
+            "Confirm push",
+            f"Push {count} from '{branch}' to {target}?\n\n"
+            f"Repository: {repo.path}\n\n"
+            "This publishes your commits to the remote.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
+
+        self.push_btn.setEnabled(False)
+        self.progress.setText(f"Pushing '{branch}'...")
+        worker = FunctionWorker(lambda p=repo.path: git_ops.push(p))
+        worker.finished.connect(self._on_push_done)
+        worker.error.connect(self._on_push_error)
+        self._push_worker = worker
+        self._push_thread = run_worker(worker)
+
+    def _on_push_done(self, result) -> None:
+        self.push_btn.setEnabled(True)
+        # git reports push progress on stderr even when successful.
+        detail = (result.stderr.strip() or result.stdout.strip() or "").strip()
+        if result.ok:
+            self.progress.setText("Pushed.")
+            QMessageBox.information(self, "Pushed", detail or "Push complete.")
+        else:
+            self.progress.setText("Push failed.")
+            QMessageBox.critical(self, "Push failed", detail or "git push failed.")
+
+    def _on_push_error(self, message: str) -> None:
+        self.push_btn.setEnabled(True)
+        self.progress.setText("Push failed.")
+        QMessageBox.critical(self, "Push failed", message)
+
     def _on_commit(self) -> None:
         message = self.editor.toPlainText().strip()
         if not message:
@@ -266,10 +404,32 @@ class PreviewDialog(QDialog):
             QMessageBox.information(
                 self, "Committed", result.stdout.strip() or "Commit created."
             )
-            self.accept()
+            self.committed.emit()
         else:
             QMessageBox.critical(
                 self,
                 "Commit failed",
                 result.stderr.strip() or result.stdout.strip() or "git commit failed.",
             )
+
+
+class PreviewDialog(QDialog):
+    """Standalone commit-message window (the tray's quick action)."""
+
+    def __init__(self, settings: Settings, parent=None) -> None:
+        super().__init__(parent)
+        repo = settings.active_repo_entry()
+        self.setWindowTitle(
+            f"Commit message - {repo.display() if repo else 'no repo'}"
+        )
+        self.setMinimumSize(1100, 560)
+
+        self.panel = CommitPanel(settings, auto_start=True, parent=self)
+        self.panel.committed.connect(self.accept)
+
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(self.reject)
+        self.panel.btn_row.addWidget(close_btn)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(self.panel)

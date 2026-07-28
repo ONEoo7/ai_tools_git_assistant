@@ -282,6 +282,92 @@ def list_tracked_files(repo: str | Path) -> list[str]:
     return [p for p in res.stdout.split("\0") if p]
 
 
+def list_tags(repo: str | Path) -> list[str]:
+    """All tags, newest version first (git's version-aware ordering)."""
+    res = _run(repo, ["tag", "--list", "--sort=-v:refname"])
+    if not res.ok:
+        return []
+    return [t.strip() for t in res.stdout.splitlines() if t.strip()]
+
+
+def list_tags_with_dates(repo: str | Path) -> list[tuple[str, str]]:
+    """Return ``(tag, creation date)`` pairs, newest version first.
+
+    ``creatordate`` is the tag's own date for annotated tags and the commit date
+    for lightweight ones, which is the date a user means by "when was it made".
+    """
+    res = _run(
+        repo,
+        [
+            "for-each-ref",
+            "--sort=-v:refname",
+            "--format=%(refname:short)%09%(creatordate:format:%Y-%m-%d %H:%M)",
+            "refs/tags",
+        ],
+    )
+    if not res.ok:
+        return []
+    pairs: list[tuple[str, str]] = []
+    for line in res.stdout.splitlines():
+        if not line.strip():
+            continue
+        name, _, date = line.partition("\t")
+        pairs.append((name.strip(), date.strip()))
+    return pairs
+
+
+def tag_exists(repo: str | Path, name: str) -> bool:
+    res = _run(repo, ["rev-parse", "--verify", "--quiet", f"refs/tags/{name}"])
+    return res.ok and bool(res.stdout.strip())
+
+
+def create_tag(repo: str | Path, name: str, message: str = "") -> GitResult:
+    """Create a tag at HEAD - annotated when a message is given, else lightweight."""
+    if message.strip():
+        return _run(repo, ["tag", "-a", name, "-F", "-"], stdin=message)
+    return _run(repo, ["tag", name])
+
+
+def delete_tag(repo: str | Path, name: str) -> GitResult:
+    """Delete a local tag (does not touch the remote)."""
+    return _run(repo, ["tag", "-d", name])
+
+
+def push_tag(repo: str | Path, name: str, remote: str = "origin") -> GitResult:
+    """Publish a single tag to ``remote``."""
+    return _run(repo, ["push", remote, f"refs/tags/{name}"])
+
+
+def get_upstream(repo: str | Path) -> str | None:
+    """Return the upstream ref for the current branch (e.g. ``origin/main``)."""
+    res = _run(repo, ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"])
+    return res.stdout.strip() if res.ok and res.stdout.strip() else None
+
+
+def unpushed_count(repo: str | Path) -> int | None:
+    """Commits on the current branch not yet on its upstream (None if no upstream)."""
+    if get_upstream(repo) is None:
+        return None
+    res = _run(repo, ["rev-list", "--count", "@{u}..HEAD"])
+    if not res.ok:
+        return None
+    try:
+        return int(res.stdout.strip())
+    except ValueError:
+        return None
+
+
+def push(repo: str | Path, remote: str = "origin") -> GitResult:
+    """Push the current branch, setting upstream on first push.
+
+    Never force-pushes; a rejected non-fast-forward is reported to the caller.
+    """
+    if get_upstream(repo) is not None:
+        return _run(repo, ["push"])
+    branch = current_branch(repo)
+    return _run(repo, ["push", "--set-upstream", remote, branch])
+
+
 def commit(repo: str | Path, message: str) -> GitResult:
     """Create a commit with the given (multi-line) message.
 

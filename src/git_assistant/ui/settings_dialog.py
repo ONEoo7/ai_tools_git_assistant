@@ -4,12 +4,11 @@ from __future__ import annotations
 
 import os
 
-from PyQt6.QtCore import Qt, QUrl
+from PyQt6.QtCore import Qt, QTimer, QUrl
 from PyQt6.QtGui import QDesktopServices
 from PyQt6.QtWidgets import (
     QComboBox,
     QDialog,
-    QDialogButtonBox,
     QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
@@ -27,13 +26,18 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from git_assistant import git_ops
+from git_assistant import __version__, git_ops
 from git_assistant.commit_generator import MIN_PARALLEL_CONTEXT
 from git_assistant.config import RepoEntry, Settings, config_path
 from git_assistant.lmstudio_client import LMStudioClient, ModelInfo
 from git_assistant.prompts import DEFAULT_TEMPLATE
+from git_assistant.ui.preview_dialog import CommitPanel
+from git_assistant.ui.tags_panel import TagsPanel
 from git_assistant.tokenizer import input_budget, reserved_output
 from git_assistant.ui.workers import FunctionWorker, run_worker
+
+# Shown in place of the online version until an update check reports one.
+UNKNOWN_VERSION = "?"
 
 
 class SettingsDialog(QDialog):
@@ -45,35 +49,107 @@ class SettingsDialog(QDialog):
         self._scan_thread = None
         self._scan_worker = None
         self._model_contexts: dict[str, int] = {}  # model id -> detected ctx
-        self.setWindowTitle("Git Assistant - Settings")
-        self.setMinimumWidth(560)
+        self.setWindowTitle("Git Assistant")
+        self.setMinimumSize(1100, 620)  # the commit tab needs side-by-side room
 
         tabs = QTabWidget()
+        self.tabs = tabs
+        self._ready = False  # set once every tab's widgets exist
+        tabs.currentChanged.connect(self._on_tab_changed)
+        tabs.addTab(self._build_commit_tab(), "Generate commit message")
+        tabs.addTab(self._build_tags_tab(), "Tags")
         tabs.addTab(self._build_connection_tab(), "Connection && Model")
         tabs.addTab(self._build_repos_tab(), "Repositories")
         tabs.addTab(self._build_template_tab(), "Template")
         tabs.addTab(self._build_advanced_tab(), "Advanced")
 
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Save
-            | QDialogButtonBox.StandardButton.Cancel
-        )
-        buttons.accepted.connect(self._on_save)
-        buttons.rejected.connect(self.reject)
-        # Left-aligned utility button, available from any tab.
-        open_cfg_btn = buttons.addButton(
-            "Open config folder", QDialogButtonBox.ButtonRole.ActionRole
-        )
+        # No Save/Cancel: edits are written to disk automatically (debounced).
+        open_cfg_btn = QPushButton("Open config folder")
         open_cfg_btn.setToolTip(str(config_path()))
         open_cfg_btn.clicked.connect(self._on_open_config)
 
+        self.saved_hint = QLabel("Changes are saved automatically")
+        self.saved_hint.setStyleSheet("color: #888;")
+
+        # Bottom-left version indicator: "<installed> -> <available>".
+        # Placeholders for now; wire set_online_version() to the updater later.
+        self.version_current = QLabel(f"v{__version__}")
+        self.version_current.setToolTip("Installed version")
+        self.version_arrow = QLabel("->")
+        self.version_online = QLabel(UNKNOWN_VERSION)
+        self.version_online.setToolTip("Latest available version")
+        for lbl in (self.version_current, self.version_arrow, self.version_online):
+            lbl.setStyleSheet("color: #888;")
+
+        bottom = QHBoxLayout()
+        bottom.addWidget(self.version_current)
+        bottom.addWidget(self.version_arrow)
+        bottom.addWidget(self.version_online)
+        bottom.addStretch(1)
+        bottom.addWidget(self.saved_hint)
+        bottom.addWidget(open_cfg_btn)
+
         layout = QVBoxLayout(self)
         layout.addWidget(tabs)
-        layout.addWidget(buttons)
+        layout.addLayout(bottom)
+
+        self._save_timer = QTimer(self)
+        self._save_timer.setSingleShot(True)
+        self._save_timer.setInterval(400)
+        self._save_timer.timeout.connect(self._autosave)
 
         self._load_into_widgets()
+        self._ready = True
+        self._connect_autosave()
+
+    def closeEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        # Write any debounced edit that has not landed yet.
+        if self._save_timer.isActive():
+            self._save_timer.stop()
+            self._autosave()
+        super().closeEvent(event)
+
+    def _on_tab_changed(self, index: int) -> None:
+        # Fires while tabs are still being added, before later tabs' widgets
+        # exist - ignore until construction has finished.
+        if not self._ready or index > 1:
+            return
+        # Returning to a repo-driven tab: pick up repos added in other tabs.
+        repos, roots, _watched = self._collect_repos_and_roots()
+        self.settings.repos = repos
+        self.settings.scan_roots = roots
+        if index == 0:
+            self.commit_panel.refresh_repos()
+        else:
+            self.tags_panel.refresh()
+
+    def set_online_version(self, version: str | None) -> None:
+        """Show the latest available version (hook for the updater).
+
+        Pass None when the check failed or has not run yet.
+        """
+        self.version_online.setText(version or UNKNOWN_VERSION)
+        newer = bool(version) and version != __version__
+        # Highlight only when an actual update is available.
+        self.version_online.setStyleSheet(
+            "color: #4caf50; font-weight: bold;" if newer else "color: #888;"
+        )
 
     # ---- tabs --------------------------------------------------------------
+    def _build_commit_tab(self) -> QWidget:
+        # Does not auto-generate: opening the window should cost nothing.
+        # Settings edited in other tabs are applied just before a run.
+        self.commit_panel = CommitPanel(
+            self.settings,
+            auto_start=False,
+            before_generate=self._apply_to_settings,
+        )
+        return self.commit_panel
+
+    def _build_tags_tab(self) -> QWidget:
+        self.tags_panel = TagsPanel(self.settings)
+        return self.tags_panel
+
     def _build_connection_tab(self) -> QWidget:
         w = QWidget()
         form = QFormLayout(w)
@@ -252,7 +328,32 @@ class SettingsDialog(QDialog):
         self.ignore_edit.setPlainText("\n".join(s.ignore_globs))
         self._update_budget_label()
 
-    def _on_save(self) -> None:
+    # ---- autosave ----------------------------------------------------------
+    def _connect_autosave(self) -> None:
+        """Persist edits automatically; no Save button to press."""
+        self.ip_edit.textChanged.connect(self._schedule_save)
+        self.port_spin.valueChanged.connect(self._schedule_save)
+        self.parallel_spin.valueChanged.connect(self._schedule_save)
+        self.model_combo.currentIndexChanged.connect(self._schedule_save)
+        self.diff_mode_combo.currentIndexChanged.connect(self._schedule_save)
+        self.ctx_size_spin.valueChanged.connect(self._schedule_save)
+        self.margin_spin.valueChanged.connect(self._schedule_save)
+        self.ignore_edit.textChanged.connect(self._schedule_save)
+        self.template_edit.textChanged.connect(self._schedule_save)
+        # Repo tree: checkbox toggles plus add/remove/scan (which call directly).
+        self.repo_tree.itemChanged.connect(self._schedule_save)
+
+    def _schedule_save(self, *_args) -> None:
+        # Debounced so typing does not rewrite the file on every keystroke.
+        if self._ready:
+            self._save_timer.start()
+
+    def _autosave(self) -> None:
+        self._apply_to_settings()
+        self.settings.save()
+
+    def _apply_to_settings(self) -> None:
+        """Copy every widget's value into ``self.settings`` (without saving)."""
         s = self.settings
         s.lmstudio_ip = self.ip_edit.text().strip() or "127.0.0.1"
         s.lmstudio_port = self.port_spin.value()
@@ -269,24 +370,10 @@ class SettingsDialog(QDialog):
         s.prompt_template = self.template_edit.toPlainText() or DEFAULT_TEMPLATE
         s.diff_mode = self.diff_mode_combo.currentData()
 
-        size = self.ctx_size_spin.value()
-        detected = self._model_contexts.get(s.selected_model)
-        if size > 0 and detected and size > detected:
-            choice = QMessageBox.warning(
-                self,
-                "Context window exceeds model",
-                f"The context window size ({size:,}) is larger than the "
-                f"maximum the model reports ({detected:,}).\n\n"
-                "Prompts bigger than the real context get silently truncated by "
-                "LM Studio, which loses part of your diff.\n\n"
-                f"Clamp the window to {detected:,}?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.Yes,
-            )
-            if choice == QMessageBox.StandardButton.Yes:
-                size = detected
-                self.ctx_size_spin.setValue(detected)
-        s.context_window = size
+        # Stored as typed. A value above the model's real maximum is flagged in
+        # the budget label and clamped at generation time - a modal warning here
+        # would fire mid-keystroke now that saving is automatic.
+        s.context_window = self.ctx_size_spin.value()
 
         s.safety_margin = self.margin_spin.value()
         s.ignore_globs = [
@@ -294,8 +381,6 @@ class SettingsDialog(QDialog):
             for line in self.ignore_edit.toPlainText().splitlines()
             if line.strip()
         ]
-        s.save()
-        self.accept()
 
     # ---- repo tree helpers -------------------------------------------------
     @staticmethod
@@ -314,7 +399,8 @@ class SettingsDialog(QDialog):
         return item.data(0, Qt.ItemDataRole.UserRole)[1]
 
     def _make_repo_item(self, entry: RepoEntry) -> QTreeWidgetItem:
-        it = QTreeWidgetItem([f"{entry.display()}  -  {entry.path}"])
+        # The parent header shows the directory, so the row needs only the name.
+        it = QTreeWidgetItem([entry.display()])
         it.setData(0, Qt.ItemDataRole.UserRole, entry)
         it.setToolTip(0, entry.path)
         return it
@@ -394,6 +480,20 @@ class SettingsDialog(QDialog):
             self.repo_tree.addTopLevelItem(header)
         return header
 
+    def _current_roots(self) -> list[str]:
+        return [
+            self._header_path(self.repo_tree.topLevelItem(i))
+            for i in range(self.repo_tree.topLevelItemCount())
+            if self._item_kind(self.repo_tree.topLevelItem(i)) == "root"
+        ]
+
+    def _header_for_repo_path(self, path: str) -> QTreeWidgetItem:
+        """Folder header a repo belongs under, creating it when needed."""
+        root = self._root_for(path, self._current_roots())
+        if root is None:
+            root = os.path.dirname(path.rstrip("\\/"))
+        return self._ensure_root_header(root) if root else self._ensure_other_header()
+
     def _ensure_other_header(self) -> QTreeWidgetItem:
         existing = self._find_header("other")
         if existing is not None:
@@ -403,6 +503,8 @@ class SettingsDialog(QDialog):
         return header
 
     def _refresh_counts(self) -> None:
+        # Runs after every repo add/remove/scan, so persist those edits too.
+        self._schedule_save()
         for i in range(self.repo_tree.topLevelItemCount()):
             top = self.repo_tree.topLevelItem(i)
             kind = self._item_kind(top)
@@ -456,15 +558,39 @@ class SettingsDialog(QDialog):
 
     def _populate_repo_tree(self, repos: list[RepoEntry], roots: list[str]) -> None:
         self.repo_tree.clear()
-        grouped: dict[str, list[RepoEntry]] = {r: [] for r in roots}
+        # Keyed by normalized path so "D:/x" and "D:\x" are one group, not two.
+        grouped: dict[str, list[RepoEntry]] = {self._norm(r): [] for r in roots}
+        display: dict[str, str] = {self._norm(r): r for r in roots}
         ungrouped: list[RepoEntry] = []
+        inferred: list[str] = []
         for entry in repos:
             r = self._root_for(entry.path, roots)
-            (grouped[r] if r is not None else ungrouped).append(entry)
-        for r in roots:
-            header = self._new_root_header(r, len(grouped[r]), self._is_watched(r))
+            if r is None:
+                # No explicit scan root covers this repo (e.g. added before scan
+                # roots were recorded): group it under its containing directory.
+                r = os.path.dirname(entry.path.rstrip("\\/"))
+                if not r:
+                    ungrouped.append(entry)
+                    continue
+                r = os.path.normpath(r)
+            key = self._norm(r)
+            if key not in grouped:
+                grouped[key] = []
+                display[key] = r
+                inferred.append(key)
+            grouped[key].append(entry)
+
+        seen: set[str] = set()
+        for key in [*(self._norm(x) for x in roots), *sorted(inferred)]:
+            if key in seen:
+                continue  # roots that normalize to the same folder
+            seen.add(key)
+            path = display[key]
+            header = self._new_root_header(
+                path, len(grouped[key]), self._is_watched(path)
+            )
             self.repo_tree.addTopLevelItem(header)
-            for entry in grouped[r]:
+            for entry in grouped[key]:
                 header.addChild(self._make_repo_item(entry))
             header.setExpanded(True)
         if ungrouped:
@@ -513,7 +639,7 @@ class SettingsDialog(QDialog):
         if self._norm(path) in self._repo_items_by_path():
             return  # already present
         owner = git_ops.repo_owner(path) or ""
-        parent = self._ensure_other_header()
+        parent = self._header_for_repo_path(path)
         parent.addChild(self._make_repo_item(RepoEntry(path=path, owner=owner)))
         parent.setExpanded(True)
         self._refresh_counts()
@@ -551,16 +677,31 @@ class SettingsDialog(QDialog):
         self._prune_empty_other()
         self._refresh_counts()
 
-    def _selected_root_folder(self) -> str | None:
-        for it in self.repo_tree.selectedItems():
-            kind = self._item_kind(it)
-            if kind == "root":
-                return self._header_path(it)
-            if kind == "repo":
-                parent = it.parent()
-                if parent is not None and self._item_kind(parent) == "root":
-                    return self._header_path(parent)
+    def _folder_of(self, item: QTreeWidgetItem | None) -> str | None:
+        """Folder a tree item belongs to (the item itself if it is a header)."""
+        if item is None:
+            return None
+        kind = self._item_kind(item)
+        if kind == "root":
+            return self._header_path(item)
+        if kind == "repo":
+            parent = item.parent()
+            if parent is not None and self._item_kind(parent) == "root":
+                return self._header_path(parent)
         return None
+
+    def _selected_root_folder(self) -> str | None:
+        """Folder to rescan: the selected row, else the focused row, else the
+        only folder there is (nothing to disambiguate in that case)."""
+        for it in self.repo_tree.selectedItems():
+            folder = self._folder_of(it)
+            if folder:
+                return folder
+        folder = self._folder_of(self.repo_tree.currentItem())
+        if folder:
+            return folder
+        roots = self._current_roots()
+        return roots[0] if len(roots) == 1 else None
 
     def _on_scan_folder(self) -> None:
         folder = QFileDialog.getExistingDirectory(
@@ -575,7 +716,9 @@ class SettingsDialog(QDialog):
             QMessageBox.information(
                 self,
                 "Select a folder",
-                "Select a scanned folder (or a repo inside one) to rescan.",
+                "Click a folder row (or a repo inside it) to choose what to "
+                "rescan.\n\nNote: the tick box controls auto-watching, not "
+                "selection.",
             )
             return
         self._start_scan(folder)

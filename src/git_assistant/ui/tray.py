@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import os
 
-from PyQt6.QtGui import QAction, QActionGroup
 from PyQt6.QtWidgets import (
     QApplication,
     QMenu,
@@ -22,10 +21,6 @@ from git_assistant.ui.update_prompt import UpdateCheckWorker, ask_to_install
 from git_assistant.ui.workers import FunctionWorker, run_worker
 from git_assistant.updating import UpdateConfig
 
-# How many recent repos to show inline in the tray before the "More..." submenu.
-RECENT_COUNT = 3
-
-
 def _norm(path: str) -> str:
     return os.path.normcase(os.path.normpath(path))
 
@@ -34,6 +29,7 @@ class TrayApp:
     def __init__(self, app: QApplication) -> None:
         self.app = app
         self.settings = Settings.load()
+        self._main_window = None  # set while the main window is open
 
         self.icon = app_icon()
         self.tray = QSystemTrayIcon(self.icon)
@@ -71,39 +67,8 @@ class TrayApp:
     def _rebuild_menu(self) -> None:
         self.menu.clear()
 
-        # Active-repo radio list: the most-recent few inline, the rest in a
-        # scrollable submenu.
-        repo_header = self.menu.addAction("Active repository")
-        repo_header.setEnabled(False)
-        ordered = self.settings.ordered_repos()
-        if ordered:
-            group = QActionGroup(self.menu)
-            group.setExclusive(True)
-            active = self.settings.active_repo or ordered[0].path
-
-            def add_repo_action(repo, parent_menu):
-                act = QAction(repo.display(), parent_menu, checkable=True)
-                act.setToolTip(repo.path)
-                act.setChecked(repo.path == active)
-                act.triggered.connect(
-                    lambda _checked, p=repo.path: self._set_active_repo(p)
-                )
-                group.addAction(act)
-                parent_menu.addAction(act)
-
-            for repo in ordered[:RECENT_COUNT]:
-                add_repo_action(repo, self.menu)
-
-            rest = ordered[RECENT_COUNT:]
-            if rest:
-                submenu = self.menu.addMenu(f"More repositories ({len(rest)})...")
-                for repo in rest:
-                    add_repo_action(repo, submenu)
-        else:
-            none_act = self.menu.addAction("  (add one in Settings)")
-            none_act.setEnabled(False)
-
-        self.menu.addSeparator()
+        # The active repository is chosen in the Generate tab's selector, so the
+        # tray menu stays a short list of actions.
         gen = self.menu.addAction("Generate commit message")
         gen.triggered.connect(self._on_generate)
         metrics_act = self.menu.addAction("Metrics...")
@@ -119,21 +84,15 @@ class TrayApp:
         quit_act = self.menu.addAction("Quit")
         quit_act.triggered.connect(self.app.quit)
 
-    def _set_active_repo(self, path: str) -> None:
-        self.settings.active_repo = path
-        self.settings.mark_recent(path)
-        self.settings.save()
-        # Rebuild so the just-picked repo moves into the recent (inline) list.
-        self._rebuild_menu()
-
     # ---- actions -----------------------------------------------------------
     def _on_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
-        # Left-click / double-click triggers generation for convenience.
+        # Left-click / double-click opens the main window. Right-click still
+        # gets the context menu (Qt shows it automatically).
         if reason in (
             QSystemTrayIcon.ActivationReason.Trigger,
             QSystemTrayIcon.ActivationReason.DoubleClick,
         ):
-            self._on_generate()
+            self._on_settings()
 
     def _on_generate(self) -> None:
         if not self.settings.repos:
@@ -159,15 +118,27 @@ class TrayApp:
         MetricsDialog(self.settings).exec()
 
     def _on_settings(self) -> None:
+        # exec() runs a nested event loop, so further tray clicks still arrive.
+        # Raise the existing window instead of opening a second one.
+        existing = getattr(self, "_main_window", None)
+        if existing is not None:
+            existing.raise_()
+            existing.activateWindow()
+            return
+
         # Pause watching while the dialog is open so it can't mutate settings.repos
         # underneath the dialog's own edits.
         self.watcher.set_roots([])
         dialog = SettingsDialog(self.settings)
-        saved = dialog.exec()
-        if saved:
-            # Settings saved -> settings object mutated in place; refresh menu.
-            self.settings = Settings.load()
-            self._rebuild_menu()
+        self._main_window = dialog
+        try:
+            dialog.exec()
+        finally:
+            self._main_window = None
+        # The window autosaves, so always reload rather than relying on a
+        # Save button's result code.
+        self.settings = Settings.load()
+        self._rebuild_menu()
         self._refresh_watcher()
         # If safe.directory was just fixed here, previously-blocked owners can
         # now be resolved.
