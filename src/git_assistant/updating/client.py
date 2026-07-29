@@ -110,12 +110,30 @@ def _clean_url(value: object) -> str:
     return url if url.startswith(("https://", "http://")) else ""
 
 
+#: How often to check, when nothing says otherwise. Four hours: releases are
+#: minutes-to-days apart, so anything faster mostly re-fetches metadata that
+#: has not changed.
+DEFAULT_CHECK_MINUTES = 240
+
+#: The fastest an installation may be configured to check.
+#:
+#: A floor rather than a fixed value, because "check every ten seconds" is a
+#: reasonable thing to want while testing a deployment and an unreasonable
+#: thing to leave switched on: every check is a full metadata walk — the root
+#: chain, timestamp, snapshot, the delegated role, then the pointer — so ten
+#: seconds is roughly 8,600 of them per machine per day, nearly all of which
+#: find nothing. One minute is fast enough to watch a release land and slow
+#: enough not to matter.
+MIN_CHECK_MINUTES = 1
+
+
 @dataclass(frozen=True, slots=True)
 class UserUpdateConfig:
     """What `update.json` said, and whether it could be read at all."""
 
     url: str = ""
     channel: str = ""
+    check_minutes: int = 0
     problem: str = ""
 
 
@@ -154,7 +172,24 @@ def user_update_config() -> UserUpdateConfig:
     return UserUpdateConfig(
         url=url,
         channel=channel.strip() if isinstance(channel, str) else "",
+        check_minutes=_clean_interval(data.get("check_interval_minutes")),
     )
+
+
+def _clean_interval(value: object) -> int:
+    """Minutes between checks, clamped, or `0` for "unset".
+
+    Clamped rather than rejected. A too-small number is a preference someone
+    expressed, not a mistake, and refusing the whole file over it would turn
+    "I wanted faster checks" into "updating is now off". `True` is excluded
+    explicitly because `isinstance(True, int)` is true in Python and a JSON
+    `true` here means nothing.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return 0
+    if value <= 0:
+        return 0
+    return max(MIN_CHECK_MINUTES, int(value))
 
 
 #: An override that overrides nothing, so creating it is safe.
@@ -169,10 +204,12 @@ _TEMPLATE = {
         "Set 'url' to change where this installation looks for updates, for "
         "example if the usual service is down. Leave it empty to use the "
         "address this build was published with. The repository root, not its "
-        "metadata directory."
+        "metadata directory. 'check_interval_minutes' is how often to look; "
+        f"the minimum is {MIN_CHECK_MINUTES}."
     ),
     "url": "",
     "channel": DEFAULT_CHANNEL,
+    "check_interval_minutes": DEFAULT_CHECK_MINUTES,
 }
 
 
@@ -217,6 +254,8 @@ class UpdateConfig:
     #: than raised: a JSON typo must not stop the application starting, and
     #: must not look like "no override" either.
     problem: str = ""
+    #: Minutes between automatic checks.
+    check_minutes: int = DEFAULT_CHECK_MINUTES
 
     @property
     def enabled(self) -> bool:
@@ -283,11 +322,14 @@ class UpdateConfig:
         if user.problem:
             return cls(problem=user.problem)
 
+        interval = user.check_minutes or DEFAULT_CHECK_MINUTES
+
         if user.url:
             return cls(
                 base_url=user.url.rstrip("/"),
                 channel=user.channel or DEFAULT_CHANNEL,
                 origin=str(update_config_path()),
+                check_minutes=interval,
             )
 
         packaged = packaged_update_url()
@@ -295,6 +337,7 @@ class UpdateConfig:
             base_url=packaged.rstrip("/"),
             channel=user.channel or DEFAULT_CHANNEL,
             origin="the address this build was published with" if packaged else "",
+            check_minutes=interval,
         )
 
 
@@ -522,3 +565,115 @@ def download_update(config: UpdateConfig, result: UpdateResult, destination: Pat
     tmp.write_bytes(body)
     tmp.replace(destination)
     return destination
+
+
+# ------------------------------------------------------------- installing
+
+
+def staged_path(result: UpdateResult) -> Path:
+    """Where a downloaded release waits to be installed.
+
+    Under the per-user config directory rather than `%TEMP%`. Both are
+    per-user, but the installer is executed from here, and a directory whose
+    contents are routinely written by other software is a poor place to keep
+    something about to be run.
+    """
+    name = result.target_path.rsplit("/", 1)[-1]
+    return Path(user_config_dir(APP_NAME, appauthor=False)) / "updates" / name
+
+
+def install_update(config: UpdateConfig, result: UpdateResult) -> Path:
+    """Download the release, verify it, and start the installer.
+
+    Returns the path that was launched. The caller is expected to quit shortly
+    afterwards: the installer stops the running application itself, but exiting
+    cleanly is what gets settings written.
+
+    Raises:
+        UpdateUnavailableError: if the published release is not something this
+            can install.
+        Exception: from `dist_client` if the bytes are not what was signed.
+    """
+    staged = staged_path(result)
+    if staged.suffix.lower() != ".exe":
+        # The channel is publishing the portable zip. Installing that means
+        # replacing a running directory in place, which this does not do --
+        # and executing whatever it happens to contain would be far worse than
+        # refusing.
+        raise UpdateUnavailableError(
+            f"the published release is {staged.name!r}, which this build cannot install; "
+            "the update service must publish the installer"
+        )
+
+    _clear_old_downloads(staged)
+    download_update(config, result, staged)
+    _verify_staged(result, staged)
+    _launch_installer(staged)
+    return staged
+
+
+def _clear_old_downloads(keep: Path) -> None:
+    """Delete previously staged installers.
+
+    Each one is tens of megabytes and nothing else ever removes them, so
+    without this every update a machine ever takes stays on disk for good. Done
+    before the download rather than after the install, because after the
+    install this process no longer exists to do it.
+
+    Failures are ignored: not reclaiming disk space must never be the reason an
+    update does not happen.
+    """
+    if not keep.parent.is_dir():
+        return
+    for old in keep.parent.iterdir():
+        if old == keep or not old.is_file():
+            continue
+        try:
+            old.unlink()
+        except OSError:
+            pass
+
+
+def _verify_staged(result: UpdateResult, path: Path) -> None:
+    """Check the bytes on disk immediately before executing them.
+
+    `download_update` already verified what it received. This verifies what is
+    about to run, which is not the same claim: between the two there is a file
+    sitting on disk, and re-reading it is what closes the window in which it
+    could be replaced.
+    """
+    from dist_client import TargetInfo, verify_payload
+
+    verify_payload(
+        TargetInfo(
+            version=result.version,
+            length=result.length,
+            sha256=bytes.fromhex(result.sha256_hex),
+            rollout_pct=100,
+            mandatory=result.mandatory,
+        ),
+        path.read_bytes(),
+    )
+
+
+def _launch_installer(path: Path) -> None:
+    """Start the installer detached and return.
+
+    `/S` is NSIS's silent switch. The installer stops the running application,
+    replaces the files and starts it again; none of that can happen while this
+    process is waiting on it, so it must not be a child that dies with us.
+    """
+    import subprocess
+
+    flags = 0
+    if sys.platform == "win32":
+        # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP: survives this process
+        # exiting, and does not receive the Ctrl+C this one would.
+        flags = 0x00000008 | 0x00000200
+
+    subprocess.Popen(  # noqa: S603 - a path we constructed, holding bytes just verified
+        [str(path), "/S"],
+        creationflags=flags,
+        close_fds=True,
+        cwd=str(path.parent),
+    )

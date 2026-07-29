@@ -15,6 +15,7 @@ from git_assistant.updating.client import (
     check_for_update,
     download_update,
     install_id,
+    install_update,
     verifier_available,
 )
 
@@ -24,5 +25,6 @@ __all__ = [
     "check_for_update",
     "download_update",
     "install_id",
+    "install_update",
     "verifier_available",
 ]

@@ -27,6 +27,11 @@ a = Analysis(
         # TUF trust root: the updater refuses to run without it.
         (str(ROOT / "src" / "git_assistant" / "updating" / "root.json"),
          "git_assistant/updating"),
+        # Where this build looks for updates. Bundled here as well as by the
+        # onedir spec and the release workflow: three build paths that have to
+        # agree about what ships, and did not.
+        (str(ROOT / "src" / "git_assistant" / "updating" / "update_url.txt"),
+         "git_assistant/updating"),
         *_extra_datas,
     ],
     hiddenimports=["tiktoken_ext", "tiktoken_ext.openai_public", *_extra_hidden],

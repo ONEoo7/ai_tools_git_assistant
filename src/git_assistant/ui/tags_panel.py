@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
+from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
-    QComboBox,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -11,6 +11,7 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QRadioButton,
+    QSplitter,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -19,6 +20,8 @@ from PyQt6.QtWidgets import (
 
 from git_assistant import git_ops, versioning
 from git_assistant.config import Settings
+from git_assistant.ui.preview_dialog import SECTION_GAP
+from git_assistant.ui.repo_picker import RepoPicker
 from git_assistant.ui.workers import FunctionWorker, run_worker
 
 CUSTOM = "custom"
@@ -34,16 +37,13 @@ class TagsPanel(QWidget):
         self._worker = None
         self._current = None  # versioning.Version | None
 
-        layout = QVBoxLayout(self)
+        # The same picker the Generate tab uses, so both tabs behave identically.
+        self.repo_picker = RepoPicker(settings)
+        self.repo_picker.repoChanged.connect(self._on_repo_changed)
 
-        # ---- repository ---------------------------------------------------
-        self.repo_combo = QComboBox()
-        self.repo_combo.setMinimumWidth(320)
-        self.repo_combo.currentIndexChanged.connect(self._on_repo_changed)
-        repo_row = QHBoxLayout()
-        repo_row.addWidget(QLabel("Repository:"))
-        repo_row.addWidget(self.repo_combo, 1)
-        layout.addLayout(repo_row)
+        content = QWidget()
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(SECTION_GAP, 0, 0, 0)
 
         self.current_label = QLabel("Current version: -")
         font = self.current_label.font()
@@ -120,22 +120,34 @@ class TagsPanel(QWidget):
         self.tag_list.itemClicked.connect(self._on_tag_clicked)
         layout.addWidget(self.tag_list, 1)
 
+        # Repository on the left, tag actions on the right - the same shape as
+        # the Generate Commit Message tab.
+        picker_pane = QWidget()
+        picker_box = QVBoxLayout(picker_pane)
+        picker_box.setContentsMargins(0, 0, SECTION_GAP, 0)
+        picker_box.addWidget(self.repo_picker, 1)
+
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter.addWidget(picker_pane)
+        splitter.addWidget(content)
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 3)
+        splitter.setSizes([220, 700])
+
+        # Default margins, exactly as the Generate Commit Message tab uses, so
+        # every tab keeps the same gap between its border and its content.
+        outer = QVBoxLayout(self)
+        outer.addWidget(splitter)
+
         self.refresh()
 
     # ---- state -------------------------------------------------------------
     def _repo_path(self) -> str:
-        return self.repo_combo.currentData() or ""
+        return self.repo_picker.current_path()
 
     def refresh(self) -> None:
         """Reload repositories, tags and the proposed version."""
-        self.repo_combo.blockSignals(True)
-        self.repo_combo.clear()
-        for entry in self.settings.ordered_repos():
-            self.repo_combo.addItem(entry.display(), entry.path)
-        idx = self.repo_combo.findData(self.settings.active_repo)
-        if idx >= 0:
-            self.repo_combo.setCurrentIndex(idx)
-        self.repo_combo.blockSignals(False)
+        self.repo_picker.refresh()
         self._reload_tags()
 
     def _reload_tags(self) -> None:
@@ -187,13 +199,10 @@ class TagsPanel(QWidget):
         self.radios[CUSTOM].setChecked(True)
         self.tag_edit.setText(item.text(0))
 
-    def _on_repo_changed(self, _index: int) -> None:
-        path = self._repo_path()
+    def _on_repo_changed(self, path: str = "") -> None:
+        """React to the picker's selection (it already updated the settings)."""
         if not path:
             return
-        self.settings.active_repo = path
-        self.settings.mark_recent(path)
-        self.settings.save()
         self.status.setText("")
         self._reload_tags()
 

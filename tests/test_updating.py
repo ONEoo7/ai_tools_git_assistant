@@ -342,3 +342,188 @@ def test_an_unknown_key_is_ignored_not_rejected(no_user_config: Path) -> None:
     config = client.UpdateConfig.load()
     assert config.base_url == "https://updates.example"
     assert not config.problem
+
+
+# --------------------------------------------------- how often it checks
+
+
+@pytest.mark.parametrize(
+    "written, expected",
+    [
+        (None, client.DEFAULT_CHECK_MINUTES),
+        (60, 60),
+        (0, client.DEFAULT_CHECK_MINUTES),
+        (-5, client.DEFAULT_CHECK_MINUTES),
+        # Clamped, not rejected. Wanting faster checks is a preference, and
+        # refusing the file over it would turn that into "updating is off".
+        (0.1, client.MIN_CHECK_MINUTES),
+        ("often", client.DEFAULT_CHECK_MINUTES),
+        (True, client.DEFAULT_CHECK_MINUTES),
+    ],
+)
+def test_the_check_interval_is_clamped_not_trusted(
+    no_user_config: Path, written: object, expected: int
+) -> None:
+    body: dict[str, object] = {"url": "https://updates.example"}
+    if written is not None:
+        body["check_interval_minutes"] = written
+    no_user_config.write_text(json.dumps(body), encoding="utf-8")
+
+    config = client.UpdateConfig.load()
+    assert config.check_minutes == expected
+    assert not config.problem
+
+
+def test_a_bad_interval_never_disables_updating(no_user_config: Path) -> None:
+    no_user_config.write_text(
+        json.dumps({"url": "https://updates.example", "check_interval_minutes": -1}),
+        encoding="utf-8",
+    )
+    assert client.UpdateConfig.load().base_url == "https://updates.example"
+
+
+def test_the_floor_is_low_enough_to_test_with() -> None:
+    # If the minimum were an hour, watching a release land would mean editing
+    # source. One minute is fast enough to observe and slow enough to leave on.
+    assert client.MIN_CHECK_MINUTES <= 1
+    assert client.DEFAULT_CHECK_MINUTES >= 60
+
+
+# ------------------------------------------------------------- installing
+
+
+def a_result(target: str, version: str = "0.4.0") -> client.UpdateResult:
+    return client.UpdateResult(
+        version=version,
+        target_path=target,
+        length=10,
+        sha256_hex="ab" * 32,
+        mandatory=False,
+    )
+
+
+def test_a_non_executable_release_is_refused_before_anything_runs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The check that stops a zip being executed.
+
+    The channel published the portable zip for several releases. Handing that
+    to the installer path would mean either replacing a running directory in
+    place -- which this does not do -- or executing whatever the archive
+    happened to contain.
+    """
+    called = []
+    monkeypatch.setattr(client, "download_update", lambda *a: called.append(a))
+    monkeypatch.setattr(client, "_launch_installer", lambda p: called.append(p))
+
+    result = a_result("git-assistant/stable/windows-amd64/0.4.0/app-0.4.0.zip")
+
+    with pytest.raises(client.UpdateUnavailableError, match="cannot install"):
+        client.install_update(client.UpdateConfig(base_url="https://x"), result)
+
+    assert called == [], "nothing may be downloaded or run for an unsupported artifact"
+
+
+def test_the_staged_name_comes_from_the_signed_target_path() -> None:
+    # Not from anything the server said in an unsigned response, and not from a
+    # Content-Disposition header.
+    result = a_result("git-assistant/stable/windows-amd64/0.4.0/setup-0.4.0.exe")
+    assert client.staged_path(result).name == "setup-0.4.0.exe"
+
+
+def test_the_staging_directory_is_the_per_user_config_dir() -> None:
+    # Not %TEMP%: an installer is executed from here, and a directory routinely
+    # written by other software is a poor place to keep something about to run.
+    staged = client.staged_path(a_result("a/b/c/setup.exe"))
+    assert staged.parent == client.update_config_path().parent / "updates"
+
+
+def test_the_bytes_are_verified_again_immediately_before_running(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Verifying only at download time leaves a window on disk.
+
+    `download_update` checks what arrived; this checks what is about to be
+    executed, and between the two the file simply sits there.
+    """
+    order: list[str] = []
+    staged = tmp_path / "setup.exe"
+
+    def fake_download(_config, _result, destination):
+        staged.write_bytes(b"payload")
+        order.append("download")
+        return destination
+
+    monkeypatch.setattr(client, "staged_path", lambda r: staged)
+    monkeypatch.setattr(client, "download_update", fake_download)
+    monkeypatch.setattr(client, "_verify_staged", lambda r, p: order.append("verify"))
+    monkeypatch.setattr(client, "_launch_installer", lambda p: order.append("launch"))
+
+    client.install_update(client.UpdateConfig(base_url="https://x"), a_result("a/setup.exe"))
+
+    assert order == ["download", "verify", "launch"]
+
+
+def test_previous_downloads_are_cleared_before_a_new_one(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Each staged installer is tens of megabytes and nothing else removes them."""
+    staged = tmp_path / "setup-0.4.0.exe"
+    stale = tmp_path / "setup-0.3.9.exe"
+    stale.write_bytes(b"an old release")
+
+    monkeypatch.setattr(client, "staged_path", lambda r: staged)
+    monkeypatch.setattr(
+        client, "download_update", lambda *a: staged.write_bytes(b"new") or staged
+    )
+    monkeypatch.setattr(client, "_verify_staged", lambda r, p: None)
+    monkeypatch.setattr(client, "_launch_installer", lambda p: None)
+
+    client.install_update(client.UpdateConfig(base_url="https://x"), a_result("a/setup.exe"))
+
+    assert not stale.exists()
+    assert staged.exists(), "the one about to be installed must survive the sweep"
+
+
+def test_an_unremovable_leftover_does_not_stop_the_update(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # Reclaiming disk space must never be the reason an update fails.
+    staged = tmp_path / "setup-0.4.0.exe"
+    (tmp_path / "locked.exe").write_bytes(b"x")
+    monkeypatch.setattr(client, "staged_path", lambda r: staged)
+
+    def boom(_self):
+        raise OSError("in use")
+
+    monkeypatch.setattr(Path, "unlink", boom)
+    monkeypatch.setattr(
+        client, "download_update", lambda *a: staged.write_bytes(b"new") or staged
+    )
+    monkeypatch.setattr(client, "_verify_staged", lambda r, p: None)
+    launched: list[Path] = []
+    monkeypatch.setattr(client, "_launch_installer", launched.append)
+
+    client.install_update(client.UpdateConfig(base_url="https://x"), a_result("a/setup.exe"))
+
+    assert launched == [staged]
+
+
+def test_every_build_path_bundles_the_updater_data_files() -> None:
+    """Three build paths must ship the same files, and did not.
+
+    The release workflow bundled `update_url.txt`; both PyInstaller specs
+    bundled only `root.json`. A locally built application therefore had an
+    updater with no address in it, which looks exactly like a broken updater
+    rather than an unconfigured one.
+    """
+    needed = [client.ROOT_FILENAME, client.UPDATE_URL_FILE]
+
+    for spec in ("git-assistant-onedir.spec", "git-assistant.spec"):
+        text = (REPO_ROOT / spec).read_text(encoding="utf-8")
+        for name in needed:
+            assert name in text, f"{spec} does not bundle {name}"
+
+    workflow = (REPO_ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+    for name in needed:
+        assert name in workflow, f"the release workflow does not bundle {name}"

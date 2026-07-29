@@ -34,6 +34,13 @@ a = Analysis(
         # TUF trust root: the updater refuses to run without it.
         (str(ROOT / "src" / "git_assistant" / "updating" / "root.json"),
          "git_assistant/updating"),
+        # The address this build looks for updates at. Committed, and bundled
+        # here as well as by the release workflow -- a local build that omits
+        # it has an updater with nowhere to look, which is indistinguishable
+        # from a broken one and was omitted here until it was noticed in an
+        # installed build that had no packaged URL at all.
+        (str(ROOT / "src" / "git_assistant" / "updating" / "update_url.txt"),
+         "git_assistant/updating"),
         *_extra_datas,
     ],
     hiddenimports=["tiktoken_ext", "tiktoken_ext.openai_public", *_extra_hidden],

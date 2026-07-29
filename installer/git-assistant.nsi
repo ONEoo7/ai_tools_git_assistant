@@ -137,6 +137,22 @@ $INSTDIR$\n$\nDowngrade to ${VERSION}?" \
   continue:
 FunctionEnd
 
+; A silent run is a self-update: the application downloaded this installer,
+; verified it against signed metadata, and launched it. Restart it afterwards.
+;
+; The finish page is where an interactive install offers that, and silent mode
+; has no pages - so without this the app would vanish mid-update and the user
+; would have to start it again from the Start menu, which reads as a crash.
+;
+; .onInstSuccess rather than the end of the section: it runs once, after every
+; section has succeeded, so a failed install never relaunches into a
+; half-replaced directory.
+Function .onInstSuccess
+  ${If} ${Silent}
+    Exec '"$INSTDIR\${EXE_NAME}"'
+  ${EndIf}
+FunctionEnd
+
 ; Nothing to choose when a copy already exists - it is replaced in place, and
 ; offering a different directory would strand the old install.
 Function SkipDirIfInstalled
@@ -146,10 +162,23 @@ Function SkipDirIfInstalled
 FunctionEnd
 
 ; File replacement fails while the app holds its own exe open, so stop it first.
+;
+; By install PATH, not by executable name. The two builds disagree about the
+; name -- a local build produces GitAssistant.exe and CI produces
+; git-assistant.exe -- so killing by name misses precisely the case self-update
+; runs into: a CI installer replacing a copy that a local build installed. The
+; taskkill would match nothing, the old process would keep _internal open, and
+; the upgrade would fail part-way through.
+;
+; Anything running out of $INSTDIR is ours, whatever it is called.
 !macro StopRunningApp
   DetailPrint "Closing ${APP_NAME} if it is running..."
+  nsExec::Exec `powershell -NoProfile -NonInteractive -Command "Get-Process | Where-Object { $$_.Path -like '$INSTDIR\*' } | Stop-Process -Force"`
+  Pop $0  ; ignored: nothing running from there is the ordinary case
+  ; Fallback for a machine where PowerShell will not run, and belt-and-braces
+  ; for the name this particular installer was built with.
   nsExec::Exec 'taskkill /IM "${EXE_NAME}" /F'
-  Pop $0  ; ignored: a non-zero code just means it was not running
+  Pop $0
   Sleep 500
 !macroend
 
@@ -169,6 +198,17 @@ Section "${APP_NAME} (required)" SEC_APP
   ; The onedir PyInstaller build, including its _internal support directory.
   ; "\*" rather than "\*.*": the latter can skip extensionless files.
   File /r "${SRC_DIR}\*"
+
+  ; Drop the other build's executable if a previous install left one. Without
+  ; this an upgrade across the two naming conventions leaves two executables
+  ; in the directory -- one of them stale -- and a Start menu shortcut that may
+  ; point at either.
+  !if "${EXE_NAME}" != "GitAssistant.exe"
+    Delete "$INSTDIR\GitAssistant.exe"
+  !endif
+  !if "${EXE_NAME}" != "git-assistant.exe"
+    Delete "$INSTDIR\git-assistant.exe"
+  !endif
 
   WriteRegStr HKCU "Software\GitAssistant" "InstallDir" "$INSTDIR"
   WriteUninstaller "$INSTDIR\Uninstall.exe"

@@ -32,6 +32,7 @@ from git_assistant import git_ops
 from git_assistant.commit_generator import FileCoverage, GenerationResult
 from git_assistant.config import DEFAULT_TEMPLATE_NAME, Settings
 from git_assistant.diff_strategy import filter_files, split_diff
+from git_assistant.ui.repo_picker import RepoPicker
 from git_assistant.ui.workers import FunctionWorker, GeneratorWorker, run_worker
 
 # Cap rendered lines per file so a huge diff can't freeze the view.
@@ -104,15 +105,8 @@ class CommitPanel(QWidget):
         self._push_worker = None
         self._coverage: list[FileCoverage] = []
 
-        # A filtered list rather than a dropdown: with dozens of repositories,
-        # scrolling a combo is the slow way to find one. Mirrors the Template tab.
-        self.repo_filter = QLineEdit()
-        self.repo_filter.setPlaceholderText("Filter repositories...")
-        self.repo_filter.setClearButtonEnabled(True)
-        self.repo_filter.textChanged.connect(self._apply_repo_filter)
-
-        self.repo_list = QListWidget()
-        self.repo_list.currentItemChanged.connect(self._on_repo_selected)
+        self.repo_picker = RepoPicker(settings)
+        self.repo_picker.repoChanged.connect(self._on_repo_selected)
 
         # Each project can use its own prompt template; picking one here is what
         # assigns it to the selected repository.
@@ -154,9 +148,7 @@ class CommitPanel(QWidget):
         repos_pane = QWidget()
         repos_box = QVBoxLayout(repos_pane)
         repos_box.setContentsMargins(0, 0, SECTION_GAP, 0)
-        repos_box.addWidget(QLabel("Repository"))
-        repos_box.addWidget(self.repo_filter)
-        repos_box.addWidget(self.repo_list, 1)
+        repos_box.addWidget(self.repo_picker, 1)
         repos_box.addSpacing(SECTION_GAP)
         repos_box.addWidget(QLabel("Template:"))
         repos_box.addWidget(self.template_combo)
@@ -165,8 +157,9 @@ class CommitPanel(QWidget):
         left = QWidget()
         left_box = QVBoxLayout(left)
         # Keep the panes off the splitter handle; without this the labels and
-        # boxes sit flush against the divider.
-        left_box.setContentsMargins(0, 0, SECTION_GAP, 0)
+        # boxes sit flush against the divider. This pane has a handle on BOTH
+        # sides, so it needs the gap on both.
+        left_box.setContentsMargins(SECTION_GAP, 0, SECTION_GAP, 0)
         left_box.addWidget(QLabel("Commit message"))
         left_box.addWidget(self.editor)
 
@@ -214,8 +207,11 @@ class CommitPanel(QWidget):
         # Default margins, matching the other tabs. PreviewDialog zeroes its own
         # layout instead, so the standalone window keeps a single set of margins.
         layout = QVBoxLayout(self)
-        layout.addWidget(self.status)
+        # Status sits below the panes, not above them: keeping it at the top
+        # pushed the content down and made this tab's spacing differ from the
+        # others, which start their content at the tab margin.
         layout.addWidget(splitter, 1)
+        layout.addWidget(self.status)
         layout.addWidget(self.progress)
         layout.addLayout(self.btn_row)
 
@@ -227,23 +223,11 @@ class CommitPanel(QWidget):
     # ---- repository selection ----------------------------------------------
     def refresh_repos(self) -> None:
         """Reload the repo list (call after repositories are added/removed)."""
-        self.repo_list.blockSignals(True)
-        self.repo_list.clear()
-        for entry in self.settings.ordered_repos():
-            item = QListWidgetItem(entry.display())
-            item.setData(Qt.ItemDataRole.UserRole, entry.path)
-            item.setToolTip(entry.path)
-            self.repo_list.addItem(item)
-            if entry.path == self.settings.active_repo:
-                self.repo_list.setCurrentItem(item)
-        if self.repo_list.currentRow() < 0 and self.repo_list.count():
-            self.repo_list.setCurrentRow(0)
-        self.repo_list.blockSignals(False)
-        self._apply_repo_filter(self.repo_filter.text())
+        self.repo_picker.refresh()
         self._refresh_templates()
         self._load_staged_files()
         self._set_busy(False)
-        if self.repo_list.count() == 0:
+        if self.repo_picker.count() == 0:
             self.status.setText(NO_REPOS_MESSAGE)
             self._set_busy(True)  # nothing to generate against
         elif self.status.text() == NO_REPOS_MESSAGE:
@@ -251,22 +235,8 @@ class CommitPanel(QWidget):
             # clobbering a generation result that may be shown here.
             self.status.setText("")
 
-    def _apply_repo_filter(self, text: str) -> None:
-        """Hide repositories whose name does not contain the filter text.
-
-        The selected repository stays visible even when filtered out, so the
-        list never implies that nothing is selected.
-        """
-        needle = (text or "").strip().lower()
-        current = self.repo_list.currentItem()
-        for i in range(self.repo_list.count()):
-            item = self.repo_list.item(i)
-            hide = bool(needle) and needle not in item.text().lower()
-            item.setHidden(hide and item is not current)
-
     def _current_repo_path(self) -> str:
-        item = self.repo_list.currentItem()
-        return item.data(Qt.ItemDataRole.UserRole) if item else ""
+        return self.repo_picker.current_path()
 
     # ---- staged files, shown before anything is generated -------------------
     def _load_staged_files(self) -> None:
@@ -317,13 +287,10 @@ class CommitPanel(QWidget):
         self.settings.set_repo_template(repo, name)
         self.settings.save()
 
-    def _on_repo_selected(self, _current=None, _previous=None) -> None:
-        path = self._current_repo_path()
+    def _on_repo_selected(self, path: str = "") -> None:
+        """React to the picker's selection (it already updated the settings)."""
         if not path:
             return
-        self.settings.active_repo = path
-        self.settings.mark_recent(path)
-        self.settings.save()
         # Templates are per repository, so show the new one's assignment.
         self._refresh_templates()
         # Results belong to the previous repo - clear them rather than mislead.

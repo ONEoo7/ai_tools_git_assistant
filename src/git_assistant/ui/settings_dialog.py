@@ -7,7 +7,7 @@ import os
 import re
 from pathlib import Path
 
-from PyQt6.QtCore import Qt, QTimer, QUrl
+from PyQt6.QtCore import Qt, QTimer, QUrl, pyqtSignal
 from PyQt6.QtGui import QDesktopServices
 from PyQt6.QtWidgets import (
     QComboBox,
@@ -57,8 +57,19 @@ from git_assistant.ui.workers import FunctionWorker, run_worker
 # Shown in place of the online version until an update check reports one.
 UNKNOWN_VERSION = "?"
 
+#: Href for the "vX.Y.Z available" anchor. Never navigated to — `linkActivated`
+#: intercepts it — but QLabel needs an href before it will render an anchor at
+#: all, and a real-looking URL here would be opened in a browser by anything
+#: that handled the click differently.
+INSTALL_LINK = "action:install"
+
 
 class SettingsDialog(QDialog):
+    #: Emitted with an `UpdateResult` when the user clicks the "vX.Y.Z
+    #: available" readout. The tray connects it to the same handler the tray
+    #: menu uses, so both routes lead to one consent dialog and one installer.
+    installRequested = pyqtSignal(object)  # noqa: N815 - Qt signal naming
+
     def __init__(self, settings: Settings, parent=None) -> None:
         super().__init__(parent)
         self.settings = settings
@@ -68,6 +79,10 @@ class SettingsDialog(QDialog):
         self._scan_worker = None
         self._update_thread = None
         self._update_worker = None
+        # The full UpdateResult from this window's own check. Needed to install:
+        # a version string is enough to display but not enough to download and
+        # verify, so the readout is only clickable when this is set.
+        self._available = None
         self._model_contexts: dict[str, int] = {}  # model id -> detected ctx
         self.setWindowTitle("Git Assistant")
         # QDialog shows only a Close button by default; this is a real app
@@ -106,6 +121,13 @@ class SettingsDialog(QDialog):
         self.version_arrow = QLabel("->")
         self.version_online = QLabel(UNKNOWN_VERSION)
         self.version_online.setToolTip("Latest available version")
+        # Only links are interactive. Leaving the default (selectable text)
+        # would let a drag select the label instead of activating the anchor.
+        self.version_online.setTextInteractionFlags(
+            Qt.TextInteractionFlag.LinksAccessibleByMouse
+            | Qt.TextInteractionFlag.LinksAccessibleByKeyboard
+        )
+        self.version_online.linkActivated.connect(self._on_install_clicked)
         for lbl in (self.version_current, self.version_arrow, self.version_online):
             lbl.setStyleSheet("color: #888;")
 
@@ -129,7 +151,7 @@ class SettingsDialog(QDialog):
         self._load_into_widgets()
         self._ready = True
         self._connect_autosave()
-        self._start_update_check()
+        self.refresh_update_status()
 
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt naming
         # Write any debounced edit that has not landed yet.
@@ -153,14 +175,36 @@ class SettingsDialog(QDialog):
             self.tags_panel.refresh()
 
     def set_online_version(self, version: str | None) -> None:
-        """Show the latest available version (hook for the updater).
+        """Report the result of a *completed* update check.
 
-        Pass None when the check failed or has not run yet.
+        `None` means the check ran and found nothing newer, not "unknown" — the
+        tray calls this when its own check comes back empty, and showing `?`
+        there would put a shrug next to a question the application has just
+        answered. Use `set_update_error` for a check that failed.
+
+        Called by the tray with a bare version string, which is enough to show
+        but not to install. `_on_update_found` keeps the full result so the
+        readout can be clicked; without one the text is shown but stays inert.
         """
         if not version:
-            self._show_update_state(UNKNOWN_VERSION)
+            self._on_update_none()
             return
-        self._show_update_state(version, highlight=version != __version__, arrow=True)
+        self._show_update_state(
+            f"v{version} available",
+            highlight=version != __version__,
+            arrow=True,
+            link=self._available is not None,
+            tooltip=(
+                "Click to install"
+                if self._available is not None
+                else "Use 'Check for updates...' in the tray menu to install it"
+            ),
+        )
+
+    def set_update_error(self, message: str) -> None:
+        """Report a check that could not complete, including one that failed to
+        verify. Not the same as "up to date" and must never render as it."""
+        self._on_update_error(message)
 
     def _show_update_state(
         self,
@@ -168,6 +212,7 @@ class SettingsDialog(QDialog):
         *,
         highlight: bool = False,
         arrow: bool = False,
+        link: bool = False,
         tooltip: str = "",
     ) -> None:
         """One place that writes the bottom-right version readout.
@@ -177,22 +222,43 @@ class SettingsDialog(QDialog):
         so "checking", "up to date", "the server is unreachable" and "updates
         are switched off" were indistinguishable, and all four looked like a
         broken updater.
+
+        `link` renders the text as an anchor, which is what gives it the hand
+        cursor and the keyboard focus a clickable thing needs. The colour goes
+        inline rather than in the stylesheet because a stylesheet `color` does
+        not reach the inside of an anchor -- it would render as the default
+        blue and look like an unrelated hyperlink.
         """
+        colour = "#4caf50" if highlight else "#888"
         self.version_arrow.setVisible(arrow)
-        self.version_online.setText(text)
+        if link:
+            self.version_online.setText(
+                f'<a href="{INSTALL_LINK}" '
+                f'style="color: {colour}; font-weight: bold; text-decoration: none;">'
+                f"{text}</a>"
+            )
+        else:
+            self.version_online.setText(text)
         self.version_online.setToolTip(tooltip or "Latest available version")
         self.version_online.setStyleSheet(
-            "color: #4caf50; font-weight: bold;" if highlight else "color: #888;"
+            f"color: {colour};" + (" font-weight: bold;" if highlight else "")
         )
 
-    def _start_update_check(self) -> None:
+    def refresh_update_status(self) -> None:
         """Ask the update service what it has, off the GUI thread.
 
-        Runs when the window opens. The tray does its own check at startup, so
-        this repeats work -- but a readout that is only correct if you happened
-        to launch recently is worse than a second request to a server that is
-        usually the machine next to you.
+        Runs when the window is opened *and* when an already-open window is
+        raised from the tray. Both matter: this window is constructed once and
+        then raised, so a check that only ran in `__init__` would answer with
+        whatever was true the first time it was opened -- possibly hours
+        earlier, and possibly before the release now being offered existed.
+
+        The tray also pushes its own results in through `set_online_version`,
+        so the two readouts cannot disagree.
         """
+        if self._update_thread is not None:
+            return  # one at a time
+
         config = UpdateConfig.load()
         reason = config.unavailable_reason()
         if reason is not None:
@@ -210,16 +276,30 @@ class SettingsDialog(QDialog):
         # Held for the same reason as the connection test's worker: PyQt can
         # collect it mid-flight and leave the label stuck on "checking...".
         self._update_worker = worker
-        self._update_thread = run_worker(worker)
+        thread = run_worker(worker)
+        self._update_thread = thread
+        # Cleared on thread.finished, not worker.finished, so the guard above
+        # stays true for as long as the thread is genuinely alive.
+        thread.finished.connect(self._forget_update_worker)
+
+    def _forget_update_worker(self) -> None:
+        self._update_worker = None
+        self._update_thread = None
 
     def _on_update_found(self, result: object) -> None:
-        version = getattr(result, "version", "")
-        self._show_update_state(
-            f"v{version} available",
-            highlight=True,
-            arrow=True,
-            tooltip="Use 'Check for updates...' in the tray menu to install it",
-        )
+        self._available = result
+        self.set_online_version(getattr(result, "version", None))
+
+    def _on_install_clicked(self, _href: str) -> None:
+        """Hand the click to whoever owns installing.
+
+        A signal rather than calling `ask_to_install` here, so there is one
+        place that decides what accepting an update does. Two copies of that
+        decision is how a consent dialog ends up meaning different things
+        depending on which button you pressed to reach it.
+        """
+        if self._available is not None:
+            self.installRequested.emit(self._available)
 
     def _on_update_none(self) -> None:
         self._show_update_state(

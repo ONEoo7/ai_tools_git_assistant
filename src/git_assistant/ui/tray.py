@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 
+from PyQt6.QtCore import QTimer
 from PyQt6.QtWidgets import (
     QApplication,
     QMenu,
@@ -19,7 +20,7 @@ from git_assistant.ui.repo_watcher import RepoWatcher
 from git_assistant.ui.settings_dialog import SettingsDialog
 from git_assistant.ui.update_prompt import UpdateCheckWorker, ask_to_install
 from git_assistant.ui.workers import FunctionWorker, run_worker
-from git_assistant.updating import UpdateConfig
+from git_assistant.updating import UpdateConfig, install_update
 
 def _norm(path: str) -> str:
     return os.path.normcase(os.path.normpath(path))
@@ -43,6 +44,19 @@ class TrayApp:
         self._update_config = UpdateConfig.load()
         self._update_worker = None
         self._update_thread = None
+        # Versions already put in front of the user this session. A repeating
+        # check must not re-open a modal every interval for a release that was
+        # answered with "Later" -- that turns an update into nagware, and is
+        # the reason most applications with a background check are resented.
+        self._update_offered: set[str] = set()
+        # Parented to the tray icon, not to `self`: TrayApp is a plain object,
+        # not a QObject, so it cannot own a QTimer. Parenting it to something
+        # with the right lifetime is also what stops the timer being collected
+        # while it is still armed.
+        self._update_timer = QTimer(self.tray)
+        self._update_timer.timeout.connect(
+            lambda: self._check_for_update(announce_nothing=False)
+        )
 
         self.menu = QMenu()
         self.tray.setContextMenu(self.menu)
@@ -62,6 +76,12 @@ class TrayApp:
 
         if self._update_config.enabled:
             self._check_for_update(announce_nothing=False)
+            # Then keep checking, so an application left running for days does
+            # not need the window raised to notice a release. Qt takes
+            # milliseconds; the config is in minutes because a unit anyone can
+            # get wrong by three orders of magnitude should not be the one in
+            # the file people edit.
+            self._update_timer.start(self._update_config.check_minutes * 60_000)
 
     # ---- menu --------------------------------------------------------------
     def _rebuild_menu(self) -> None:
@@ -128,12 +148,19 @@ class TrayApp:
         if existing is not None:
             existing.raise_()
             existing.activateWindow()
+            # The window fills its update readout when it is constructed, and
+            # this path does not construct one. Without this it keeps showing
+            # what was true whenever it was first opened.
+            existing.refresh_update_status()
             return
 
         # Pause watching while the dialog is open so it can't mutate settings.repos
         # underneath the dialog's own edits.
         self.watcher.set_roots([])
         dialog = SettingsDialog(self.settings)
+        # Clicking "vX.Y.Z available" in the window lands in the same place as
+        # the tray notification.
+        dialog.installRequested.connect(self.offer_install)
         self._main_window = dialog
         try:
             dialog.exec()
@@ -166,14 +193,28 @@ class TrayApp:
             return  # one at a time
 
         worker = UpdateCheckWorker(self._update_config)
-        worker.found.connect(self._on_update_found)
+        # `announce_nothing` marks the menu item, which is someone asking. That
+        # ask is always answered, even for a version already declined -- a
+        # button that does nothing because of a decision made an hour ago is
+        # indistinguishable from a broken one.
+        worker.found.connect(
+            lambda result: self._on_update_found(result, asked=announce_nothing)
+        )
         worker.error.connect(
             lambda message: self._notify("Update check failed", message)
         )
+        worker.error.connect(self._tell_window_check_failed)
         if announce_nothing:
             worker.none_available.connect(
                 lambda: self._notify("Up to date", "You have the latest version.")
             )
+
+        # Keep the open window in step. Its readout is filled once, when it is
+        # constructed, and a window that was already open when this check ran
+        # would otherwise keep saying "up to date" while the tray was offering
+        # an update -- two answers to the same question, on screen at once.
+        worker.found.connect(self._tell_window_about_update)
+        worker.none_available.connect(lambda: self._tell_window_about_update(None))
 
         thread = run_worker(worker)
 
@@ -192,25 +233,75 @@ class TrayApp:
         self._update_worker = None
         self._update_thread = None
 
-    def _on_update_found(self, result) -> None:
-        from git_assistant.updating.client import current_version
+    def _tell_window_about_update(self, result: object | None) -> None:
+        """Push a check result into the settings window, if one is open.
+
+        This is what `SettingsDialog.set_online_version` was always meant for;
+        its docstring called itself a hook for the updater and nothing ever
+        called it.
+        """
+        window = getattr(self, "_main_window", None)
+        if window is None:
+            return
+        window.set_online_version(getattr(result, "version", None))
+
+    def _tell_window_check_failed(self, message: str) -> None:
+        window = getattr(self, "_main_window", None)
+        if window is not None:
+            window.set_update_error(message)
+
+    def _on_update_found(self, result, *, asked: bool = True) -> None:
+        # An automatic check that has already offered this version says nothing
+        # more. The window's readout is still kept current by
+        # `_tell_window_about_update`, so the information is not lost -- it just
+        # stops interrupting. A newer release resets this by not being in the
+        # set.
+        if not asked and result.version in self._update_offered:
+            return
+        self._update_offered.add(result.version)
 
         self._notify(
             "Update available",
             f"Git Assistant {result.version} is ready to install.",
         )
+        self.offer_install(result)
+
+    def offer_install(self, result) -> None:
+        """Ask for consent, then install. One path, whatever led here.
+
+        Reached from the tray notification and from clicking the readout in the
+        settings window. Deliberately the same method rather than two copies:
+        two copies is how a consent dialog ends up meaning slightly different
+        things depending on which route you took to it.
+        """
+        from git_assistant.updating.client import current_version
+
         if not ask_to_install(result, current_version()):
             return
 
-        # Finding and verifying an update works; installing it does not yet.
-        # The installer has to close the running application, swap the A/B
-        # slot and relaunch, which needs the launcher shim from the
-        # distribution platform. Saying so beats a button that looks like it
-        # worked.
+        # Tens of megabytes over the network, so off the GUI thread. The tray
+        # would otherwise stop responding for the whole download, which reads
+        # as the application hanging on a button press.
+        self._notify("Downloading update", f"Fetching Git Assistant {result.version}...")
+        worker = FunctionWorker(lambda: install_update(self._update_config, result))
+        worker.finished.connect(self._on_installer_started)
+        worker.error.connect(lambda message: self._notify("Update failed", message))
+        self._install_worker = worker
+        self._install_thread = run_worker(worker)
+
+    def _on_installer_started(self, _path: object) -> None:
+        """The installer is running. Get out of its way.
+
+        It stops this application itself before replacing files, so quitting is
+        not strictly required -- but being killed means settings edited in this
+        session are never written. Quitting on a short timer leaves the
+        notification on screen long enough to read.
+        """
         self._notify(
-            "Not yet supported",
-            "This build can find and verify updates but cannot install them yet.",
+            "Installing update",
+            "Git Assistant will close and reopen once the update is applied.",
         )
+        QTimer.singleShot(2000, self.app.quit)
 
     # ---- owner backfill ----------------------------------------------------
     def _backfill_owners(self) -> None:

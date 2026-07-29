@@ -68,7 +68,8 @@ as the menu item simply being absent.
 ```json
 {
   "url": "https://updates.example",
-  "channel": "stable"
+  "channel": "stable",
+  "check_interval_minutes": 240
 }
 ```
 
@@ -76,7 +77,37 @@ It exists so an installation can be pointed elsewhere when its usual service is
 unreachable. A build whose only address is compiled in cannot recover when that
 address dies.
 
-Three things about it:
+### How often it checks
+
+At startup, then on a timer, so an application left running for days notices a
+release without anyone opening a window. `check_interval_minutes` sets the
+period; the default is 240 and the floor is 1.
+
+The floor is a floor rather than a fixed value because "check every ten
+seconds" is a reasonable thing to want while testing a deployment and an
+unreasonable thing to leave switched on. Every check is a full metadata walk —
+the root chain, timestamp, snapshot, the delegated role, then the pointer — so
+ten seconds is roughly 8,600 of them per machine per day, essentially all of
+which find nothing. Releases are minutes-to-days apart; checking faster than
+they are published buys latency nobody perceives at a cost the server pays.
+
+A bad value is clamped, never rejected: wanting faster checks is a preference,
+and refusing the whole file over it would turn that into "updating is off".
+
+An automatic check that finds a version it has already offered this session
+says nothing more — the window's readout still updates, it just stops
+interrupting. The tray's **Check for updates…** always answers, though, even
+for a version already declined; a button that does nothing because of a
+decision made an hour ago is indistinguishable from a broken one.
+
+There is no push channel, deliberately. The edge is a static file server with
+no application behind it, and clients are anonymous by construction — the
+install id is generated locally and never sent, so a staged rollout is
+evaluated on the client and there is no per-client response to forge. Having
+the service notify clients would mean it tracking who runs what, which is a
+larger change than the latency is worth.
+
+### Three more things about the file
 
 - **The application never rewrites it.** It is a separate file rather than a
   key in `settings.json` precisely because the application rewrites that one on
