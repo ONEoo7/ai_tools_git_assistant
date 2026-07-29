@@ -55,6 +55,17 @@ def _legacy_config_path() -> Path:
     return Path(user_config_dir(LEGACY_APP_NAME, appauthor=False)) / "settings.json"
 
 
+DEFAULT_TEMPLATE_NAME = "Default"
+
+
+@dataclass
+class Template:
+    """A named prompt template, so each project can have its own."""
+
+    name: str
+    text: str
+
+
 @dataclass
 class RepoEntry:
     """A git repository the user manages in the tray menu."""
@@ -62,6 +73,7 @@ class RepoEntry:
     path: str
     label: str = ""
     owner: str = ""  # remote owner/org, e.g. "ONEoo7" (for disambiguation)
+    template: str = ""  # named template to use; "" means the default one
 
     def display(self) -> str:
         if self.label:
@@ -84,7 +96,10 @@ class Settings:
     scan_roots: list[str] = field(default_factory=list)  # folders scanned for repos
     watched_roots: list[str] = field(default_factory=list)  # roots auto-watched for new repos
     diff_mode: str = "cached"  # "cached" (git diff --cached) | "working" (git diff HEAD)
+    # The default template, used by any repo without one of its own. Kept under
+    # its original name so existing settings files load unchanged.
     prompt_template: str = DEFAULT_TEMPLATE
+    templates: list[Template] = field(default_factory=list)  # named extras
     context_window: int = 32768  # total tokens for input+output (0 => auto-detect)
     safety_margin: float = 0.10  # fraction of the window reserved for the model's output
     ignore_globs: list[str] = field(default_factory=lambda: list(DEFAULT_IGNORE_GLOBS))
@@ -99,6 +114,49 @@ class Settings:
             if r.path == self.active_repo:
                 return r
         return self.repos[0] if self.repos else None
+
+    # ---- templates ---------------------------------------------------------
+    def template_names(self) -> list[str]:
+        """Every selectable template, the default first."""
+        return [DEFAULT_TEMPLATE_NAME, *(t.name for t in self.templates)]
+
+    def template_text(self, name: str) -> str:
+        """Body of a named template, falling back to the default."""
+        if name and name != DEFAULT_TEMPLATE_NAME:
+            for t in self.templates:
+                if t.name == name:
+                    return t.text
+        return self.prompt_template or DEFAULT_TEMPLATE
+
+    def template_for_repo(self, repo_path: str) -> str:
+        """The template a repository should be described with."""
+        for r in self.repos:
+            if r.path == repo_path:
+                return self.template_text(r.template)
+        return self.template_text("")
+
+    def set_repo_template(self, repo_path: str, name: str) -> None:
+        """Assign a template to a repository ("" or the default clears it)."""
+        for r in self.repos:
+            if r.path == repo_path:
+                r.template = "" if name == DEFAULT_TEMPLATE_NAME else name
+                return
+
+    def rename_template(self, old: str, new: str) -> None:
+        """Rename a template and repoint the repositories that referenced it."""
+        for t in self.templates:
+            if t.name == old:
+                t.name = new
+        for r in self.repos:
+            if r.template == old:
+                r.template = new
+
+    def remove_template(self, name: str) -> None:
+        """Delete a template; repositories using it fall back to the default."""
+        self.templates = [t for t in self.templates if t.name != name]
+        for r in self.repos:
+            if r.template == name:
+                r.template = ""
 
     # ---- recency ordering (for the tray menu) ------------------------------
     def ordered_repos(self) -> list[RepoEntry]:
@@ -122,6 +180,7 @@ class Settings:
     def to_dict(self) -> dict:
         data = asdict(self)
         data["repos"] = [asdict(r) for r in self.repos]
+        data["templates"] = [asdict(t) for t in self.templates]
         return data
 
     @classmethod
@@ -134,9 +193,15 @@ class Settings:
                 path=r.get("path", ""),
                 label=r.get("label", ""),
                 owner=r.get("owner", ""),
+                template=r.get("template", ""),
             )
             for r in repos
             if isinstance(r, dict) and r.get("path")
+        ]
+        clean["templates"] = [
+            Template(name=t.get("name", ""), text=t.get("text", ""))
+            for t in (clean.get("templates") or [])
+            if isinstance(t, dict) and t.get("name")
         ]
         return cls(**clean)
 

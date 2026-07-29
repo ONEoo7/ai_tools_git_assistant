@@ -16,6 +16,7 @@ from PyQt6.QtWidgets import (
     QDialog,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QListWidget,
     QListWidgetItem,
     QMessageBox,
@@ -29,7 +30,8 @@ from PyQt6.QtWidgets import (
 
 from git_assistant import git_ops
 from git_assistant.commit_generator import FileCoverage, GenerationResult
-from git_assistant.config import Settings
+from git_assistant.config import DEFAULT_TEMPLATE_NAME, Settings
+from git_assistant.diff_strategy import filter_files, split_diff
 from git_assistant.ui.workers import FunctionWorker, GeneratorWorker, run_worker
 
 # Cap rendered lines per file so a huge diff can't freeze the view.
@@ -45,6 +47,34 @@ SECTION_GAP = 12
 # Compared against the status text to clear it once repositories exist, so a
 # generation result shown in the same label is not wiped by a refresh.
 NO_REPOS_MESSAGE = "No repositories configured - add one in Repositories."
+
+
+def _read_staged(repo: str, mode: str, ignore_globs: list[str]) -> list[FileCoverage]:
+    """Current diff as coverage entries, before anything has been sent.
+
+    ``omitted`` is empty and the reason is "staged": nothing has reached the
+    model yet, so nothing is marked red. Noise-filtered files are still shown as
+    filtered, since that decision is already made.
+    """
+    raw = git_ops.get_diff(repo, mode)
+    if not raw.strip():
+        return []
+    all_files = split_diff(raw)
+    kept, dropped = filter_files(all_files, ignore_globs)
+    dropped_set = set(dropped)
+    coverage: list[FileCoverage] = []
+    for f in all_files:
+        lines = f.text.splitlines(keepends=True)
+        is_dropped = f.path in dropped_set
+        coverage.append(
+            FileCoverage(
+                path=f.path,
+                lines=lines,
+                omitted=set(range(len(lines))) if is_dropped else set(),
+                reason="filtered" if is_dropped else "staged",
+            )
+        )
+    return coverage
 
 
 class CommitPanel(QWidget):
@@ -74,12 +104,24 @@ class CommitPanel(QWidget):
         self._push_worker = None
         self._coverage: list[FileCoverage] = []
 
-        self.repo_combo = QComboBox()
-        self.repo_combo.setMinimumWidth(320)
-        self.repo_combo.currentIndexChanged.connect(self._on_repo_changed)
-        repo_row = QHBoxLayout()
-        repo_row.addWidget(QLabel("Repository:"))
-        repo_row.addWidget(self.repo_combo, 1)
+        # A filtered list rather than a dropdown: with dozens of repositories,
+        # scrolling a combo is the slow way to find one. Mirrors the Template tab.
+        self.repo_filter = QLineEdit()
+        self.repo_filter.setPlaceholderText("Filter repositories...")
+        self.repo_filter.setClearButtonEnabled(True)
+        self.repo_filter.textChanged.connect(self._apply_repo_filter)
+
+        self.repo_list = QListWidget()
+        self.repo_list.currentItemChanged.connect(self._on_repo_selected)
+
+        # Each project can use its own prompt template; picking one here is what
+        # assigns it to the selected repository.
+        self.template_combo = QComboBox()
+        self.template_combo.setToolTip(
+            "Prompt template used for this repository. Manage templates in the "
+            "Template tab."
+        )
+        self.template_combo.currentIndexChanged.connect(self._on_template_changed)
 
         self.status = QLabel("")
         self.status.setWordWrap(True)
@@ -107,6 +149,17 @@ class CommitPanel(QWidget):
         self.btn_row.addWidget(self.copy_btn)
         self.btn_row.addWidget(self.commit_btn)
         self.btn_row.addWidget(self.push_btn)
+
+        # ---- far-left pane: pick the repository ---------------------------
+        repos_pane = QWidget()
+        repos_box = QVBoxLayout(repos_pane)
+        repos_box.setContentsMargins(0, 0, SECTION_GAP, 0)
+        repos_box.addWidget(QLabel("Repository"))
+        repos_box.addWidget(self.repo_filter)
+        repos_box.addWidget(self.repo_list, 1)
+        repos_box.addSpacing(SECTION_GAP)
+        repos_box.addWidget(QLabel("Template:"))
+        repos_box.addWidget(self.template_combo)
 
         # ---- left pane: the commit message -------------------------------
         left = QWidget()
@@ -150,15 +203,17 @@ class CommitPanel(QWidget):
         right_box.addWidget(self.diff_view, 1)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter.addWidget(repos_pane)
         splitter.addWidget(left)
         splitter.addWidget(right)
-        splitter.setStretchFactor(0, 3)
-        splitter.setStretchFactor(1, 4)
+        splitter.setStretchFactor(0, 1)  # repo picker stays narrow
+        splitter.setStretchFactor(1, 3)
+        splitter.setStretchFactor(2, 4)
+        splitter.setSizes([220, 420, 520])
 
         # Default margins, matching the other tabs. PreviewDialog zeroes its own
         # layout instead, so the standalone window keeps a single set of margins.
         layout = QVBoxLayout(self)
-        layout.addLayout(repo_row)
         layout.addWidget(self.status)
         layout.addWidget(splitter, 1)
         layout.addWidget(self.progress)
@@ -172,17 +227,23 @@ class CommitPanel(QWidget):
     # ---- repository selection ----------------------------------------------
     def refresh_repos(self) -> None:
         """Reload the repo list (call after repositories are added/removed)."""
-        self.repo_combo.blockSignals(True)
-        self.repo_combo.clear()
+        self.repo_list.blockSignals(True)
+        self.repo_list.clear()
         for entry in self.settings.ordered_repos():
-            self.repo_combo.addItem(entry.display(), entry.path)
-        idx = self.repo_combo.findData(self.settings.active_repo)
-        if idx >= 0:
-            self.repo_combo.setCurrentIndex(idx)
-        self.repo_combo.setToolTip(self.repo_combo.currentData() or "")
-        self.repo_combo.blockSignals(False)
+            item = QListWidgetItem(entry.display())
+            item.setData(Qt.ItemDataRole.UserRole, entry.path)
+            item.setToolTip(entry.path)
+            self.repo_list.addItem(item)
+            if entry.path == self.settings.active_repo:
+                self.repo_list.setCurrentItem(item)
+        if self.repo_list.currentRow() < 0 and self.repo_list.count():
+            self.repo_list.setCurrentRow(0)
+        self.repo_list.blockSignals(False)
+        self._apply_repo_filter(self.repo_filter.text())
+        self._refresh_templates()
+        self._load_staged_files()
         self._set_busy(False)
-        if self.repo_combo.count() == 0:
+        if self.repo_list.count() == 0:
             self.status.setText(NO_REPOS_MESSAGE)
             self._set_busy(True)  # nothing to generate against
         elif self.status.text() == NO_REPOS_MESSAGE:
@@ -190,23 +251,91 @@ class CommitPanel(QWidget):
             # clobbering a generation result that may be shown here.
             self.status.setText("")
 
-    def _on_repo_changed(self, _index: int) -> None:
-        path = self.repo_combo.currentData()
+    def _apply_repo_filter(self, text: str) -> None:
+        """Hide repositories whose name does not contain the filter text.
+
+        The selected repository stays visible even when filtered out, so the
+        list never implies that nothing is selected.
+        """
+        needle = (text or "").strip().lower()
+        current = self.repo_list.currentItem()
+        for i in range(self.repo_list.count()):
+            item = self.repo_list.item(i)
+            hide = bool(needle) and needle not in item.text().lower()
+            item.setHidden(hide and item is not current)
+
+    def _current_repo_path(self) -> str:
+        item = self.repo_list.currentItem()
+        return item.data(Qt.ItemDataRole.UserRole) if item else ""
+
+    # ---- staged files, shown before anything is generated -------------------
+    def _load_staged_files(self) -> None:
+        """Show what is staged now, without waiting for a generation run.
+
+        Done synchronously: it is one local ``git diff``, and running it on a
+        worker meant a thread could outlive the panel that owns it - which
+        aborts the process rather than merely failing.
+        """
+        repo = self._current_repo_path()
+        if not repo:
+            self._show_staged([])
+            return
+        try:
+            coverage = _read_staged(
+                repo, self.settings.diff_mode, self.settings.ignore_globs
+            )
+        except Exception:
+            # A repo git cannot read (e.g. blocked by safe.directory) simply
+            # shows nothing here; generating surfaces the real error.
+            coverage = []
+        self._show_staged(coverage)
+
+    def _show_staged(self, coverage: list[FileCoverage]) -> None:
+        self._populate_files(coverage)
+        if not coverage:
+            self.files_label.setText("Staged files - nothing staged")
+
+    def _refresh_templates(self) -> None:
+        """Show the template list, selecting the active repo's assignment."""
+        current = self._current_repo_path()
+        assigned = DEFAULT_TEMPLATE_NAME
+        for r in self.settings.repos:
+            if r.path == current and r.template:
+                assigned = r.template
+        self.template_combo.blockSignals(True)
+        self.template_combo.clear()
+        self.template_combo.addItems(self.settings.template_names())
+        idx = self.template_combo.findText(assigned)
+        self.template_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        self.template_combo.blockSignals(False)
+
+    def _on_template_changed(self, _index: int) -> None:
+        repo = self._current_repo_path()
+        name = self.template_combo.currentText()
+        if not repo or not name:
+            return
+        self.settings.set_repo_template(repo, name)
+        self.settings.save()
+
+    def _on_repo_selected(self, _current=None, _previous=None) -> None:
+        path = self._current_repo_path()
         if not path:
             return
         self.settings.active_repo = path
         self.settings.mark_recent(path)
         self.settings.save()
-        self.repo_combo.setToolTip(path)
+        # Templates are per repository, so show the new one's assignment.
+        self._refresh_templates()
         # Results belong to the previous repo - clear them rather than mislead.
         self.editor.clear()
         self.file_list.clear()
         self.diff_view.clear()
         self._coverage = []
-        self.files_label.setText("Staged files")
         self.progress.setText("")
         self.regen_btn.setText("Generate")
         self.status.setText("")
+        # Show the new repository's staged files right away.
+        self._load_staged_files()
 
     # ---- generation --------------------------------------------------------
     def _start(self) -> None:
@@ -254,7 +383,13 @@ class CommitPanel(QWidget):
         total_omitted = sum(c.omitted_count for c in self._coverage)
         incomplete = sum(1 for c in self._coverage if not c.fully_sent)
         summarized = sum(1 for c in self._coverage if c.reason == "summarized")
-        if total_omitted:
+        # Before a run there is nothing to report about what reached the model.
+        if any(c.reason == "staged" for c in self._coverage):
+            kept = sum(1 for c in self._coverage if c.reason == "staged")
+            filtered = len(self._coverage) - kept
+            note = f", {filtered} filtered as noise" if filtered else ""
+            self.files_label.setText(f"Staged files ({kept}){note}")
+        elif total_omitted:
             self.files_label.setText(
                 f"Staged files ({len(self._coverage)}) - {incomplete} with omitted "
                 f"content, {total_omitted} line(s) not sent"
@@ -270,7 +405,9 @@ class CommitPanel(QWidget):
             )
 
         for cov in self._coverage:
-            if cov.reason == "filtered":
+            if cov.reason == "staged":
+                suffix = ""  # nothing sent yet, so nothing to report
+            elif cov.reason == "filtered":
                 suffix = "  [filtered as noise - fully omitted]"
             elif cov.omitted_count:
                 suffix = f"  [{cov.omitted_count}/{len(cov.lines)} lines omitted]"

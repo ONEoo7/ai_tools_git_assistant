@@ -42,13 +42,20 @@ Three conditions, all required, all in `UpdateConfig.unavailable_reason`:
 
 Two sources, each with one owner.
 
-**The build.** `update_url.txt` is written at package time from the
-`UPDATE_URL` repository variable and bundled beside `root.json`. This is what
-makes a fresh install work with no configuration at all. It has to be the build
-rather than an environment variable, because **an installed desktop application
-never sees a shell's environment** — it is launched from the Start Menu and
-inherits the *user* environment, so a variable exported in a terminal reached a
-checkout, where updating is refused, and reached nothing else.
+**The build.** `update_url.txt` sits beside `root.json` in this directory and
+is **committed**, so every build carries an address by construction. It has to
+be the build rather than an environment variable, because **an installed
+desktop application never sees a shell's environment** — it is launched from
+the Start Menu and inherits the *user* environment, so a variable exported in a
+terminal reached a checkout, where updating is refused, and reached nothing
+else.
+
+It is committed rather than generated because the generated version failed
+open. The address came only from a `UPDATE_URL` repository variable, and an
+unset variable produced a build with no updater at all — silent, and from the
+outside indistinguishable from the feature being broken. That shipped twice.
+`vars.UPDATE_URL` still overrides the committed value for a fork or a staging
+pipeline, and a build with neither is now a build failure.
 
 **`update.json`**, in the platform config directory beside `settings.json`
 (`%LOCALAPPDATA%\git-assistant\update.json` on Windows). Reach it from

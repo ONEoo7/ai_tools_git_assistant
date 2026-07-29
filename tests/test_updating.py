@@ -132,8 +132,29 @@ def no_user_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     return path
 
 
-def test_a_build_with_neither_source_has_no_url(no_user_config: Path) -> None:
-    """A checkout: no `update_url.txt`, no `update.json`."""
+def test_the_address_is_committed_so_every_build_carries_one(
+    no_user_config: Path,
+) -> None:
+    """The regression that cost two release cycles.
+
+    This used to be written only at package time from a CI variable, so an
+    unset variable shipped a build whose updater silently did nothing — which
+    from the outside is indistinguishable from the feature being broken. It is
+    committed now, so a build without an address requires someone to delete a
+    tracked file, and the release workflow refuses to build in that state.
+    """
+    committed = REPO_ROOT / "src" / "git_assistant" / "updating" / client.UPDATE_URL_FILE
+    assert committed.is_file(), f"{client.UPDATE_URL_FILE} must be committed, not generated"
+
+    url = client.packaged_update_url()
+    assert url.startswith(("http://", "https://"))
+    assert client.UpdateConfig.load().base_url == url.rstrip("/")
+
+
+def test_a_build_missing_the_address_has_no_url(
+    monkeypatch: pytest.MonkeyPatch, no_user_config: Path
+) -> None:
+    monkeypatch.setattr(client, "_packaged_file", lambda name: None)
     assert client.packaged_update_url() == ""
     assert client.UpdateConfig.load().base_url == ""
 

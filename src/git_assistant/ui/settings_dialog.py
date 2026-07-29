@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import os
+import re
+from pathlib import Path
 
 from PyQt6.QtCore import Qt, QTimer, QUrl
 from PyQt6.QtGui import QDesktopServices
@@ -13,12 +16,15 @@ from PyQt6.QtWidgets import (
     QFileDialog,
     QFormLayout,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
+    QListWidget,
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
     QSpinBox,
+    QSplitter,
     QTabWidget,
     QTreeWidget,
     QTreeWidgetItem,
@@ -28,11 +34,18 @@ from PyQt6.QtWidgets import (
 
 from git_assistant import __version__, git_ops
 from git_assistant.commit_generator import MIN_PARALLEL_CONTEXT
-from git_assistant.config import RepoEntry, Settings, config_path
+from git_assistant.config import (
+    DEFAULT_TEMPLATE_NAME,
+    RepoEntry,
+    Settings,
+    Template,
+    config_path,
+)
 from git_assistant.lmstudio_client import LMStudioClient, ModelInfo
 from git_assistant.prompts import DEFAULT_TEMPLATE
-from git_assistant.ui.preview_dialog import CommitPanel
+from git_assistant.ui.preview_dialog import SECTION_GAP, CommitPanel
 from git_assistant.ui.tags_panel import TagsPanel
+from git_assistant.ui.update_prompt import UpdateCheckWorker
 from git_assistant.updating.client import (
     UpdateConfig,
     ensure_update_config,
@@ -53,6 +66,8 @@ class SettingsDialog(QDialog):
         self._conn_worker = None
         self._scan_thread = None
         self._scan_worker = None
+        self._update_thread = None
+        self._update_worker = None
         self._model_contexts: dict[str, int] = {}  # model id -> detected ctx
         self.setWindowTitle("Git Assistant")
         # QDialog shows only a Close button by default; this is a real app
@@ -84,7 +99,8 @@ class SettingsDialog(QDialog):
         self.saved_hint.setStyleSheet("color: #888;")
 
         # Bottom-left version indicator: "<installed> -> <available>".
-        # Placeholders for now; wire set_online_version() to the updater later.
+        # The arrow is hidden unless there is actually something to point at,
+        # so "up to date" does not render as "v0.3.4 -> up to date".
         self.version_current = QLabel(f"v{__version__}")
         self.version_current.setToolTip("Installed version")
         self.version_arrow = QLabel("->")
@@ -113,6 +129,7 @@ class SettingsDialog(QDialog):
         self._load_into_widgets()
         self._ready = True
         self._connect_autosave()
+        self._start_update_check()
 
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt naming
         # Write any debounced edit that has not landed yet.
@@ -140,12 +157,79 @@ class SettingsDialog(QDialog):
 
         Pass None when the check failed or has not run yet.
         """
-        self.version_online.setText(version or UNKNOWN_VERSION)
-        newer = bool(version) and version != __version__
-        # Highlight only when an actual update is available.
+        if not version:
+            self._show_update_state(UNKNOWN_VERSION)
+            return
+        self._show_update_state(version, highlight=version != __version__, arrow=True)
+
+    def _show_update_state(
+        self,
+        text: str,
+        *,
+        highlight: bool = False,
+        arrow: bool = False,
+        tooltip: str = "",
+    ) -> None:
+        """One place that writes the bottom-right version readout.
+
+        Every outcome gets its own words. This used to be a literal `?` that
+        nothing ever replaced -- `set_online_version` had no callers at all --
+        so "checking", "up to date", "the server is unreachable" and "updates
+        are switched off" were indistinguishable, and all four looked like a
+        broken updater.
+        """
+        self.version_arrow.setVisible(arrow)
+        self.version_online.setText(text)
+        self.version_online.setToolTip(tooltip or "Latest available version")
         self.version_online.setStyleSheet(
-            "color: #4caf50; font-weight: bold;" if newer else "color: #888;"
+            "color: #4caf50; font-weight: bold;" if highlight else "color: #888;"
         )
+
+    def _start_update_check(self) -> None:
+        """Ask the update service what it has, off the GUI thread.
+
+        Runs when the window opens. The tray does its own check at startup, so
+        this repeats work -- but a readout that is only correct if you happened
+        to launch recently is worse than a second request to a server that is
+        usually the machine next to you.
+        """
+        config = UpdateConfig.load()
+        reason = config.unavailable_reason()
+        if reason is not None:
+            # Nothing to ask, and a worker that raises immediately would only
+            # turn a clear reason into a stack trace in a label.
+            self._show_update_state("updates are off", tooltip=reason)
+            return
+
+        self._show_update_state("checking...", tooltip="Contacting the update service")
+
+        worker = UpdateCheckWorker(config)
+        worker.found.connect(self._on_update_found)
+        worker.none_available.connect(self._on_update_none)
+        worker.error.connect(self._on_update_error)
+        # Held for the same reason as the connection test's worker: PyQt can
+        # collect it mid-flight and leave the label stuck on "checking...".
+        self._update_worker = worker
+        self._update_thread = run_worker(worker)
+
+    def _on_update_found(self, result: object) -> None:
+        version = getattr(result, "version", "")
+        self._show_update_state(
+            f"v{version} available",
+            highlight=True,
+            arrow=True,
+            tooltip="Use 'Check for updates...' in the tray menu to install it",
+        )
+
+    def _on_update_none(self) -> None:
+        self._show_update_state(
+            "up to date",
+            tooltip=f"The update service has nothing newer than v{__version__}",
+        )
+
+    def _on_update_error(self, message: str) -> None:
+        # Verification failures land here too, and they are not "no update".
+        self._show_update_state("update check failed", tooltip=message)
 
     # ---- tabs --------------------------------------------------------------
     def _build_commit_tab(self) -> QWidget:
@@ -257,18 +341,80 @@ class SettingsDialog(QDialog):
         layout = QVBoxLayout(w)
         layout.addWidget(
             QLabel(
-                "Prompt template. Placeholders: {branch}, {diffstat}, {diff}"
+                "Prompt templates. Assign one per repository in the "
+                "Generate Commit Message tab.\n"
+                "Placeholders: {branch}, {diffstat}, {diff}"
             )
         )
+
+        # ---- left: filter + template list ---------------------------------
+        left = QWidget()
+        left_box = QVBoxLayout(left)
+        left_box.setContentsMargins(0, 0, SECTION_GAP, 0)
+        self.template_filter = QLineEdit()
+        self.template_filter.setPlaceholderText("Filter templates...")
+        self.template_filter.setClearButtonEnabled(True)
+        self.template_filter.textChanged.connect(self._apply_template_filter)
+        left_box.addWidget(self.template_filter)
+
+        self.template_list = QListWidget()
+        self.template_list.currentTextChanged.connect(self._on_template_selected)
+        left_box.addWidget(self.template_list, 1)
+
+        list_btns = QHBoxLayout()
+        for text, slot in (
+            ("New", self._on_template_new),
+            ("Duplicate", self._on_template_duplicate),
+            ("Rename", self._on_template_rename),
+            ("Delete", self._on_template_delete),
+        ):
+            b = QPushButton(text)
+            b.clicked.connect(slot)
+            list_btns.addWidget(b)
+        left_box.addLayout(list_btns)
+
+        # ---- right: the template body --------------------------------------
+        right = QWidget()
+        right_box = QVBoxLayout(right)
+        right_box.setContentsMargins(SECTION_GAP, 0, 0, 0)
+        self.template_name_label = QLabel("")
+        font = self.template_name_label.font()
+        font.setBold(True)
+        self.template_name_label.setFont(font)
+        right_box.addWidget(self.template_name_label)
+
         self.template_edit = QPlainTextEdit()
         self.template_edit.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
-        layout.addWidget(self.template_edit)
+        self.template_edit.textChanged.connect(self._on_template_text_changed)
+        right_box.addWidget(self.template_edit, 1)
 
-        reset_btn = QPushButton("Reset to default")
+        edit_btns = QHBoxLayout()
+        reset_btn = QPushButton("Reset to default text")
+        reset_btn.setToolTip("Replace this template's body with the built-in one.")
         reset_btn.clicked.connect(
             lambda: self.template_edit.setPlainText(DEFAULT_TEMPLATE)
         )
-        layout.addWidget(reset_btn, alignment=Qt.AlignmentFlag.AlignLeft)
+        import_btn = QPushButton("Import...")
+        import_btn.clicked.connect(self._on_template_import)
+        export_btn = QPushButton("Export...")
+        export_btn.clicked.connect(self._on_template_export)
+        edit_btns.addWidget(reset_btn)
+        edit_btns.addStretch(1)
+        edit_btns.addWidget(import_btn)
+        edit_btns.addWidget(export_btn)
+        right_box.addLayout(edit_btns)
+
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter.addWidget(left)
+        splitter.addWidget(right)
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 3)
+        layout.addWidget(splitter, 1)
+
+        self.template_status = QLabel("")
+        self.template_status.setStyleSheet("color: #8ab;")
+        self.template_status.setWordWrap(True)
+        layout.addWidget(self.template_status)
         return w
 
     def _build_advanced_tab(self) -> QWidget:
@@ -349,7 +495,7 @@ class SettingsDialog(QDialog):
 
         self._populate_repo_tree(s.repos, s.scan_roots)
 
-        self.template_edit.setPlainText(s.prompt_template or DEFAULT_TEMPLATE)
+        self._reload_templates(select=DEFAULT_TEMPLATE_NAME)
 
         idx = self.diff_mode_combo.findData(s.diff_mode)
         self.diff_mode_combo.setCurrentIndex(max(0, idx))
@@ -370,7 +516,8 @@ class SettingsDialog(QDialog):
         self.ctx_size_spin.valueChanged.connect(self._schedule_save)
         self.margin_spin.valueChanged.connect(self._schedule_save)
         self.ignore_edit.textChanged.connect(self._schedule_save)
-        self.template_edit.textChanged.connect(self._schedule_save)
+        # The template editor saves via _on_template_text_changed, which knows
+        # which template the text belongs to.
         # Repo tree: checkbox toggles plus add/remove/scan (which call directly).
         self.repo_tree.itemChanged.connect(self._schedule_save)
 
@@ -398,7 +545,8 @@ class SettingsDialog(QDialog):
         if s.active_repo not in {r.path for r in repos}:
             s.active_repo = repos[0].path if repos else ""
 
-        s.prompt_template = self.template_edit.toPlainText() or DEFAULT_TEMPLATE
+        # Template bodies are written as they are edited (they belong to
+        # whichever template is selected), so nothing to collect here.
         s.diff_mode = self.diff_mode_combo.currentData()
 
         # Stored as typed. A value above the model's real maximum is flagged in
@@ -412,6 +560,193 @@ class SettingsDialog(QDialog):
             for line in self.ignore_edit.toPlainText().splitlines()
             if line.strip()
         ]
+
+    # ---- templates ---------------------------------------------------------
+    def _reload_templates(self, select: str | None = None) -> None:
+        """Rebuild the list from settings, keeping (or choosing) a selection."""
+        want = select or self.template_list.currentItem()
+        want = want if isinstance(want, str) else (want.text() if want else None)
+        self.template_list.blockSignals(True)
+        self.template_list.clear()
+        self.template_list.addItems(self.settings.template_names())
+        self.template_list.blockSignals(False)
+        self._apply_template_filter(self.template_filter.text())
+        items = self.template_list.findItems(want or "", Qt.MatchFlag.MatchExactly)
+        if items and not items[0].isHidden():
+            self.template_list.setCurrentItem(items[0])
+        else:
+            for i in range(self.template_list.count()):
+                if not self.template_list.item(i).isHidden():
+                    self.template_list.setCurrentRow(i)
+                    break
+
+    def _apply_template_filter(self, text: str) -> None:
+        """Hide templates whose name does not contain the filter text."""
+        needle = (text or "").strip().lower()
+        for i in range(self.template_list.count()):
+            item = self.template_list.item(i)
+            item.setHidden(bool(needle) and needle not in item.text().lower())
+
+    def _current_template(self) -> str:
+        item = self.template_list.currentItem()
+        return item.text() if item else DEFAULT_TEMPLATE_NAME
+
+    def _on_template_selected(self, name: str) -> None:
+        if not name:
+            return
+        self.template_name_label.setText(name)
+        self.template_edit.blockSignals(True)
+        self.template_edit.setPlainText(self.settings.template_text(name))
+        self.template_edit.blockSignals(False)
+        self.template_status.setText("")
+
+    def _on_template_text_changed(self) -> None:
+        """Write the edited body back to whichever template is selected."""
+        if not self._ready:
+            return
+        name = self._current_template()
+        text = self.template_edit.toPlainText()
+        if name == DEFAULT_TEMPLATE_NAME:
+            self.settings.prompt_template = text
+        else:
+            for t in self.settings.templates:
+                if t.name == name:
+                    t.text = text
+                    break
+        self._schedule_save()
+
+    def _unique_template_name(self, base: str) -> str:
+        existing = set(self.settings.template_names())
+        if base not in existing:
+            return base
+        n = 2
+        while f"{base} ({n})" in existing:
+            n += 1
+        return f"{base} ({n})"
+
+    def _on_template_new(self) -> None:
+        name, ok = QInputDialog.getText(
+            self, "New template", "Name (e.g. the project it is for):"
+        )
+        name = (name or "").strip()
+        if not ok or not name:
+            return
+        if name in self.settings.template_names():
+            QMessageBox.warning(self, "Name in use", f"'{name}' already exists.")
+            return
+        self.settings.templates.append(Template(name=name, text=DEFAULT_TEMPLATE))
+        self._schedule_save()
+        self._reload_templates(select=name)
+
+    def _on_template_duplicate(self) -> None:
+        source = self._current_template()
+        name = self._unique_template_name(f"{source} copy")
+        self.settings.templates.append(
+            Template(name=name, text=self.settings.template_text(source))
+        )
+        self._schedule_save()
+        self._reload_templates(select=name)
+
+    def _on_template_rename(self) -> None:
+        old = self._current_template()
+        if old == DEFAULT_TEMPLATE_NAME:
+            QMessageBox.information(
+                self, "Cannot rename", "The default template keeps its name."
+            )
+            return
+        new, ok = QInputDialog.getText(self, "Rename template", "New name:", text=old)
+        new = (new or "").strip()
+        if not ok or not new or new == old:
+            return
+        if new in self.settings.template_names():
+            QMessageBox.warning(self, "Name in use", f"'{new}' already exists.")
+            return
+        self.settings.rename_template(old, new)  # also repoints repositories
+        self._schedule_save()
+        self._reload_templates(select=new)
+
+    def _on_template_delete(self) -> None:
+        name = self._current_template()
+        if name == DEFAULT_TEMPLATE_NAME:
+            QMessageBox.information(
+                self,
+                "Cannot delete",
+                "The default template is always available. Use 'Reset to default "
+                "text' to restore its contents.",
+            )
+            return
+        users = [r.display() for r in self.settings.repos if r.template == name]
+        note = (
+            f"\n\n{len(users)} repository(ies) use it and will fall back to the "
+            f"default:\n  " + "\n  ".join(users[:8])
+            if users
+            else ""
+        )
+        if (
+            QMessageBox.question(
+                self, "Delete template", f"Delete the template '{name}'?{note}"
+            )
+            != QMessageBox.StandardButton.Yes
+        ):
+            return
+        self.settings.remove_template(name)
+        self._schedule_save()
+        self._reload_templates(select=DEFAULT_TEMPLATE_NAME)
+
+    def _on_template_export(self) -> None:
+        name = self._current_template()
+        suggested = re.sub(r"[^\w.-]+", "_", name) + ".json"
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export template", suggested, "Template files (*.json)"
+        )
+        if not path:
+            return
+        payload = [{"name": name, "text": self.settings.template_text(name)}]
+        try:
+            Path(path).write_text(
+                json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8"
+            )
+        except OSError as exc:
+            QMessageBox.critical(self, "Export failed", str(exc))
+            return
+        self.template_status.setText(f"Exported '{name}' to {path}")
+
+    def _on_template_import(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Import templates", "", "Template files (*.json)"
+        )
+        if not path:
+            return
+        try:
+            data = json.loads(Path(path).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            QMessageBox.critical(self, "Import failed", f"Could not read the file:\n{exc}")
+            return
+
+        # Accept a single template or a list of them.
+        items = data if isinstance(data, list) else [data]
+        added, last = 0, None
+        for item in items:
+            if not isinstance(item, dict) or not item.get("name"):
+                continue
+            # Never silently overwrite an existing template.
+            name = self._unique_template_name(str(item["name"]).strip())
+            self.settings.templates.append(
+                Template(name=name, text=str(item.get("text", DEFAULT_TEMPLATE)))
+            )
+            added += 1
+            last = name
+        if not added:
+            QMessageBox.warning(
+                self,
+                "Nothing imported",
+                "The file contained no templates. Expected JSON like:\n"
+                '[{"name": "My project", "text": "..."}]',
+            )
+            return
+        self._schedule_save()
+        self._reload_templates(select=last)
+        self.template_status.setText(f"Imported {added} template(s) from {path}")
 
     # ---- repo tree helpers -------------------------------------------------
     @staticmethod

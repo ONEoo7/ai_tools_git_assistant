@@ -26,9 +26,13 @@ from git_assistant.config import APP_NAME
 #: network attacker could hand us a root of their own.
 ROOT_FILENAME = "root.json"
 
-#: Where this build looks for updates, written at package time. Not committed:
-#: it names a particular deployment, and a build made outside one should have
-#: no default rather than somebody else's address.
+#: Where this build looks for updates.
+#:
+#: Committed, so every build carries an address by construction and the release
+#: workflow only overrides it. It was previously written at package time from a
+#: CI variable and nothing else, which meant an unset variable produced a build
+#: whose updater silently did nothing — indistinguishable, from the outside,
+#: from the feature being broken.
 UPDATE_URL_FILE = "update_url.txt"
 
 #: A user-editable override, in the platform config directory beside
@@ -380,19 +384,17 @@ def _packaged_file(name: str) -> Path | None:
 
 
 def packaged_update_url() -> str:
-    """The update service this build was published to, or `""`.
+    """The update service this build ships pointing at, or `""`.
 
-    Written at package time from `UPDATE_URL_FILE`. Absent means this build has
-    no default, which is the correct state for one produced outside a
-    distribution pipeline: it simply has no updater unless an environment
-    variable supplies an address.
+    Read from `UPDATE_URL_FILE`, which is committed and therefore present in
+    every build and every checkout. `""` means somebody deleted it, and the
+    release workflow refuses to build in that state.
 
-    Only `http` and `https` are accepted, and anything else is treated as
-    absent rather than raising — a malformed build-time constant should not
-    stop the application starting. Plain `http` is allowed on purpose: TUF
-    signs the metadata and pins the target hashes, so the transport is not what
-    makes an update trustworthy, and a loopback deployment is a normal way to
-    run this.
+    Only `http` and `https` are accepted, and anything else reads as absent
+    rather than raising — a malformed constant should not stop the application
+    starting. Plain `http` is allowed on purpose: TUF signs the metadata and
+    pins the target hashes, so the transport is not what makes an update
+    trustworthy, and a loopback deployment is a normal way to run this.
     """
     path = _packaged_file(UPDATE_URL_FILE)
     if path is None:
@@ -401,7 +403,7 @@ def packaged_update_url() -> str:
         url = path.read_text(encoding="utf-8").strip()
     except OSError:
         return ""
-    return url if url.startswith(("https://", "http://")) else ""
+    return _clean_url(url)
 
 
 def _trusted_root() -> bytes:

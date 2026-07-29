@@ -125,33 +125,47 @@ jobs:
       # Users override it in `update.json` beside their settings, so a service
       # that goes down does not strand every installation.
       #
-      # A repository *variable*, not a secret: it is a URL, it is visible in
-      # any packaged build, and putting it in a secret would only hide it from
-      # the people reviewing this workflow. Unset means the build ships with no
-      # default and updates unless someone supplies one — a real difference in
-      # what ships, so it goes in the job summary.
+      # The address is COMMITTED, in `update_url.txt`, so every build carries
+      # one by construction. It used to come only from a repository variable,
+      # and an unset variable shipped a build with no updater at all — which is
+      # exactly what happened, twice, and looked from the outside like the
+      # feature being broken rather than unconfigured.
+      #
+      # `vars.UPDATE_URL` still overrides it, for a fork or a staging pipeline
+      # that publishes somewhere else. It is a variable rather than a secret:
+      # it is a URL, it is readable in any packaged build, and hiding it would
+      # only hide it from whoever reviews this workflow.
+      #
+      # Missing entirely is now a build failure. Shipping an application whose
+      # updater silently does nothing is worse than not shipping.
       - name: Set the update service address
         if: steps.updater.outputs.present == 'true'
         run: |
-          $url = "${{ vars.UPDATE_URL }}".Trim()
           $file = "src/git_assistant/updating/update_url.txt"
-          if (-not $url) {
-            $msg = "No UPDATE_URL repository variable - this build has no default update service."
-            Write-Warning $msg
-            "### Update service: not configured`n`n$msg" >> $env:GITHUB_STEP_SUMMARY
-            exit 0
+          $override = "${{ vars.UPDATE_URL }}".Trim()
+
+          if ($override) {
+            $url = $override
+            $source = "UPDATE_URL repository variable"
+          } elseif (Test-Path $file) {
+            $url = (Get-Content $file -Raw).Trim()
+            $source = "$file (committed)"
+          } else {
+            throw "no update service address: $file is missing and UPDATE_URL is unset"
           }
+
           if ($url -notmatch '^https?://') {
-            throw "UPDATE_URL must start with http:// or https://, got '$url'"
+            throw "the update address must start with http:// or https://, got '$url' from $source"
           }
           # The repository root, not its metadata directory. Getting this wrong
           # produces 404s on every metadata fetch and an error that talks about
           # timestamp.json rather than about the URL.
           if ($url -match '/metadata/?$') {
-            throw "UPDATE_URL is the repository root, not its metadata directory: '$url'"
+            throw "the update address is the repository root, not its metadata directory: '$url'"
           }
+
           $url | Set-Content -Path $file -NoNewline -Encoding utf8
-          "### Update service`n`n``$url``" >> $env:GITHUB_STEP_SUMMARY
+          "### Update service`n`n``$url```n`nfrom $source" >> $env:GITHUB_STEP_SUMMARY
 
       # --onedir, not --onefile: a onefile build unpacks to %TEMP% on every
       # launch, which defeats both A/B slot installs and Authenticode pinning of
@@ -178,14 +192,12 @@ jobs:
               "--collect-all", "dist_client",
               "--add-data", "src/git_assistant/updating/root.json;git_assistant/updating"
             )
-            # Only when the previous step wrote one. Bundling a file that does
-            # not exist is a PyInstaller error, and an absent default is a
-            # supported state rather than a failure.
-            if (Test-Path "src/git_assistant/updating/update_url.txt") {
-              $args += @(
-                "--add-data", "src/git_assistant/updating/update_url.txt;git_assistant/updating"
-              )
-            }
+            # Unconditional: the previous step fails the build if there is no
+            # address, so by here there is always a file to bundle. Making this
+            # conditional is how a build shipped without one and said nothing.
+            $args += @(
+              "--add-data", "src/git_assistant/updating/update_url.txt;git_assistant/updating"
+            )
           }
           $args += "src/git_assistant/__main__.py"
           uv run pyinstaller @args

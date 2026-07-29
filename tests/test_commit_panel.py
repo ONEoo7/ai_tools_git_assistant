@@ -43,7 +43,7 @@ def test_warning_clears_once_repositories_are_added(qapp, settings):
     settings.active_repo = "/x/a"
     panel.refresh_repos()
 
-    assert panel.repo_combo.count() == 1
+    assert panel.repo_list.count() == 1
     assert panel.status.text() == ""
     assert panel.regen_btn.isEnabled()
 

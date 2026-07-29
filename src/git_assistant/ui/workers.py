@@ -23,6 +23,11 @@ from git_assistant.config import Settings
 from git_assistant.lmstudio_client import LMStudioClient
 
 
+# Threads still running, kept referenced so Python cannot collect them early.
+# See run_worker for why this is not left to the caller.
+_IN_FLIGHT: set = set()
+
+
 class GeneratorWorker(QObject):
     progress = pyqtSignal(str)
     finished = pyqtSignal(object)  # GenerationResult
@@ -70,7 +75,7 @@ def run_worker(worker: QObject) -> QThread:
     """Move ``worker`` onto a fresh QThread, start it, and auto-clean up.
 
     The worker must expose a ``run`` slot and a ``finished``/``error`` signal.
-    Returns the QThread (keep a reference alive until it finishes).
+    Returns the QThread, though the caller need not hold on to it.
     """
     thread = QThread()
     worker.moveToThread(thread)
@@ -83,5 +88,11 @@ def run_worker(worker: QObject) -> QThread:
     worker.error.connect(_cleanup)
     thread.finished.connect(thread.deleteLater)
     thread.finished.connect(worker.deleteLater)
+    # Hold both alive until the thread actually finishes. Relying on the caller
+    # to keep a reference means a widget that is closed (or garbage collected)
+    # mid-flight drops the last reference to a *running* QThread, and Qt aborts
+    # the process with "QThread: Destroyed while thread is still running".
+    _IN_FLIGHT.add((thread, worker))
+    thread.finished.connect(lambda: _IN_FLIGHT.discard((thread, worker)))
     thread.start()
     return thread

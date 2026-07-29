@@ -104,6 +104,14 @@ class CommitGenerator:
         self.settings = settings
         self.client = client
 
+    def _template(self) -> str:
+        """The prompt template for the active repository.
+
+        Each project can carry its own; repositories without one fall back to
+        the default template.
+        """
+        return self.settings.template_for_repo(self.settings.active_repo)
+
     # ---- budget helpers ----------------------------------------------------
     def _detected_context(self) -> int | None:
         """Model's real loaded context, or None if it can't be determined."""
@@ -181,7 +189,7 @@ class CommitGenerator:
 
         # Does the full single-shot prompt fit?
         full_prompt = render_template(
-            s.prompt_template, branch=branch, diffstat=diffstat, diff=filtered_diff
+            self._template(), branch=branch, diffstat=diffstat, diff=filtered_diff
         )
         full_tokens = estimate_tokens(prompts.COMMIT_SYSTEM) + estimate_tokens(
             full_prompt
@@ -237,13 +245,13 @@ class CommitGenerator:
         combined = "\n".join(notes)
         # Ensure the final prompt fits by hard-truncating the notes if needed.
         final_scaffold = prompts.COMMIT_SYSTEM + render_template(
-            s.prompt_template, branch=branch, diffstat=diffstat, diff=""
+            self._template(), branch=branch, diffstat=diffstat, diff=""
         )
         content_budget = max(256, usable - estimate_tokens(final_scaffold))
         combined = truncate_to_budget(combined, content_budget, estimate_tokens)
 
         final_prompt = render_template(
-            s.prompt_template, branch=branch, diffstat=diffstat, diff=combined
+            self._template(), branch=branch, diffstat=diffstat, diff=combined
         )
         progress("Synthesizing final commit message...")
         self._check_cancel(is_cancelled)
@@ -393,7 +401,7 @@ class CommitGenerator:
     ) -> list[str]:
         usable = self._usable(context)
         final_scaffold = prompts.COMMIT_SYSTEM + render_template(
-            self.settings.prompt_template, branch=branch, diffstat=diffstat, diff=""
+            self._template(), branch=branch, diffstat=diffstat, diff=""
         )
         scaffold = prompts.REDUCE_SYSTEM + prompts.REDUCE_TEMPLATE.replace(
             "{notes}", ""
