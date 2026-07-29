@@ -20,7 +20,7 @@ from git_assistant.ui.repo_watcher import RepoWatcher
 from git_assistant.ui.settings_dialog import SettingsDialog
 from git_assistant.ui.update_prompt import UpdateCheckWorker, ask_to_install
 from git_assistant.ui.workers import FunctionWorker, run_worker
-from git_assistant.updating import UpdateConfig, install_update
+from git_assistant.updating import UpdateConfig, clear_staged_updates, install_update
 
 def _norm(path: str) -> str:
     return os.path.normcase(os.path.normpath(path))
@@ -73,6 +73,11 @@ class TrayApp:
         # Fill in any missing repo owners (e.g. from configs saved before owners
         # were resolved, or repos unblocked since) so the tray shows owner\name.
         self._backfill_owners()
+
+        # Remove the installer that produced this build, if there is one. This
+        # is the only moment it can go: the copy that downloaded it launched it
+        # and then quit, so it was never both alive and finished. This one is.
+        clear_staged_updates()
 
         if self._update_config.enabled:
             self._check_for_update(announce_nothing=False)

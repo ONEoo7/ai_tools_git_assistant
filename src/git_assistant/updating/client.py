@@ -570,16 +570,20 @@ def download_update(config: UpdateConfig, result: UpdateResult, destination: Pat
 # ------------------------------------------------------------- installing
 
 
-def staged_path(result: UpdateResult) -> Path:
-    """Where a downloaded release waits to be installed.
+def staged_dir() -> Path:
+    """Where downloaded releases wait to be installed.
 
     Under the per-user config directory rather than `%TEMP%`. Both are
     per-user, but the installer is executed from here, and a directory whose
     contents are routinely written by other software is a poor place to keep
     something about to be run.
     """
-    name = result.target_path.rsplit("/", 1)[-1]
-    return Path(user_config_dir(APP_NAME, appauthor=False)) / "updates" / name
+    return Path(user_config_dir(APP_NAME, appauthor=False)) / "updates"
+
+
+def staged_path(result: UpdateResult) -> Path:
+    """Where one downloaded release waits, named by its signed target path."""
+    return staged_dir() / result.target_path.rsplit("/", 1)[-1]
 
 
 def install_update(config: UpdateConfig, result: UpdateResult) -> Path:
@@ -605,31 +609,38 @@ def install_update(config: UpdateConfig, result: UpdateResult) -> Path:
             "the update service must publish the installer"
         )
 
-    _clear_old_downloads(staged)
+    clear_staged_updates(keep=staged)
     download_update(config, result, staged)
     _verify_staged(result, staged)
     _launch_installer(staged)
     return staged
 
 
-def _clear_old_downloads(keep: Path) -> None:
-    """Delete previously staged installers.
+def clear_staged_updates(keep: Path | None = None) -> None:
+    """Delete staged installers, optionally sparing one.
 
-    Each one is tens of megabytes and nothing else ever removes them, so
-    without this every update a machine ever takes stays on disk for good. Done
-    before the download rather than after the install, because after the
-    install this process no longer exists to do it.
+    Called from two places, because neither alone is enough:
 
-    Failures are ignored: not reclaiming disk space must never be the reason an
-    update does not happen.
+    - **At startup**, sparing nothing. This is the only moment the installer
+      that produced the running build can be removed: the application that
+      downloaded it launched it and then quit, so it was never alive and
+      finished at the same time. The relaunched copy is.
+    - **Before a download**, sparing the file about to be written, so a machine
+      that never restarts does not accumulate one installer per update.
+
+    Failures are ignored throughout. A file still locked by an installer that
+    has not quite exited is the ordinary case at startup, and it will be swept
+    on the next start; not reclaiming disk space must never be the reason an
+    update does not happen, or the reason the application does not start.
     """
-    if not keep.parent.is_dir():
+    directory = keep.parent if keep is not None else staged_dir()
+    if not directory.is_dir():
         return
-    for old in keep.parent.iterdir():
-        if old == keep or not old.is_file():
+    for stale in directory.iterdir():
+        if stale == keep or not stale.is_file():
             continue
         try:
-            old.unlink()
+            stale.unlink()
         except OSError:
             pass
 

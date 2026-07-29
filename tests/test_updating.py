@@ -527,3 +527,47 @@ def test_every_build_path_bundles_the_updater_data_files() -> None:
     workflow = (REPO_ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
     for name in needed:
         assert name in workflow, f"the release workflow does not bundle {name}"
+
+
+def test_startup_sweeps_the_directory_completely(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The relaunched build removes the installer that produced it.
+
+    Sparing nothing, unlike the pre-download sweep: at startup there is no file
+    that is about to be needed, and the one sitting there is the installer this
+    very build was made by.
+    """
+    monkeypatch.setattr(client, "staged_dir", lambda: tmp_path)
+    (tmp_path / "setup-0.3.5.exe").write_bytes(b"the installer that just ran")
+
+    client.clear_staged_updates()
+
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_a_locked_installer_does_not_stop_startup(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An installer that has not quite exited still holds its own file open.
+
+    That is the ordinary case at startup, since the installer relaunches the
+    application before it finishes. It must not raise on the path that builds
+    the tray.
+    """
+    monkeypatch.setattr(client, "staged_dir", lambda: tmp_path)
+    (tmp_path / "setup.exe").write_bytes(b"x")
+
+    def boom(_self):
+        raise OSError("in use by another process")
+
+    monkeypatch.setattr(Path, "unlink", boom)
+    client.clear_staged_updates()  # must not raise
+
+
+def test_sweeping_a_directory_that_is_not_there_is_fine(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # A fresh install has never staged anything.
+    monkeypatch.setattr(client, "staged_dir", lambda: tmp_path / "never-created")
+    client.clear_staged_updates()
