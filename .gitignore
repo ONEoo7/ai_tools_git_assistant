@@ -33,8 +33,13 @@ MANIFEST
 *.spec
 # ...except this project's hand-authored build specs, which are source, not
 # generated artefacts. Without these a fresh clone cannot build.
-!git-assistant.spec
-!git-assistant-onedir.spec
+#
+# A wildcard rather than one line per spec. Listing them individually meant a
+# new spec was ignored by default: `git add` skipped it without a word, `git
+# status` stayed clean, and the release tag was cut from a commit that did not
+# contain it. CI then failed with "Spec file not found" for a file sitting
+# right there in the working tree.
+!git-assistant*.spec
 
 # Installer logs
 pip-log.txt
