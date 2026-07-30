@@ -51,13 +51,43 @@ Unicode true
 ; Only ever deleted now - see the "Start with Windows" section for why.
 !define RUN_KEY      "Software\Microsoft\Windows\CurrentVersion\Run"
 !define STARTUP_LNK  "$SMSTARTUP\${APP_NAME}.lnk"
+
+; PERMACHINE switches this from a per-user install under %LOCALAPPDATA% to a
+; per-machine one under Program Files.
+;
+; The per-user location exists so the self-updater can replace the files it
+; runs from without a UAC prompt. A build without the updater has no such need,
+; and a user-writable install directory is one of the ingredients Defender's
+; heuristics score: an unsigned executable somewhere any process can rewrite,
+; registered to appear at sign-in, is the shape of malware persistence. Program
+; Files is not writable without elevation, which removes that ingredient.
+;
+; Whether it is enough is unverified -- five earlier attempts at reducing the
+; behavioural profile changed nothing. Code signing remains the real answer;
+; this is the last ingredient that can be removed without one. See the README.
+!ifdef PERMACHINE
+  !define REG_ROOT     HKLM
+  !define SHELL_CTX    all
+  !define DEFAULT_DIR  "$PROGRAMFILES64\GitAssistant"
+  !define EXEC_LEVEL   admin
+!else
+  !define REG_ROOT     HKCU
+  !define SHELL_CTX    current
+  !define DEFAULT_DIR  "$LOCALAPPDATA\Programs\GitAssistant"
+  !define EXEC_LEVEL   user
+!endif
+
+; Settings belong to the person, not the machine, and the application resolves
+; them with platformdirs regardless of how it was installed. Always read under
+; the *current user's* context, even in a per-machine install -- see the
+; uninstaller, which switches context before touching this.
 !define CONFIG_DIR   "$LOCALAPPDATA\git-assistant"
 
 Name "${APP_NAME}"
 OutFile "${OUT_FILE}"
-InstallDir "$LOCALAPPDATA\Programs\GitAssistant"
-InstallDirRegKey HKCU "Software\GitAssistant" "InstallDir"
-RequestExecutionLevel user
+InstallDir "${DEFAULT_DIR}"
+InstallDirRegKey ${REG_ROOT} "Software\GitAssistant" "InstallDir"
+RequestExecutionLevel ${EXEC_LEVEL}
 SetCompressor /SOLID lzma
 
 VIProductVersion "${VERSION}.0"
@@ -78,9 +108,15 @@ VIAddVersionKey "LegalCopyright"  "${PUBLISHER}"
 !insertmacro MUI_PAGE_DIRECTORY
 !insertmacro MUI_PAGE_INSTFILES
 
-; Offer to launch straight from the finish page.
-!define MUI_FINISHPAGE_RUN "$INSTDIR\${EXE_NAME}"
-!define MUI_FINISHPAGE_RUN_TEXT "Start ${APP_NAME} (runs in the system tray)"
+; Offer to launch straight from the finish page -- but never from a per-machine
+; install, where the installer is elevated and the application would inherit
+; that token. A tray app running as administrator writes its settings into the
+; wrong profile and hands every git command it spawns rights it should not have.
+; Start it from the Start menu instead.
+!ifndef PERMACHINE
+  !define MUI_FINISHPAGE_RUN "$INSTDIR\${EXE_NAME}"
+  !define MUI_FINISHPAGE_RUN_TEXT "Start ${APP_NAME} (runs in the system tray)"
+!endif
 !insertmacro MUI_PAGE_FINISH
 
 !insertmacro MUI_UNPAGE_CONFIRM
@@ -96,9 +132,12 @@ Var ModeVerb      ; "Installing" / "Repairing" / "Upgrading" / "Downgrading"
 ; version, an upgrade, or a downgrade. Asking here (rather than silently
 ; overwriting) means running the installer twice cannot surprise anyone.
 Function .onInit
+  ; Everything below -- $SMPROGRAMS, $DESKTOP, $SMSTARTUP, $LOCALAPPDATA --
+  ; resolves differently per context, so it is set once, up front.
+  SetShellVarContext ${SHELL_CTX}
   StrCpy $ModeVerb "Installing"
-  ReadRegStr $PrevVersion HKCU "${UNINST_KEY}" "DisplayVersion"
-  ReadRegStr $PrevDir     HKCU "${UNINST_KEY}" "InstallLocation"
+  ReadRegStr $PrevVersion ${REG_ROOT} "${UNINST_KEY}" "DisplayVersion"
+  ReadRegStr $PrevDir     ${REG_ROOT} "${UNINST_KEY}" "InstallLocation"
 
   ${If} $PrevVersion == ""
     Return  ; nothing installed - ordinary first install
@@ -150,9 +189,15 @@ FunctionEnd
 ; section has succeeded, so a failed install never relaunches into a
 ; half-replaced directory.
 Function .onInstSuccess
+!ifndef PERMACHINE
   ${If} ${Silent}
     Exec '"$INSTDIR\${EXE_NAME}"'
   ${EndIf}
+!else
+  ; Never here: a silent per-machine run is a deployment, not a self-update --
+  ; there is no updater in this build to have started it -- and the process
+  ; would inherit the installer's elevated token.
+!endif
 FunctionEnd
 
 ; Nothing to choose when a copy already exists - it is replaced in place, and
@@ -165,21 +210,32 @@ FunctionEnd
 
 ; File replacement fails while the app holds its own exe open, so stop it first.
 ;
-; By install PATH, not by executable name. The two builds disagree about the
-; name -- a local build produces GitAssistant.exe and CI produces
-; git-assistant.exe -- so killing by name misses precisely the case self-update
-; runs into: a CI installer replacing a copy that a local build installed. The
-; taskkill would match nothing, the old process would keep _internal open, and
-; the upgrade would fail part-way through.
+; By name, and both names: the two builds disagree about it -- a local build
+; produces GitAssistant.exe and CI produces git-assistant.exe -- and killing
+; only the name this installer was built with misses precisely the case an
+; upgrade runs into, a CI installer replacing a copy a local build installed.
+; The old process would keep _internal open and the upgrade would fail
+; part-way through.
 ;
-; Anything running out of $INSTDIR is ours, whatever it is called.
+; This was a single PowerShell call that matched on the install *path*, which
+; was more precise: it stopped what was running from $INSTDIR and nothing else.
+; It was replaced because an installer that launches PowerShell to enumerate
+; and terminate processes is a large part of what a malicious installer looks
+; like, and this one was detected as Trojan:Script/Wacatac.F!ml -- a script
+; detection, on an installer whose only script-like act was that call.
+;
+; The cost is precision. Killing by name will also stop a *portable* build the
+; user happens to be running from somewhere else, which the path match left
+; alone. That is a rare situation and its worst outcome is an application
+; closing during an install it was about to be replaced by; the alternative was
+; an installer that antivirus removes, which has no working outcome at all.
+;
+; Whether this actually changes the detection is unverified -- see the README.
 !macro StopRunningApp
   DetailPrint "Closing ${APP_NAME} if it is running..."
-  nsExec::Exec `powershell -NoProfile -NonInteractive -Command "Get-Process | Where-Object { $$_.Path -like '$INSTDIR\*' } | Stop-Process -Force"`
-  Pop $0  ; ignored: nothing running from there is the ordinary case
-  ; Fallback for a machine where PowerShell will not run, and belt-and-braces
-  ; for the name this particular installer was built with.
-  nsExec::Exec 'taskkill /IM "${EXE_NAME}" /F'
+  nsExec::Exec 'taskkill /IM "GitAssistant.exe" /F'
+  Pop $0  ; ignored: not running is the ordinary case
+  nsExec::Exec 'taskkill /IM "git-assistant.exe" /F'
   Pop $0
   Sleep 500
 !macroend
@@ -212,21 +268,21 @@ Section "${APP_NAME} (required)" SEC_APP
     Delete "$INSTDIR\git-assistant.exe"
   !endif
 
-  WriteRegStr HKCU "Software\GitAssistant" "InstallDir" "$INSTDIR"
+  WriteRegStr ${REG_ROOT} "Software\GitAssistant" "InstallDir" "$INSTDIR"
   WriteUninstaller "$INSTDIR\Uninstall.exe"
 
-  ; Add/Remove Programs entry (per-user hive, matching the install).
-  WriteRegStr   HKCU "${UNINST_KEY}" "DisplayName"     "${APP_NAME}"
-  WriteRegStr   HKCU "${UNINST_KEY}" "DisplayVersion"  "${VERSION}"
-  WriteRegStr   HKCU "${UNINST_KEY}" "Publisher"       "${PUBLISHER}"
-  WriteRegStr   HKCU "${UNINST_KEY}" "DisplayIcon"     "$INSTDIR\${EXE_NAME}"
-  WriteRegStr   HKCU "${UNINST_KEY}" "UninstallString" "$\"$INSTDIR\Uninstall.exe$\""
-  WriteRegStr   HKCU "${UNINST_KEY}" "InstallLocation" "$INSTDIR"
-  WriteRegDWORD HKCU "${UNINST_KEY}" "NoModify" 1
-  WriteRegDWORD HKCU "${UNINST_KEY}" "NoRepair" 1
+  ; Add/Remove Programs entry, in the hive that matches the install.
+  WriteRegStr   ${REG_ROOT} "${UNINST_KEY}" "DisplayName"     "${APP_NAME}"
+  WriteRegStr   ${REG_ROOT} "${UNINST_KEY}" "DisplayVersion"  "${VERSION}"
+  WriteRegStr   ${REG_ROOT} "${UNINST_KEY}" "Publisher"       "${PUBLISHER}"
+  WriteRegStr   ${REG_ROOT} "${UNINST_KEY}" "DisplayIcon"     "$INSTDIR\${EXE_NAME}"
+  WriteRegStr   ${REG_ROOT} "${UNINST_KEY}" "UninstallString" "$\"$INSTDIR\Uninstall.exe$\""
+  WriteRegStr   ${REG_ROOT} "${UNINST_KEY}" "InstallLocation" "$INSTDIR"
+  WriteRegDWORD ${REG_ROOT} "${UNINST_KEY}" "NoModify" 1
+  WriteRegDWORD ${REG_ROOT} "${UNINST_KEY}" "NoRepair" 1
   ${GetSize} "$INSTDIR" "/S=0K" $0 $1 $2
   IntFmt $0 "0x%08X" $0
-  WriteRegDWORD HKCU "${UNINST_KEY}" "EstimatedSize" "$0"
+  WriteRegDWORD ${REG_ROOT} "${UNINST_KEY}" "EstimatedSize" "$0"
 
   CreateDirectory "$SMPROGRAMS\${APP_NAME}"
   CreateShortcut "$SMPROGRAMS\${APP_NAME}\${APP_NAME}.lnk" "$INSTDIR\${EXE_NAME}"
@@ -237,8 +293,14 @@ Section "${APP_NAME} (required)" SEC_APP
   ; recreates either -- see the note further down for why autostart is no
   ; longer offered. Unconditional and in the required section, so upgrading is
   ; what clears an install that Defender is already unhappy about.
+  ;
+  ; Always the *per-user* copies, whatever context this install runs in: every
+  ; release that wrote them was a per-user install, so HKLM and the all-users
+  ; Startup folder never held them and looking there would clean nothing.
+  SetShellVarContext current
   DeleteRegValue HKCU "${RUN_KEY}" "GitAssistant"
   Delete "${STARTUP_LNK}"
+  SetShellVarContext ${SHELL_CTX}
 SectionEnd
 
 Section "Desktop shortcut" SEC_DESKTOP
@@ -280,18 +342,22 @@ LangString DESC_DESKTOP ${LANG_ENGLISH} "Create a shortcut on the desktop."
 !insertmacro MUI_FUNCTION_DESCRIPTION_END
 
 Section "Uninstall"
+  SetShellVarContext ${SHELL_CTX}
   !insertmacro StopRunningApp
 
   Delete "$SMPROGRAMS\${APP_NAME}\${APP_NAME}.lnk"
   Delete "$SMPROGRAMS\${APP_NAME}\Uninstall ${APP_NAME}.lnk"
   RMDir  "$SMPROGRAMS\${APP_NAME}"
   Delete "$DESKTOP\${APP_NAME}.lnk"
-  Delete "${STARTUP_LNK}"
 
-  ; Still removed, for a copy installed by 0.3.7 or earlier.
+  DeleteRegKey ${REG_ROOT} "${UNINST_KEY}"
+  DeleteRegKey ${REG_ROOT} "Software\GitAssistant"
+
+  ; Per-user leftovers from 0.3.8 or earlier, which were always per-user
+  ; installs. Same reasoning as the installer's cleanup.
+  SetShellVarContext current
+  Delete "${STARTUP_LNK}"
   DeleteRegValue HKCU "${RUN_KEY}" "GitAssistant"
-  DeleteRegKey   HKCU "${UNINST_KEY}"
-  DeleteRegKey   HKCU "Software\GitAssistant"
 
   ; Only the install directory - never a blind RMDir /r of a user-chosen path.
   RMDir /r "$INSTDIR\_internal"

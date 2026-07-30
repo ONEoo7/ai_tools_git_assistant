@@ -214,7 +214,52 @@ detection; that is precisely why the installer will not do it for you.
 
 The executable carries a version resource (publisher, product, version — see
 `tools/win_version_info.py`); shipping without one is unusual for real software and
-common in packed malware. That is weak evidence, and it is not the fix.
+common in packed malware. The installer no longer shells out to PowerShell to stop
+a running copy — it uses `taskkill` on both executable names instead — after the
+installer was separately detected as `Trojan:Script/Wacatac.F!ml`, a *script*
+detection whose only plausible subject was that call. The cost is precision: it
+will also stop a portable build running from elsewhere, which the old path-based
+match left alone.
+
+Both are weak evidence, and neither is the fix.
+
+### What was measured, and what did not work
+
+Five behavioural changes were tried against Defender. All of them were eliminated
+as the cause:
+
+| Change | Outcome |
+|---|---|
+| Run key → Startup-folder shortcut | Flagged by the sibling rule |
+| Autostart removed entirely | Flagged on run, same rule |
+| New hash (version resource) | Clean until it ran, then flagged |
+| Self-updater removed from the bundle | Flagged, **identical verdict** |
+| PowerShell removed from the installer | Unverified |
+| Program Files instead of `%LOCALAPPDATA%` | Unverified |
+
+The verdict never changed. Behavioural tuning is not a productive direction here,
+and a build that has just been rebuilt from unchanged source reproduces the same
+hash and the same block — so "rebuild and retry" measures nothing.
+
+The observed sequence is always the same: a fresh hash builds and sits readable in
+`build/` and `dist/`; installing and running it produces the verdict; the verdict
+then propagates back onto the build-tree copies, so the project stops compiling.
+
+### Per-machine install (no-update build only)
+
+The no-update installer installs to **`%ProgramFiles%\GitAssistant`** and requires
+elevation, where the ordinary one installs per-user without it. A user-writable
+install directory is one of the ingredients these heuristics score, and it only
+exists so the self-updater can replace the files it runs from without a UAC prompt
+— a build with no updater has no such need.
+
+Consequences: a UAC prompt at install, shortcuts and the uninstall entry become
+machine-wide (`HKLM`), and the finish page no longer offers to launch the app,
+since it would inherit the installer's elevated token. Per-user settings are
+untouched — the app resolves those with `platformdirs` regardless.
+
+Both installers still clean up the *per-user* autostart leftovers from ≤ 0.3.8,
+since every release that wrote them was a per-user install.
 
 **Code signing is the fix.** The binary is unsigned and self-updating, so its hash
 changes with every release and reputation never accumulates — each build is judged

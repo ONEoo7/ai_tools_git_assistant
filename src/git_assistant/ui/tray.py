@@ -17,10 +17,21 @@ from git_assistant.config import RepoEntry, Settings
 from git_assistant.ui.icon import app_icon
 from git_assistant.ui.preview_dialog import PreviewDialog
 from git_assistant.ui.repo_watcher import RepoWatcher
+from git_assistant.features import UPDATES_SUPPORTED
 from git_assistant.ui.settings_dialog import SettingsDialog
-from git_assistant.ui.update_prompt import UpdateCheckWorker, ask_to_install
 from git_assistant.ui.workers import FunctionWorker, run_worker
-from git_assistant.updating import UpdateConfig, clear_staged_updates, install_update
+
+# Absent from the no-update build, along with everything they reach. Imported
+# behind the flag rather than defensively at each call site so that a build
+# without the updater cannot import it by accident. See git_assistant.features.
+if UPDATES_SUPPORTED:
+    from git_assistant.ui.update_prompt import UpdateCheckWorker, ask_to_install
+    from git_assistant.updating import (
+        UpdateConfig,
+        clear_staged_updates,
+        install_update,
+    )
+
 
 def _norm(path: str) -> str:
     return os.path.normcase(os.path.normpath(path))
@@ -41,7 +52,7 @@ class TrayApp:
         # whether updating is configured. The address comes from `update.json`
         # if the user wrote one, otherwise from the build. A developer checkout
         # has neither and is refused anyway, so it never reaches the network.
-        self._update_config = UpdateConfig.load()
+        self._update_config = UpdateConfig.load() if UPDATES_SUPPORTED else None
         self._update_worker = None
         self._update_thread = None
         # Versions already put in front of the user this session. A repeating
@@ -77,9 +88,10 @@ class TrayApp:
         # Remove the installer that produced this build, if there is one. This
         # is the only moment it can go: the copy that downloaded it launched it
         # and then quit, so it was never both alive and finished. This one is.
-        clear_staged_updates()
+        if UPDATES_SUPPORTED:
+            clear_staged_updates()
 
-        if self._update_config.enabled:
+        if self._updates_on:
             self._check_for_update(announce_nothing=False)
             # Then keep checking, so an application left running for days does
             # not need the window raised to notice a release. Qt takes
@@ -87,6 +99,16 @@ class TrayApp:
             # get wrong by three orders of magnitude should not be the one in
             # the file people edit.
             self._update_timer.start(self._update_config.check_minutes * 60_000)
+
+    @property
+    def _updates_on(self) -> bool:
+        """Is this build able to update itself, and configured to?
+
+        Two separate questions collapsed into the one every caller asks. The
+        no-update build answers False at the first hurdle, without touching
+        `UpdateConfig`, which it does not have.
+        """
+        return self._update_config is not None and self._update_config.enabled
 
     # ---- menu --------------------------------------------------------------
     def _rebuild_menu(self) -> None:
@@ -100,7 +122,7 @@ class TrayApp:
         metrics_act.triggered.connect(self._on_metrics)
         settings_act = self.menu.addAction("Settings...")
         settings_act.triggered.connect(self._on_settings)
-        if self._update_config.enabled:
+        if self._updates_on:
             update_act = self.menu.addAction("Check for updates...")
             update_act.triggered.connect(
                 lambda: self._check_for_update(announce_nothing=True)
@@ -195,8 +217,8 @@ class TrayApp:
         check itself fails -- from the menu item, where silence would look like
         a broken button.
         """
-        if self._update_thread is not None:
-            return  # one at a time
+        if not self._updates_on or self._update_thread is not None:
+            return  # no updater in this build, or one already running
 
         worker = UpdateCheckWorker(self._update_config)
         # `announce_nothing` marks the menu item, which is someone asking. That
@@ -285,6 +307,9 @@ class TrayApp:
         two copies is how a consent dialog ends up meaning slightly different
         things depending on which route you took to it.
         """
+        if not self._updates_on:
+            return  # nothing here can run in a build without the updater
+
         from git_assistant.updating.client import current_version
 
         if not ask_to_install(result, current_version()):

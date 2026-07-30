@@ -48,12 +48,16 @@ from git_assistant.ui.identities_panel import IdentitiesPanel
 from git_assistant.ui.identity_bar import IdentityBar
 from git_assistant.ui.preview_dialog import SECTION_GAP, CommitPanel
 from git_assistant.ui.tags_panel import TagsPanel
-from git_assistant.ui.update_prompt import UpdateCheckWorker
-from git_assistant.updating.client import (
-    UpdateConfig,
-    ensure_update_config,
-    update_config_path,
-)
+from git_assistant.features import NO_UPDATES_NOTE, UPDATES_SUPPORTED
+
+# Absent from the no-update build; see git_assistant.features.
+if UPDATES_SUPPORTED:
+    from git_assistant.ui.update_prompt import UpdateCheckWorker
+    from git_assistant.updating.client import (
+        UpdateConfig,
+        ensure_update_config,
+        update_config_path,
+    )
 from git_assistant.tokenizer import input_budget, reserved_output
 from git_assistant.ui.workers import FunctionWorker, run_worker
 
@@ -282,6 +286,12 @@ class SettingsDialog(QDialog):
         The tray also pushes its own results in through `set_online_version`,
         so the two readouts cannot disagree.
         """
+        if not UPDATES_SUPPORTED:
+            # Not "updates are off", which invites looking for the switch that
+            # turns them on. There isn't one: the code is not in this build.
+            self._show_update_state("no updater", tooltip=NO_UPDATES_NOTE)
+            return
+
         if self._update_thread is not None:
             return  # one at a time
 
@@ -570,11 +580,15 @@ class SettingsDialog(QDialog):
             Qt.TextInteractionFlag.TextSelectableByMouse
         )
         self.update_source.setWordWrap(True)
-        edit_update_btn = QPushButton("Edit...")
-        edit_update_btn.setToolTip(str(update_config_path()))
-        edit_update_btn.clicked.connect(self._on_edit_update_config)
         update_row.addWidget(self.update_source, 1)
-        update_row.addWidget(edit_update_btn)
+        # No Edit button without an updater: it opens `update.json`, and a file
+        # that configures a subsystem this build does not contain is worse than
+        # no file -- it implies the address is the reason nothing updates.
+        if UPDATES_SUPPORTED:
+            edit_update_btn = QPushButton("Edit...")
+            edit_update_btn.setToolTip(str(update_config_path()))
+            edit_update_btn.clicked.connect(self._on_edit_update_config)
+            update_row.addWidget(edit_update_btn)
 
         form.addRow("Diff source:", self.diff_mode_combo)
         form.addRow("Output reserve (margin):", self.margin_spin)
@@ -1277,6 +1291,11 @@ class SettingsDialog(QDialog):
         identical from the outside otherwise -- the menu item is simply absent
         -- which leaves no way to tell a missing address from a typo in one.
         """
+        if not UPDATES_SUPPORTED:
+            self.update_source.setText(NO_UPDATES_NOTE)
+            self.update_source.setStyleSheet("color: #888;")
+            return
+
         config = UpdateConfig.load()
         if config.problem:
             self.update_source.setText(config.problem)
