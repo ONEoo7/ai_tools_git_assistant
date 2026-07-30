@@ -48,7 +48,9 @@ Unicode true
 !define APP_NAME     "Git Assistant"
 !define PUBLISHER    "Stefan Ghitescu"
 !define UNINST_KEY   "Software\Microsoft\Windows\CurrentVersion\Uninstall\GitAssistant"
+; Only ever deleted now - see the "Start with Windows" section for why.
 !define RUN_KEY      "Software\Microsoft\Windows\CurrentVersion\Run"
+!define STARTUP_LNK  "$SMSTARTUP\${APP_NAME}.lnk"
 !define CONFIG_DIR   "$LOCALAPPDATA\git-assistant"
 
 Name "${APP_NAME}"
@@ -229,29 +231,52 @@ Section "${APP_NAME} (required)" SEC_APP
   CreateDirectory "$SMPROGRAMS\${APP_NAME}"
   CreateShortcut "$SMPROGRAMS\${APP_NAME}\${APP_NAME}.lnk" "$INSTDIR\${EXE_NAME}"
   CreateShortcut "$SMPROGRAMS\${APP_NAME}\Uninstall ${APP_NAME}.lnk" "$INSTDIR\Uninstall.exe"
+
+  ; Remove autostart left by an earlier release, in whichever form it took:
+  ; the Run key value up to 0.3.7, the Startup shortcut in 0.3.8. Nothing
+  ; recreates either -- see the note further down for why autostart is no
+  ; longer offered. Unconditional and in the required section, so upgrading is
+  ; what clears an install that Defender is already unhappy about.
+  DeleteRegValue HKCU "${RUN_KEY}" "GitAssistant"
+  Delete "${STARTUP_LNK}"
 SectionEnd
 
 Section "Desktop shortcut" SEC_DESKTOP
   CreateShortcut "$DESKTOP\${APP_NAME}.lnk" "$INSTDIR\${EXE_NAME}"
 SectionEnd
 
-; On by default: this is a tray app, so starting with Windows is the normal way
-; to use it. HKCU (not HKLM) to match the per-user install.
+; There is deliberately NO "start with Windows" option.
 ;
-; --startup keeps sign-in quiet: it comes up in the tray only, whereas the
-; shortcuts open the window (an icon that appears to do nothing reads as broken).
-Section "Start with Windows" SEC_STARTUP
-  WriteRegStr HKCU "${RUN_KEY}" "GitAssistant" "$\"$INSTDIR\${EXE_NAME}$\" --startup"
-SectionEnd
+; Two mechanisms were tried and both were flagged by Defender's cloud
+; heuristics, which quarantined the executable and deleted the install:
+;
+;   HKCU ...\CurrentVersion\Run   -> Behavior:Win32/SuspiciousFileInRunKey.A!cl
+;   Startup folder shortcut       -> Trojan:Win32/SuspStartupFolderFileTarget.A!cl
+;
+; They are two names for one judgement. What is being scored is not the
+; mechanism but the target: an unsigned, low-prevalence executable in a
+; user-writable directory (%LOCALAPPDATA%) that registers itself to run at
+; sign-in. That is the shape of malware persistence, and this application
+; matches every part of it except the intent.
+;
+; Worse, the verdict is not confined to the installed copy. Once the behaviour
+; was observed, the same binary was blocked in the build tree as well, so the
+; project would not even compile without an antivirus exclusion.
+;
+; Autostart is therefore not shipped at all. A user who wants it can create the
+; shortcut themselves -- the --startup flag still works, and is documented in
+; the README -- but the installer will not do it on their behalf, because the
+; cost of being wrong is a quarantined install rather than a warning.
+;
+; Revisit once the executable is code-signed: a trusted publisher is the signal
+; whose absence all of this is really about.
 
 LangString DESC_APP     ${LANG_ENGLISH} "The ${APP_NAME} application (required)."
 LangString DESC_DESKTOP ${LANG_ENGLISH} "Create a shortcut on the desktop."
-LangString DESC_STARTUP ${LANG_ENGLISH} "Launch ${APP_NAME} automatically when you sign in."
 
 !insertmacro MUI_FUNCTION_DESCRIPTION_BEGIN
   !insertmacro MUI_DESCRIPTION_TEXT ${SEC_APP}     $(DESC_APP)
   !insertmacro MUI_DESCRIPTION_TEXT ${SEC_DESKTOP} $(DESC_DESKTOP)
-  !insertmacro MUI_DESCRIPTION_TEXT ${SEC_STARTUP} $(DESC_STARTUP)
 !insertmacro MUI_FUNCTION_DESCRIPTION_END
 
 Section "Uninstall"
@@ -261,7 +286,9 @@ Section "Uninstall"
   Delete "$SMPROGRAMS\${APP_NAME}\Uninstall ${APP_NAME}.lnk"
   RMDir  "$SMPROGRAMS\${APP_NAME}"
   Delete "$DESKTOP\${APP_NAME}.lnk"
+  Delete "${STARTUP_LNK}"
 
+  ; Still removed, for a copy installed by 0.3.7 or earlier.
   DeleteRegValue HKCU "${RUN_KEY}" "GitAssistant"
   DeleteRegKey   HKCU "${UNINST_KEY}"
   DeleteRegKey   HKCU "Software\GitAssistant"

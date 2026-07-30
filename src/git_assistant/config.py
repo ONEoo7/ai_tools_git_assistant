@@ -100,6 +100,9 @@ class Settings:
     # its original name so existing settings files load unchanged.
     prompt_template: str = DEFAULT_TEMPLATE
     templates: list[Template] = field(default_factory=list)  # named extras
+    # Committer identities live in committer_identities.json, not here -- see
+    # git_assistant.identities. An older build wrote them into this file; that
+    # key is migrated and removed on first run.
     context_window: int = 32768  # total tokens for input+output (0 => auto-detect)
     safety_margin: float = 0.10  # fraction of the window reserved for the model's output
     ignore_globs: list[str] = field(default_factory=lambda: list(DEFAULT_IGNORE_GLOBS))

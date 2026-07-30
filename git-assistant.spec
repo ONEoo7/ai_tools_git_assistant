@@ -3,6 +3,7 @@
 # Build:  uv run --extra build pyinstaller git-assistant.spec
 # Output: dist/GitAssistant.exe  (single file, no console window)
 
+import sys
 from importlib.util import find_spec
 from pathlib import Path
 
@@ -10,6 +11,10 @@ from PyInstaller.utils.hooks import collect_all
 
 ROOT = Path(SPECPATH)
 ICON = ROOT / "src" / "git_assistant" / "resources" / "icon.ico"
+
+# Shared with the onedir spec so both builds describe themselves identically.
+sys.path.insert(0, str(ROOT / "tools"))
+from win_version_info import read_version, version_resource  # noqa: E402
 
 # Optional updater: dist_client loads a native library via ctypes, which
 # PyInstaller cannot follow. Mirrors .github/workflows/release.yml.
@@ -56,4 +61,6 @@ exe = EXE(
     console=False,  # tray app: no console window
     disable_windowed_traceback=False,
     icon=str(ICON),
+    # See the onedir spec and tools/win_version_info.py.
+    version=version_resource(read_version(ROOT), "GitAssistant"),
 )

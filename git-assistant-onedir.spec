@@ -10,6 +10,7 @@
 #     a ~43 MB monolith.
 # The onefile spec (git-assistant.spec) is kept for the portable download.
 
+import sys
 from importlib.util import find_spec
 from pathlib import Path
 
@@ -17,6 +18,10 @@ from PyInstaller.utils.hooks import collect_all
 
 ROOT = Path(SPECPATH)
 ICON = ROOT / "src" / "git_assistant" / "resources" / "icon.ico"
+
+# Shared with the onefile spec so both builds describe themselves identically.
+sys.path.insert(0, str(ROOT / "tools"))
+from win_version_info import read_version, version_resource  # noqa: E402
 
 # The updater is an optional dependency. dist_client wraps a native library via
 # ctypes, which PyInstaller cannot follow - collect_all pulls it in explicitly.
@@ -64,6 +69,10 @@ exe = EXE(
     console=False,  # tray app: no console window
     disable_windowed_traceback=False,
     icon=str(ICON),
+    # Publisher, product and version, read by Windows and by the reputation
+    # systems that judge an unsigned binary. Shipping without it is unusual
+    # for real software and common in packed malware; see tools/win_version_info.py.
+    version=version_resource(read_version(ROOT), "GitAssistant"),
 )
 
 coll = COLLECT(

@@ -41,8 +41,11 @@ from git_assistant.config import (
     Template,
     config_path,
 )
+from git_assistant.identities import IdentityStore
 from git_assistant.lmstudio_client import LMStudioClient, ModelInfo
 from git_assistant.prompts import DEFAULT_TEMPLATE
+from git_assistant.ui.identities_panel import IdentitiesPanel
+from git_assistant.ui.identity_bar import IdentityBar
 from git_assistant.ui.preview_dialog import SECTION_GAP, CommitPanel
 from git_assistant.ui.tags_panel import TagsPanel
 from git_assistant.ui.update_prompt import UpdateCheckWorker
@@ -102,8 +105,25 @@ class SettingsDialog(QDialog):
         tabs.addTab(self._build_tags_tab(), "Tags")
         tabs.addTab(self._build_connection_tab(), "Connection && Model")
         tabs.addTab(self._build_repos_tab(), "Repositories")
+        # Identities are read from their own file, seeded from git on first run.
+        self.identity_store = IdentityStore.bootstrap()
+        self.identities_panel = IdentitiesPanel(self.identity_store)
+        self.identities_tab_index = tabs.addTab(self.identities_panel, "Identities")
         tabs.addTab(self._build_template_tab(), "Template")
         tabs.addTab(self._build_advanced_tab(), "Advanced")
+
+        # Above the tabs, not inside one: the identity applies to whichever
+        # repository is active, and both repo-driven tabs can change that. Each
+        # tab owns its own RepoPicker, so the bar follows both.
+        self.identity_bar = IdentityBar(self.settings, self.identity_store)
+        for panel in (self.commit_panel, self.tags_panel):
+            panel.repo_picker.repoChanged.connect(self.identity_bar.set_repo)
+        # Editing the list must re-offer it; picking "Manage identities..."
+        # is a request for the tab that owns the list.
+        self.identities_panel.identitiesChanged.connect(self.identity_bar.refresh)
+        self.identity_bar.manageRequested.connect(
+            lambda: tabs.setCurrentIndex(self.identities_tab_index)
+        )
 
         # No Save/Cancel: edits are written to disk automatically (debounced).
         open_cfg_btn = QPushButton("Open config folder")
@@ -140,6 +160,7 @@ class SettingsDialog(QDialog):
         bottom.addWidget(open_cfg_btn)
 
         layout = QVBoxLayout(self)
+        layout.addWidget(self.identity_bar)
         layout.addWidget(tabs)
         layout.addLayout(bottom)
 
@@ -173,6 +194,11 @@ class SettingsDialog(QDialog):
             self.commit_panel.refresh_repos()
         else:
             self.tags_panel.refresh()
+        # RepoPicker.refresh() repopulates with signals blocked, so no
+        # repoChanged arrives even when the active repo moved (via the tray, or
+        # the other tab). Re-read it here or the bar keeps naming the old repo's
+        # identity.
+        self.identity_bar.set_repo(self.settings.active_repo)
 
     def set_online_version(self, version: str | None) -> None:
         """Report the result of a *completed* update check.
@@ -343,6 +369,18 @@ class SettingsDialog(QDialog):
         self.model_combo.setMinimumWidth(360)
         self.model_combo.currentIndexChanged.connect(self._update_budget_label)
 
+        self.ctx_size_spin = QSpinBox()
+        self.ctx_size_spin.setRange(0, 1_048_576)
+        self.ctx_size_spin.setSingleStep(1024)
+        self.ctx_size_spin.setGroupSeparatorShown(True)
+        self.ctx_size_spin.setSpecialValueText("Auto-detect")
+        self.ctx_size_spin.setToolTip(
+            "Total tokens per request (input + output combined). Set this to "
+            "match the context length the model is loaded with in LM Studio. "
+            "0 = auto-detect the model's maximum."
+        )
+        self.ctx_size_spin.valueChanged.connect(self._update_budget_label)
+
         self.parallel_spin = QSpinBox()
         self.parallel_spin.setRange(1, 32)
         self.parallel_spin.setToolTip(
@@ -361,6 +399,7 @@ class SettingsDialog(QDialog):
         form.addRow("Port:", self.port_spin)
         form.addRow("", self.test_btn)
         form.addRow("Model:", self.model_combo)
+        form.addRow("Context window size:", self.ctx_size_spin)
         form.addRow("Parallel requests:", self.parallel_spin)
         form.addRow("Status:", self.conn_status)
         form.addRow("Effective budget:", self.budget_label)
@@ -507,17 +546,6 @@ class SettingsDialog(QDialog):
         self.diff_mode_combo.addItem("Staged changes (git diff --cached)", "cached")
         self.diff_mode_combo.addItem("All uncommitted (git diff HEAD)", "working")
 
-        self.ctx_size_spin = QSpinBox()
-        self.ctx_size_spin.setRange(0, 1_048_576)
-        self.ctx_size_spin.setSingleStep(1024)
-        self.ctx_size_spin.setGroupSeparatorShown(True)
-        self.ctx_size_spin.setSpecialValueText("Auto-detect")
-        self.ctx_size_spin.setToolTip(
-            "Total tokens per request (input + output combined). Set this to "
-            "match the context length the model is loaded with in LM Studio. "
-            "0 = auto-detect the model's maximum."
-        )
-
         self.margin_spin = QDoubleSpinBox()
         self.margin_spin.setRange(0.0, 0.5)
         self.margin_spin.setSingleStep(0.05)
@@ -549,13 +577,11 @@ class SettingsDialog(QDialog):
         update_row.addWidget(edit_update_btn)
 
         form.addRow("Diff source:", self.diff_mode_combo)
-        form.addRow("Context window size:", self.ctx_size_spin)
         form.addRow("Output reserve (margin):", self.margin_spin)
         form.addRow("Ignore globs:", self.ignore_edit)
         form.addRow("Update service:", update_row)
 
         # Keep the Connection tab's effective-budget readout in sync.
-        self.ctx_size_spin.valueChanged.connect(self._update_budget_label)
         self.margin_spin.valueChanged.connect(self._update_budget_label)
 
         # Pin the form to the top; extra vertical space goes to the stretch below.
@@ -1393,7 +1419,7 @@ class SettingsDialog(QDialog):
             window = detected
         else:
             self.budget_label.setText(
-                "Set a Context window size in Advanced, "
+                "Set a Context window size above, "
                 "or test the connection to auto-detect it."
             )
             return

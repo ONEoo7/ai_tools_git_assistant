@@ -191,8 +191,9 @@ class TrayApp:
         """Run one update check off-thread.
 
         ``announce_nothing`` separates the automatic check at startup, which
-        should stay quiet when there is nothing to say, from the menu item,
-        where silence would look like a broken button.
+        should stay quiet when there is nothing to say -- including when the
+        check itself fails -- from the menu item, where silence would look like
+        a broken button.
         """
         if self._update_thread is not None:
             return  # one at a time
@@ -205,13 +206,18 @@ class TrayApp:
         worker.found.connect(
             lambda result: self._on_update_found(result, asked=announce_nothing)
         )
-        worker.error.connect(
-            lambda message: self._notify("Update check failed", message)
-        )
         worker.error.connect(self._tell_window_check_failed)
         if announce_nothing:
             worker.none_available.connect(
                 lambda: self._notify("Up to date", "You have the latest version.")
+            )
+            # A failure is only worth interrupting for when someone asked. An
+            # unreachable update server on a laptop that starts offline is the
+            # normal case, not news, and the automatic check runs on a timer --
+            # one toast at startup would become one every interval. The settings
+            # window still shows the failure via `_tell_window_check_failed`.
+            worker.error.connect(
+                lambda message: self._notify("Update check failed", message)
             )
 
         # Keep the open window in step. Its readout is filled once, when it is

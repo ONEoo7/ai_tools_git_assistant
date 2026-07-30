@@ -234,6 +234,236 @@ def _run_global(args: list[str]) -> GitResult:
     )
 
 
+# ---- committer identity ----------------------------------------------------
+def get_identity(repo: str | Path) -> tuple[str, str]:
+    """Return the ``(name, email)`` git would stamp on a commit in ``repo``.
+
+    This is the *effective* identity, so it accounts for every layer git
+    consults -- repository config, ``includeIf`` conditional includes, and the
+    global fallback. Either half is "" when unset. Reading the effective value
+    rather than only the repo-local one matters: a repo with no local identity
+    still commits as somebody, and showing nothing there would be a lie.
+    """
+    name = _run(repo, ["config", "--get", "user.name"])
+    email = _run(repo, ["config", "--get", "user.email"])
+    return (
+        name.stdout.strip() if name.ok else "",
+        email.stdout.strip() if email.ok else "",
+    )
+
+
+def get_local_identity(repo: str | Path) -> tuple[str, str]:
+    """Return the identity set in ``repo``'s own config, ignoring wider scopes.
+
+    Distinguishes "this repository pins an identity" from "it inherits one",
+    which is what tells the user whether a previous selection is still in force.
+    """
+    name = _run(repo, ["config", "--local", "--get", "user.name"])
+    email = _run(repo, ["config", "--local", "--get", "user.email"])
+    return (
+        name.stdout.strip() if name.ok else "",
+        email.stdout.strip() if email.ok else "",
+    )
+
+
+def get_signingkey(repo: str | Path) -> str:
+    """The key git would sign a commit in ``repo`` with ("" if none)."""
+    res = _run(repo, ["config", "--get", "user.signingkey"])
+    return res.stdout.strip() if res.ok else ""
+
+
+def signing_enabled(repo: str | Path) -> bool:
+    """True when ``commit.gpgsign`` asks for every commit here to be signed."""
+    res = _run(repo, ["config", "--get", "--type=bool", "commit.gpgsign"])
+    return res.ok and res.stdout.strip() == "true"
+
+
+_OK = GitResult(ok=True, stdout="", stderr="", returncode=0)
+
+
+def _unset_local(repo: str | Path, key: str) -> GitResult:
+    """Remove a local config key. Already-absent is success, not failure.
+
+    Git exits 5 for unsetting something that is not there, which describes the
+    end state this asks for.
+    """
+    res = _run(repo, ["config", "--local", "--unset", key])
+    return _OK if res.returncode == 5 else res
+
+
+def set_identity(
+    repo: str | Path, name: str, email: str, signingkey: str = ""
+) -> GitResult:
+    """Pin ``name``/``email`` as the committer identity for ``repo`` only.
+
+    Written to the repository's own config (``--local``), so it outranks the
+    global identity and any conditional include, and applies to commits made
+    from any tool -- not just this one.
+
+    ``user.signingkey`` is written when the identity carries one and *removed*
+    when it does not. Leaving a previous identity's key in place is the bug
+    this avoids: the commit would be authored by one person and signed by
+    another's key, which forges report as unverified.
+    """
+    res = _run(repo, ["config", "--local", "user.name", name])
+    if not res.ok:
+        return res
+    res = _run(repo, ["config", "--local", "user.email", email])
+    if not res.ok:
+        return res
+    if signingkey:
+        return _run(repo, ["config", "--local", "user.signingkey", signingkey])
+    return _unset_local(repo, "user.signingkey")
+
+
+def clear_local_identity(repo: str | Path) -> GitResult:
+    """Drop ``repo``'s pinned identity so it inherits the global one again."""
+    for key in ("user.name", "user.email", "user.signingkey"):
+        res = _unset_local(repo, key)
+        if not res.ok:
+            return res
+    return _OK
+
+
+def get_global_identity() -> tuple[str, str]:
+    """Return the ``(name, email)`` from the user's global git config."""
+    name = _run_global(["config", "--global", "--get", "user.name"])
+    email = _run_global(["config", "--global", "--get", "user.email"])
+    return (
+        name.stdout.strip() if name.ok else "",
+        email.stdout.strip() if email.ok else "",
+    )
+
+
+def get_global_signingkey() -> str:
+    res = _run_global(["config", "--global", "--get", "user.signingkey"])
+    return res.stdout.strip() if res.ok else ""
+
+
+# ---- push credentials -------------------------------------------------------
+# Forges where the hostname in a remote URL is the real one, so it carries no
+# information about *which* account will authenticate. A host that is not in
+# this set is most likely an SSH config alias, which does.
+_CANONICAL_HOSTS = {
+    "github.com",
+    "gitlab.com",
+    "bitbucket.org",
+    "codeberg.org",
+    "git.sr.ht",
+    "ssh.dev.azure.com",
+    "vs-ssh.visualstudio.com",
+}
+
+
+@dataclass
+class PushAuth:
+    """What will authenticate a push -- as distinct from what signs a commit.
+
+    Answers a question the identity picker cannot: ``user.email`` decides how a
+    commit is *labelled*, never who git logs in as. The two are set in
+    different places and can disagree without any error.
+
+    Resolved from configuration only. Asking the credential helper (``git
+    credential fill``) would give a firmer answer and can pop an
+    authentication prompt, which is not acceptable while merely redrawing a
+    combo box.
+    """
+
+    kind: str = ""  # "ssh" | "https" | "" when there is no remote
+    host: str = ""
+    account: str = ""  # username pinned in config; "" when not determinable
+    shared: bool = False  # one credential serves every account on this host
+
+    def summary(self) -> str:
+        if not self.kind:
+            return "no remote"
+        if self.kind == "ssh":
+            via = "default key" if self.shared else "key from SSH config"
+            return f"push: SSH to {self.host} ({via})"
+        if self.account:
+            return f"push: {self.host} as {self.account}"
+        return f"push: {self.host}"
+
+    def warning(self) -> str:
+        """Why the credential may not be the one this identity implies."""
+        if not self.shared:
+            return ""
+        if self.kind == "ssh":
+            return (
+                f"Pushes to {self.host} use your default SSH key, whichever "
+                "identity is selected. Committing as one account does not log "
+                "you in as it.\n\nTo separate them, give each account a Host "
+                "alias with its own IdentityFile in ~/.ssh/config and point "
+                "the remote at the alias."
+            )
+        return (
+            f"One credential is stored for all of {self.host}, so pushes use "
+            "the same account whichever identity is selected. Committing as "
+            "one account does not log you in as it.\n\nTo separate them: git "
+            f"config --global credential.https://{self.host}.useHttpPath true"
+        )
+
+
+def _split_remote(url: str) -> tuple[str, str, str]:
+    """Return ``(kind, host, user)`` for a remote URL."""
+    url = (url or "").strip()
+    scp = _SCP_RE.match(url)
+    if scp:
+        return "ssh", scp.group(1), url.split("@", 1)[0]
+    if "://" not in url:
+        return "", "", ""
+    scheme, rest = url.split("://", 1)
+    netloc = rest.split("/", 1)[0]
+    user = ""
+    if "@" in netloc:
+        userinfo, netloc = netloc.rsplit("@", 1)
+        user = userinfo.split(":", 1)[0]  # never carry a password around
+    kind = "ssh" if scheme.startswith("ssh") else scheme.lower()
+    if kind in ("http", "https"):
+        kind = "https"
+    return kind, netloc, user
+
+
+def _config_first(repo: str | Path, keys: list[str]) -> str:
+    """First of ``keys`` that is set, as git resolves it (repo, then global)."""
+    for key in keys:
+        res = _run(repo, ["config", "--get", key])
+        if res.ok and res.stdout.strip():
+            return res.stdout.strip()
+    return ""
+
+
+def describe_push_auth(repo: str | Path) -> PushAuth:
+    """Work out what will authenticate a push from ``repo``."""
+    kind, host, user = _split_remote(get_remote_url(repo) or "")
+    if not kind or not host:
+        return PushAuth()
+
+    if kind == "ssh":
+        # The "git@" in git@github.com is the protocol's user, not an account.
+        # What actually picks a key is the host, so a non-canonical host means
+        # an alias in ~/.ssh/config -- which is how keys get separated.
+        return PushAuth(kind="ssh", host=host, shared=host in _CANONICAL_HOSTS)
+
+    if kind != "https":
+        return PushAuth(kind=kind, host=host)
+
+    account = user or _config_first(
+        repo,
+        [f"credential.https://{host}.username", "credential.username"],
+    )
+    # Path-scoped credentials give each org its own entry, so one host can
+    # serve several accounts without them colliding.
+    per_path = _config_first(
+        repo,
+        [f"credential.https://{host}.useHttpPath", "credential.useHttpPath"],
+    )
+    scoped = per_path.strip().lower() in ("true", "yes", "on", "1")
+    return PushAuth(
+        kind="https", host=host, account=account, shared=not account and not scoped
+    )
+
+
 def safe_directory_is_all() -> bool:
     """True if the global config already trusts all repos (safe.directory = *)."""
     res = _run_global(["config", "--global", "--get-all", "safe.directory"])
