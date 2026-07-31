@@ -10,6 +10,7 @@ find an update, or fetch the wrong URL, but it cannot install unsigned code.
 from __future__ import annotations
 
 import json
+import os
 import platform
 import secrets
 import sys
@@ -89,6 +90,49 @@ def is_installed() -> bool:
     switch someone eventually leaves on.
     """
     return bool(getattr(sys, "frozen", False))
+
+
+def is_per_machine_install() -> bool:
+    """Was this build installed under Program Files, rather than per-user?
+
+    Decided by looking at where the executable sits, because there is nothing
+    else to look at: the per-user and per-machine installers wrap the *same*
+    PyInstaller bundle and differ only in the NSIS layer, so no fact about
+    which one ran can be baked in at package time.
+    """
+    if sys.platform != "win32" or not is_installed():
+        return False
+    try:
+        executable = Path(sys.executable).resolve()
+    except OSError:
+        return False
+
+    for variable in ("ProgramFiles", "ProgramFiles(x86)", "ProgramW6432"):
+        root = os.environ.get(variable)
+        if not root:
+            continue
+        try:
+            executable.relative_to(Path(root).resolve())
+            return True
+        except (ValueError, OSError):
+            continue
+    return False
+
+
+def default_channel() -> str:
+    """The channel this install should follow.
+
+    A per-machine install must not be offered the per-user installer. Running
+    it would not upgrade anything: it would install a second copy under
+    %LOCALAPPDATA%, leave the Program Files copy untouched and stale, and the
+    user would end up with two installations and no indication of it.
+
+    So the two follow different channels, and the service publishes the
+    matching installer to each. If the per-machine channel has not been
+    published, `check_for_update` finds no pointer and offers nothing -- which
+    is the right way for this to fail. `update.json` overrides it.
+    """
+    return f"{DEFAULT_CHANNEL}-machine" if is_per_machine_install() else DEFAULT_CHANNEL
 
 
 def update_config_path() -> Path:
@@ -327,7 +371,7 @@ class UpdateConfig:
         if user.url:
             return cls(
                 base_url=user.url.rstrip("/"),
-                channel=user.channel or DEFAULT_CHANNEL,
+                channel=user.channel or default_channel(),
                 origin=str(update_config_path()),
                 check_minutes=interval,
             )
@@ -335,7 +379,7 @@ class UpdateConfig:
         packaged = packaged_update_url()
         return cls(
             base_url=packaged.rstrip("/"),
-            channel=user.channel or DEFAULT_CHANNEL,
+            channel=user.channel or default_channel(),
             origin="the address this build was published with" if packaged else "",
             check_minutes=interval,
         )

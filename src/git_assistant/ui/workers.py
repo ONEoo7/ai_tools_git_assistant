@@ -20,7 +20,7 @@ from git_assistant.commit_generator import (
     GenerationResult,
 )
 from git_assistant.config import Settings
-from git_assistant.lmstudio_client import LMStudioClient
+from git_assistant.llm import build_client
 
 
 # Threads still running, kept referenced so Python cannot collect them early.
@@ -43,7 +43,11 @@ class GeneratorWorker(QObject):
 
     def run(self) -> None:
         try:
-            client = LMStudioClient(self._settings.base_url)
+            # Whichever provider is selected. `build_client` refuses rather
+            # than falling back: generating through LM Studio while the window
+            # says "Claude" would put that model's output under the wrong name,
+            # and the user would have no way to tell.
+            client = build_client(self._settings)
             generator = CommitGenerator(self._settings, client)
             result: GenerationResult = generator.generate(
                 progress=self.progress.emit,

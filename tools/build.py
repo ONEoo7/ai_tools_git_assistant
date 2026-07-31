@@ -130,16 +130,27 @@ def build_portable() -> None:
     print(f"portable  -> {DIST / 'GitAssistant.exe'}")
 
 
-def build_installer(version: str, *, updater: bool = True) -> None:
-    """Onedir build wrapped in a per-user NSIS installer.
+def build_installer(
+    version: str, *, updater: bool = True, permachine: bool = False
+) -> None:
+    """Onedir build wrapped in an NSIS installer.
 
-    ``updater=False`` builds the variant with no self-updater in it at all --
-    see git-assistant-onedir-noupdate.spec. It is a separate installer rather
-    than a setting because the point is that the capability is absent.
+    Two independent axes:
+
+    ``updater``     whether the self-updater is in the bundle at all (a
+                    separate spec, not a setting -- the point is that the
+                    capability is absent).
+    ``permachine``  Program Files and elevation, versus %LOCALAPPDATA% and no
+                    UAC prompt.
+
+    They are independent, but not equally sensible in every combination: a
+    self-updating per-machine install needs a UAC prompt for each update, and
+    must be served a per-machine installer to update *into* -- see
+    ``default_channel`` in the updater.
     """
     spec = "git-assistant-onedir.spec" if updater else "git-assistant-onedir-noupdate.spec"
     payload = DIST / ("GitAssistant" if updater else "GitAssistant-noupdate")
-    suffix = "" if updater else "-noupdate"
+    suffix = ("" if updater else "-noupdate") + ("-machine" if permachine else "-user")
 
     pyinstaller(spec)
 
@@ -164,11 +175,10 @@ def build_installer(version: str, *, updater: bool = True) -> None:
         f"/DSRC_DIR={payload}",
         f"/DOUT_FILE={installer}",
     ]
-    if not updater:
-        # Program Files rather than %LOCALAPPDATA%. Only possible without the
-        # updater, which needs to rewrite its own files without elevation, and
-        # worth doing because a user-writable install directory is one of the
-        # things Defender's heuristics score against an unsigned binary.
+    if permachine:
+        # Program Files rather than %LOCALAPPDATA%: not writable without
+        # elevation, which removes one of the ingredients Defender's heuristics
+        # score against an unsigned binary.
         defines.append("/DPERMACHINE")
     run([str(makensis), *defines, str(NSI)])
 
@@ -176,7 +186,15 @@ def build_installer(version: str, *, updater: bool = True) -> None:
     print(f"installer -> {installer}")
 
 
-TARGETS = ("all", "portable", "installer", "installer-noupdate")
+#: target -> (updater, permachine). "installer" keeps its old meaning so an
+#: existing habit still builds the ordinary per-user, self-updating one.
+INSTALLERS = {
+    "installer": (True, False),
+    "installer-machine": (True, True),
+    "installer-noupdate": (False, True),
+    "installer-noupdate-user": (False, False),
+}
+TARGETS = ("all", "portable", *INSTALLERS)
 
 
 def main(argv: list[str]) -> int:
@@ -190,12 +208,13 @@ def main(argv: list[str]) -> int:
     if target in ("all", "portable"):
         build_portable()
     if target in ("all", "installer"):
-        build_installer(version)
-    # Not part of "all": it is a deliberate alternative, and building it by
-    # default would put two installers of the same version in dist/ for anyone
-    # who only wanted the ordinary one.
-    if target == "installer-noupdate":
-        build_installer(version, updater=False)
+        build_installer(version, updater=True, permachine=False)
+    # The variants are not part of "all": each is a deliberate alternative, and
+    # building them by default would put four installers of the same version in
+    # dist/ for anyone who only wanted the ordinary one.
+    if target in INSTALLERS and target != "installer":
+        updater, permachine = INSTALLERS[target]
+        build_installer(version, updater=updater, permachine=permachine)
     return 0
 
 

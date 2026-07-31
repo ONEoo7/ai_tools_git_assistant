@@ -57,3 +57,73 @@ def test_refresh_keeps_a_generation_result(qapp, settings):
     panel.status.setText("Strategy: single-shot - ~500 input tokens")
     panel.refresh_repos()
     assert panel.status.text() == "Strategy: single-shot - ~500 input tokens"
+
+
+# ---- the Refresh button -----------------------------------------------------
+# Staging happens outside this window, and nothing here notices it. Refresh
+# re-reads it and drops the message written for the previous set of changes.
+
+
+def _repo(tmp_path):
+    """A real repo, since Refresh re-runs `git diff` against one."""
+    import subprocess
+    import sys
+
+    flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+    d = tmp_path / "repo"
+    d.mkdir()
+    for args in (["init"], ["config", "user.email", "t@e.example"], ["config", "user.name", "T"]):
+        subprocess.run(["git", "-C", str(d), *args], capture_output=True, creationflags=flags)
+    return d
+
+
+def test_refresh_clears_the_generated_message(qapp, settings, tmp_path):
+    repo = _repo(tmp_path)
+    settings.repos = [RepoEntry(str(repo))]
+    settings.active_repo = str(repo)
+    panel = CommitPanel(settings, auto_start=False)
+
+    panel.editor.setPlainText("feat: a message about changes that are no longer staged")
+    panel.regen_btn.setText("Regenerate")
+
+    panel.refresh_btn.click()
+
+    assert panel.editor.toPlainText() == ""
+    # Nothing left to regenerate, so the button says what it now does.
+    assert panel.regen_btn.text() == "Generate"
+
+
+def test_refresh_picks_up_files_staged_outside_the_window(qapp, settings, tmp_path):
+    import subprocess
+    import sys
+
+    flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+    repo = _repo(tmp_path)
+    settings.repos = [RepoEntry(str(repo))]
+    settings.active_repo = str(repo)
+    panel = CommitPanel(settings, auto_start=False)
+    assert panel.file_list.count() == 0
+
+    (repo / "new.py").write_text("print('hi')\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "-C", str(repo), "add", "new.py"],
+        capture_output=True,
+        creationflags=flags,
+    )
+
+    panel.refresh_btn.click()
+
+    assert panel.file_list.count() == 1
+
+
+def test_refresh_is_disabled_while_generating(qapp, settings, tmp_path):
+    """It clears the widgets a running generation is about to fill."""
+    repo = _repo(tmp_path)
+    settings.repos = [RepoEntry(str(repo))]
+    settings.active_repo = str(repo)
+    panel = CommitPanel(settings, auto_start=False)
+
+    panel._set_busy(True)
+    assert not panel.refresh_btn.isEnabled()
+    panel._set_busy(False)
+    assert panel.refresh_btn.isEnabled()

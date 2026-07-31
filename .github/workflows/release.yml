@@ -370,46 +370,52 @@ jobs:
       # The .nsi path must be ABSOLUTE. Given a relative one, NSIS resolves
       # ${__FILEDIR__} to <cwd>\installer\installer -- the script's own
       # directory appended twice -- and the LICENSE and icon lookups fail.
-      - name: Build the installer
+      # Four installers from two bundles. The axes are independent: whether the
+      # self-updater is in the bundle (which bundle) and where it installs
+      # (a define on the same .nsi).
+      #
+      #   -user     %LOCALAPPDATA%\Programs, no UAC prompt
+      #   -machine  Program Files, requires elevation
+      #
+      # Both halves are named explicitly. Leaving either implicit is how
+      # "noupdate" came to mean "and also per-machine" by coincidence rather
+      # than by name.
+      - name: Build the installers
         id: inst
         run: |
-          $name = "git-assistant-${{ steps.v.outputs.version }}-windows-x64-setup.exe"
+          $version = "${{ steps.v.outputs.version }}"
           $root = $PWD.Path
-          & $env:NSIS_EXE `
-            "/DVERSION=${{ steps.v.outputs.version }}" `
-            "/DSRC_DIR=$root\dist\git-assistant" `
-            "/DEXE_NAME=git-assistant.exe" `
-            "/DOUT_FILE=$root\$name" `
-            "$root\installer\git-assistant.nsi"
-          if ($LASTEXITCODE -ne 0) { throw "makensis failed with $LASTEXITCODE" }
-          if (-not (Test-Path $name)) { throw "installer was not produced: $name" }
-          $sha = (Get-FileHash $name -Algorithm SHA256).Hash.ToLower()
-          "name=$name" >> $env:GITHUB_OUTPUT
-          "sha256=$sha" >> $env:GITHUB_OUTPUT
-          Write-Host "$sha  $name"
+          $variants = @(
+            @{ key = "user";           dir = "dist\git-assistant";           exe = "git-assistant.exe"; machine = $false },
+            @{ key = "machine";        dir = "dist\git-assistant";           exe = "git-assistant.exe"; machine = $true  },
+            @{ key = "noupdate-user";  dir = "dist\GitAssistant-noupdate";   exe = "GitAssistant.exe";  machine = $false },
+            @{ key = "noupdate-machine"; dir = "dist\GitAssistant-noupdate"; exe = "GitAssistant.exe";  machine = $true  }
+          )
 
-      # /DPERMACHINE puts it in Program Files and requires elevation. Only
-      # possible because there is no updater to rewrite its own files without a
-      # UAC prompt, and worth doing because a user-writable install directory is
-      # one of the things endpoint protection scores against an unsigned binary.
-      - name: Build the no-update installer
-        id: instnoupd
-        run: |
-          $name = "git-assistant-${{ steps.v.outputs.version }}-noupdate-windows-x64-setup.exe"
-          $root = $PWD.Path
-          & $env:NSIS_EXE `
-            "/DVERSION=${{ steps.v.outputs.version }}" `
-            "/DPERMACHINE" `
-            "/DSRC_DIR=$root\dist\GitAssistant-noupdate" `
-            "/DEXE_NAME=GitAssistant.exe" `
-            "/DOUT_FILE=$root\$name" `
-            "$root\installer\git-assistant.nsi"
-          if ($LASTEXITCODE -ne 0) { throw "makensis failed with $LASTEXITCODE" }
-          if (-not (Test-Path $name)) { throw "installer was not produced: $name" }
-          $sha = (Get-FileHash $name -Algorithm SHA256).Hash.ToLower()
-          "name=$name" >> $env:GITHUB_OUTPUT
-          "sha256=$sha" >> $env:GITHUB_OUTPUT
-          Write-Host "$sha  $name"
+          foreach ($v in $variants) {
+            $name = "git-assistant-$version-$($v.key)-windows-x64-setup.exe"
+            $defines = @(
+              "/DVERSION=$version",
+              "/DSRC_DIR=$root\$($v.dir)",
+              "/DEXE_NAME=$($v.exe)",
+              "/DOUT_FILE=$root\$name"
+            )
+            if ($v.machine) { $defines += "/DPERMACHINE" }
+
+            & $env:NSIS_EXE @defines "$root\installer\git-assistant.nsi"
+            if ($LASTEXITCODE -ne 0) { throw "makensis failed with $LASTEXITCODE for $($v.key)" }
+            if (-not (Test-Path $name)) { throw "installer was not produced: $name" }
+
+            # Underscores in the output key: `steps.inst.outputs.noupdate-user`
+            # is parsed as a subtraction by the Actions expression language, so
+            # a hyphen here yields an empty string at the point of use rather
+            # than an error anywhere near this line.
+            $out = $v.key -replace '-', '_'
+            $sha = (Get-FileHash $name -Algorithm SHA256).Hash.ToLower()
+            "${out}_name=$name" >> $env:GITHUB_OUTPUT
+            "${out}_sha256=$sha" >> $env:GITHUB_OUTPUT
+            Write-Host "$sha  $name"
+          }
 
       # Emits an in-toto Statement v1 carrying a SLSA Provenance v1 predicate,
       # wrapped in a DSSE envelope. Must run before the release is published so
@@ -421,8 +427,10 @@ jobs:
         with:
           subject-path: |
             ${{ steps.pkg.outputs.name }}
-            ${{ steps.inst.outputs.name }}
-            ${{ steps.instnoupd.outputs.name }}
+            ${{ steps.inst.outputs.user_name }}
+            ${{ steps.inst.outputs.machine_name }}
+            ${{ steps.inst.outputs.noupdate_user_name }}
+            ${{ steps.inst.outputs.noupdate_machine_name }}
 
       # gh is preinstalled on the runner. Using it rather than a release action
       # keeps one less third-party dependency in the path that produces the
@@ -436,32 +444,37 @@ jobs:
           $notes = @'
           Automated build.
 
-          | Download | SHA-256 |
-          | --- | --- |
-          | `${{ steps.inst.outputs.name }}` (installer) | `${{ steps.inst.outputs.sha256 }}` |
-          | `${{ steps.instnoupd.outputs.name }}` (installer, no self-update) | `${{ steps.instnoupd.outputs.sha256 }}` |
-          | `${{ steps.pkg.outputs.name }}` (portable zip) | `${{ steps.pkg.outputs.sha256 }}` |
+          | Download | Installs to | Admin | Self-update | SHA-256 |
+          | --- | --- | --- | --- | --- |
+          | `${{ steps.inst.outputs.user_name }}` | `%LOCALAPPDATA%` | no | yes | `${{ steps.inst.outputs.user_sha256 }}` |
+          | `${{ steps.inst.outputs.machine_name }}` | `Program Files` | yes | yes* | `${{ steps.inst.outputs.machine_sha256 }}` |
+          | `${{ steps.inst.outputs.noupdate_user_name }}` | `%LOCALAPPDATA%` | no | no | `${{ steps.inst.outputs.noupdate_user_sha256 }}` |
+          | `${{ steps.inst.outputs.noupdate_machine_name }}` | `Program Files` | yes | no | `${{ steps.inst.outputs.noupdate_machine_sha256 }}` |
+          | `${{ steps.pkg.outputs.name }}` (portable zip) | anywhere | no | no | `${{ steps.pkg.outputs.sha256 }}` |
 
           **Which download?**
 
-          - The **standard installer** is per-user, needs no admin, and updates itself.
-          - The **no-update installer** needs admin and installs to `Program Files`. It
-            contains no self-updater at all — not a disabled one — so it cannot download
-            or run anything. Upgrade by installing a newer version over it. Use this
-            where a self-updating application is not acceptable.
-          - The **portable zip** is the same no-update build: unzip it anywhere and run
-            `GitAssistant.exe`. To upgrade, replace the folder.
+          - `-user` installs for you alone and never prompts for admin.
+          - `-machine` installs to `Program Files` for everyone, and asks for admin once
+            at install time.
+          - `-noupdate` builds contain no self-updater at all — not a disabled one, the
+            code is absent — so they cannot download or run anything. Upgrade by
+            installing a newer version over the old one.
+          - The **portable zip** is the no-update build: unzip anywhere, run
+            `GitAssistant.exe`, replace the folder to upgrade.
 
-          Nothing here starts Git Assistant automatically at sign-in.
+          \* A `-machine` install shows a UAC prompt for **each** update, and follows a
+          separate update channel so that it is offered a `-machine` installer rather
+          than a per-user one. If that channel is not published, it finds no updates.
 
-          > **Note:** the portable zip changed name and content. It is now
-          > `…-noupdate-windows-x64.zip`, and the executable inside it is
-          > `GitAssistant.exe` (previously `git-assistant.exe`). Update any download
-          > scripts or shortcuts pointing at the old names.
+          Nothing here starts Git Assistant automatically at sign-in, and no installer
+          launches the application when it finishes.
           '@
           gh release create "${{ github.ref_name }}" `
-            "${{ steps.inst.outputs.name }}" `
-            "${{ steps.instnoupd.outputs.name }}" `
+            "${{ steps.inst.outputs.user_name }}" `
+            "${{ steps.inst.outputs.machine_name }}" `
+            "${{ steps.inst.outputs.noupdate_user_name }}" `
+            "${{ steps.inst.outputs.noupdate_machine_name }}" `
             "${{ steps.pkg.outputs.name }}" `
             --title "${{ github.ref_name }}" `
             --notes $notes

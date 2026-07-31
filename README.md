@@ -54,6 +54,45 @@ staged files. Selecting a file displays its diff with any content that was
 model did *not* see when a diff overflows the budget (truncated hunks, or files
 dropped by the noise filter).
 
+## AI providers
+
+Pick one in the **Providers** list on the left of *Connection & Model*; the same
+choice appears as **AI Provider** in the Generate tab. The form reshapes around it
+— only the settings a provider actually has are shown.
+
+| Provider | Needs | Notes |
+|---|---|---|
+| **LM Studio** | IP + port | Local, no key. The default. |
+| **Claude** | API key | Anthropic Messages API via the official SDK |
+| **OpenAI** | API key | Fixed endpoint |
+| **Azure AI Foundry** | API key + endpoint | Endpoint is per-resource; `api-version` is configurable |
+| **Litellm Proxy** | endpoint (+ optional key) | Defaults to `localhost:4000`; connects unauthenticated if your proxy has no auth |
+| **Ollama** | endpoint | Defaults to `localhost:11434`; no key — Ollama has no auth of its own |
+
+Both self-hosted providers default to localhost, so the usual setup needs no
+typing. Put a remote one behind auth via the **Litellm Proxy** entry, which has a
+key field.
+
+**Model and endpoint are stored per provider**, so switching doesn't carry one
+backend's model name into another's request.
+
+### API keys
+
+Keys go in the **Windows Credential Manager**, never in `settings.json` — that file
+is plain text, the app rewrites it constantly, and a key there would survive in
+backups and file-history copies after rotation. Entries are named
+`git-assistant:<provider>` and are visible in *Credential Manager → Windows
+Credentials*.
+
+The key field is an input, not a display: it shows whether a key is stored, never
+the value, and clears itself after saving. **Remove** deletes the entry.
+
+Claude and OpenAI/Azure differ on the wire, which is why Claude is its own client:
+Anthropic takes the system prompt as a top-level parameter rather than a message,
+requires `max_tokens`, returns `content` as a list of typed blocks, and **rejects
+`temperature`** on current models. The OpenAI-compatible providers share one client
+that differs only by base URL, auth header, and query parameters.
+
 ## Committer identities
 
 The **Commit as** dropdown above the tabs shows the `user.email` that the **active

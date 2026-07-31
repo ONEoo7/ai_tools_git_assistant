@@ -20,6 +20,7 @@ from PyQt6.QtWidgets import (
     QLabel,
     QLineEdit,
     QListWidget,
+    QListWidgetItem,
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
@@ -41,9 +42,11 @@ from git_assistant.config import (
     Template,
     config_path,
 )
+from git_assistant import credentials, providers
 from git_assistant.identities import IdentityStore
-from git_assistant.lmstudio_client import LMStudioClient, ModelInfo
+from git_assistant.llm import LLMError, ModelInfo, build_client
 from git_assistant.prompts import DEFAULT_TEMPLATE
+from git_assistant.providers import PROVIDERS
 from git_assistant.ui.identities_panel import IdentitiesPanel
 from git_assistant.ui.identity_bar import IdentityBar
 from git_assistant.ui.preview_dialog import SECTION_GAP, CommitPanel
@@ -60,6 +63,9 @@ if UPDATES_SUPPORTED:
     )
 from git_assistant.tokenizer import input_budget, reserved_output
 from git_assistant.ui.workers import FunctionWorker, run_worker
+
+INFO_COLOUR = "color: #8ab;"
+WARN_COLOUR = "color: #b36b00;"
 
 # Shown in place of the online version until an update check reports one.
 UNKNOWN_VERSION = "?"
@@ -364,7 +370,38 @@ class SettingsDialog(QDialog):
 
     def _build_connection_tab(self) -> QWidget:
         w = QWidget()
-        form = QFormLayout(w)
+        outer = QHBoxLayout(w)
+
+        # ---- left: which backend generates the message --------------------
+        providers_pane = QWidget()
+        providers_box = QVBoxLayout(providers_pane)
+        providers_box.setContentsMargins(0, 0, SECTION_GAP, 0)
+        providers_box.addWidget(QLabel("Inference Providers"))
+
+        self.provider_list = QListWidget()
+        self.provider_list.setMaximumWidth(220)
+        for provider in PROVIDERS:
+            item = QListWidgetItem(provider.display())
+            item.setData(Qt.ItemDataRole.UserRole, provider.key)
+            if not provider.implemented:
+                item.setToolTip(
+                    f"{provider.label} is listed but has no client yet. "
+                    "Selecting it is remembered; generating with it will say so."
+                )
+            self.provider_list.addItem(item)
+        self.provider_list.currentItemChanged.connect(self._on_provider_selected)
+        providers_box.addWidget(self.provider_list, 1)
+
+        self.provider_note = QLabel("")
+        self.provider_note.setWordWrap(True)
+        self.provider_note.setStyleSheet("color: #8ab;")
+        providers_box.addWidget(self.provider_note)
+
+        form_container = QWidget()
+        form = QFormLayout(form_container)
+
+        outer.addWidget(providers_pane)
+        outer.addWidget(form_container, 1)
 
         self.ip_edit = QLineEdit()
         self.port_spin = QSpinBox()
@@ -405,15 +442,200 @@ class SettingsDialog(QDialog):
         self.budget_label.setWordWrap(True)
         self.budget_label.setStyleSheet("color: #8ab;")
 
+        # ---- credentials, for the providers that need one ------------------
+        # Never written to settings.json. The field shows a placeholder rather
+        # than the stored key: reading it back to display it would put the
+        # secret on screen and in Qt's widget memory for no benefit, and the
+        # only things anyone needs to know are whether one is stored and how
+        # to replace it.
+        self.api_key_edit = QLineEdit()
+        self.api_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self.api_key_edit.setMinimumWidth(360)
+        self.api_key_edit.editingFinished.connect(self._on_api_key_entered)
+
+        self.clear_key_btn = QPushButton("Remove")
+        self.clear_key_btn.setToolTip(
+            "Delete this provider's key from the Windows Credential Manager."
+        )
+        self.clear_key_btn.clicked.connect(self._on_clear_api_key)
+
+        key_row = QHBoxLayout()
+        key_row.addWidget(self.api_key_edit, 1)
+        key_row.addWidget(self.clear_key_btn)
+        self.key_row_host = QWidget()
+        self.key_row_host.setLayout(key_row)
+
+        self.key_status = QLabel("")
+        self.key_status.setWordWrap(True)
+        self.key_status.setStyleSheet(INFO_COLOUR)
+
+        self.endpoint_edit = QLineEdit()
+        self.endpoint_edit.setMinimumWidth(360)
+        self.endpoint_edit.setToolTip(
+            "The address of your deployment. Shown only for providers whose "
+            "address is not fixed by the vendor."
+        )
+
         form.addRow("LM Studio IP:", self.ip_edit)
         form.addRow("Port:", self.port_spin)
+        form.addRow("Endpoint:", self.endpoint_edit)
+        form.addRow("API key:", self.key_row_host)
+        form.addRow("", self.key_status)
         form.addRow("", self.test_btn)
         form.addRow("Model:", self.model_combo)
         form.addRow("Context window size:", self.ctx_size_spin)
         form.addRow("Parallel requests:", self.parallel_spin)
         form.addRow("Status:", self.conn_status)
         form.addRow("Effective budget:", self.budget_label)
+
+        # Rows whose visibility depends on the provider. Held by field widget
+        # because that is what setRowVisible takes, and hiding the field alone
+        # would leave its label behind.
+        self._provider_rows = {
+            "lmstudio_only": (self.ip_edit, self.port_spin),
+            "endpoint": (self.endpoint_edit,),
+            "key": (self.key_row_host, self.key_status),
+        }
+        self._conn_form = form
         return w
+
+    def _apply_provider_fields(self, provider) -> None:
+        """Show only the settings the selected provider actually has.
+
+        Greying them out instead would leave an LM Studio IP box on screen for
+        a hosted API that has no address to set, which reads as something the
+        user forgot to fill in.
+        """
+        form = self._conn_form
+        for field in self._provider_rows["lmstudio_only"]:
+            form.setRowVisible(field, provider.key == "lmstudio")
+        for field in self._provider_rows["endpoint"]:
+            form.setRowVisible(field, provider.needs_endpoint)
+        for field in self._provider_rows["key"]:
+            form.setRowVisible(field, provider.needs_api_key)
+
+        self.endpoint_edit.setPlaceholderText(provider.endpoint_hint)
+        self.endpoint_edit.setText(self.settings.provider_endpoint(provider.key))
+        self._refresh_key_status(provider)
+
+    # ---- API keys ----------------------------------------------------------
+    def _refresh_key_status(self, provider) -> None:
+        """Say whether a key is stored, and where it lives. Never show it."""
+        if not provider.needs_api_key:
+            self.api_key_edit.setPlaceholderText("")
+            return
+
+        if not credentials.available():
+            self.key_status.setText(
+                "No credential store on this platform, so keys cannot be saved."
+            )
+            self.key_status.setStyleSheet(WARN_COLOUR)
+            self.api_key_edit.setEnabled(False)
+            self.clear_key_btn.setEnabled(False)
+            return
+
+        self.api_key_edit.setEnabled(True)
+        stored = credentials.has_secret(provider.key)
+        self.clear_key_btn.setEnabled(stored)
+        self.api_key_edit.setPlaceholderText(
+            "A key is stored - type a new one to replace it"
+            if stored
+            else "Paste the API key"
+        )
+        self.key_status.setText(
+            (
+                "Stored in the Windows Credential Manager as "
+                f"'{credentials.target_for(provider.key)}', not in settings.json. "
+                if stored
+                else "No key stored yet. "
+            )
+            + provider.key_help
+        )
+        self.key_status.setStyleSheet(INFO_COLOUR if stored else WARN_COLOUR)
+
+    def _on_api_key_entered(self) -> None:
+        """Store what was typed, then clear the box.
+
+        Cleared immediately so the secret is not left in a widget for the rest
+        of the session, and because the box is not a display of the key -- it
+        is only ever an input for a new one.
+        """
+        key = self.api_key_edit.text().strip()
+        if not key:
+            return
+        provider = providers.get(self.settings.provider)
+        self.api_key_edit.clear()
+        try:
+            credentials.set_secret(provider.key, key)
+        except credentials.CredentialError as exc:
+            QMessageBox.warning(self, "Could not save the API key", str(exc))
+        self._refresh_key_status(provider)
+
+    def _on_clear_api_key(self) -> None:
+        provider = providers.get(self.settings.provider)
+        confirm = QMessageBox.question(
+            self,
+            "Remove API key?",
+            f"Delete the stored {provider.label} key from the Windows "
+            "Credential Manager?",
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            credentials.delete_secret(provider.key)
+        except credentials.CredentialError as exc:
+            QMessageBox.warning(self, "Could not remove the API key", str(exc))
+        self._refresh_key_status(provider)
+
+    def _on_provider_selected(self, current=None, _previous=None) -> None:
+        """Record the chosen provider and reshape the form around it.
+
+        Each provider needs different settings -- a local address, a key, an
+        endpoint -- so the rows that do not apply are hidden rather than
+        greyed. Model and endpoint are stored per provider, so switching does
+        not carry one backend's model name into another's request.
+        """
+        item = current or self.provider_list.currentItem()
+        if item is None:
+            return
+        key = item.data(Qt.ItemDataRole.UserRole)
+        provider = providers.get(key)
+
+        if provider.implemented:
+            self.provider_note.setText("")
+        else:
+            self.provider_note.setText(
+                f"{provider.label} has no client yet. It is remembered as your "
+                "choice, but generating will report that it is unavailable "
+                "rather than quietly using LM Studio."
+            )
+        self.provider_note.setStyleSheet(
+            INFO_COLOUR if provider.implemented else WARN_COLOUR
+        )
+
+        if self._ready:
+            self.settings.provider = key
+            self._schedule_save()
+            self.commit_panel.refresh_provider()
+
+        self._apply_provider_fields(provider)
+        self._show_provider_model(provider)
+
+    def _show_provider_model(self, provider) -> None:
+        """Show the model stored for this provider, not the previous one's.
+
+        Listing is per provider and needs a working connection, so the combo
+        starts with just the remembered value; "Test connection" fills the
+        rest in.
+        """
+        stored = self.settings.provider_model(provider.key)
+        self.model_combo.blockSignals(True)
+        self.model_combo.clear()
+        if stored:
+            self.model_combo.addItem(stored, stored)
+            self.model_combo.setCurrentIndex(0)
+        self.model_combo.blockSignals(False)
+        self._update_budget_label()
 
     def _build_repos_tab(self) -> QWidget:
         w = QWidget()
@@ -609,9 +831,18 @@ class SettingsDialog(QDialog):
         self.ip_edit.setText(s.lmstudio_ip)
         self.port_spin.setValue(s.lmstudio_port)
         self.parallel_spin.setValue(s.parallel_calls)
-        if s.selected_model:
-            self.model_combo.addItem(s.selected_model, s.selected_model)
-            self.model_combo.setCurrentIndex(0)
+
+        # Selecting the stored provider also fills in the note beside the list.
+        # `_ready` is still False here, so this does not count as a user choice.
+        for row in range(self.provider_list.count()):
+            if self.provider_list.item(row).data(Qt.ItemDataRole.UserRole) == s.provider:
+                self.provider_list.setCurrentRow(row)
+                break
+        else:
+            self.provider_list.setCurrentRow(0)
+        # Fills the model combo and the provider-specific rows for whichever
+        # provider was stored, so there is nothing to populate separately here.
+        self._on_provider_selected()
 
         self._populate_repo_tree(s.repos, s.scan_roots)
 
@@ -631,6 +862,7 @@ class SettingsDialog(QDialog):
         self.ip_edit.textChanged.connect(self._schedule_save)
         self.port_spin.valueChanged.connect(self._schedule_save)
         self.parallel_spin.valueChanged.connect(self._schedule_save)
+        self.endpoint_edit.textChanged.connect(self._schedule_save)
         self.model_combo.currentIndexChanged.connect(self._schedule_save)
         self.diff_mode_combo.currentIndexChanged.connect(self._schedule_save)
         self.ctx_size_spin.valueChanged.connect(self._schedule_save)
@@ -655,8 +887,18 @@ class SettingsDialog(QDialog):
         s = self.settings
         s.lmstudio_ip = self.ip_edit.text().strip() or "127.0.0.1"
         s.lmstudio_port = self.port_spin.value()
-        s.selected_model = self.model_combo.currentData() or self.model_combo.currentText()
         s.parallel_calls = self.parallel_spin.value()
+
+        # Model and endpoint belong to the selected provider, so switching does
+        # not carry one backend's model name into another's request. The API
+        # key is deliberately absent: it is in the Credential Manager, and
+        # nothing on this path may write it to settings.json.
+        provider_key = s.provider
+        s.set_provider_model(
+            provider_key,
+            self.model_combo.currentData() or self.model_combo.currentText(),
+        )
+        s.set_provider_endpoint(provider_key, self.endpoint_edit.text())
 
         repos, roots, watched = self._collect_repos_and_roots()
         s.repos = repos
@@ -1371,13 +1613,26 @@ class SettingsDialog(QDialog):
 
     # ---- connection test / model listing -----------------------------------
     def _on_test_connection(self) -> None:
-        ip = self.ip_edit.text().strip() or "127.0.0.1"
-        port = self.port_spin.value()
-        base_url = f"http://{ip}:{port}"
+        """List the selected provider's models, off the GUI thread.
+
+        Applies the pending edits first: the address, endpoint and provider may
+        all have been typed a moment ago and not yet been through the debounced
+        save, and testing the previous ones would report on a connection the
+        user is no longer asking about.
+        """
+        self._apply_to_settings()
         self.conn_status.setText("Connecting...")
         self.test_btn.setEnabled(False)
 
-        client = LMStudioClient(base_url)
+        try:
+            client = build_client(self.settings)
+        except LLMError as exc:
+            # Missing key or endpoint: a configuration answer, not a network
+            # one, so it is reported without a round trip.
+            self.test_btn.setEnabled(True)
+            self.conn_status.setText(str(exc))
+            return
+
         worker = FunctionWorker(client.list_models)
         worker.finished.connect(self._on_models_loaded)
         worker.error.connect(self._on_models_error)
@@ -1389,7 +1644,12 @@ class SettingsDialog(QDialog):
     def _on_models_loaded(self, models: list[ModelInfo]) -> None:
         self.test_btn.setEnabled(True)
         if not models:
-            self.conn_status.setText("Connected, but no models are loaded in LM Studio.")
+            provider = providers.get(self.settings.provider)
+            self.conn_status.setText(
+                "Connected, but no models are loaded in LM Studio."
+                if provider.key == "lmstudio"
+                else f"Connected, but {provider.label} returned no models."
+            )
             return
         previous = self.model_combo.currentData()
         self.model_combo.clear()

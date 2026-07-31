@@ -51,7 +51,11 @@ a = Analysis(
     # mean anything to the updater, and shipping them in a build that cannot
     # update would suggest it can.
     datas=[(str(ICON), "git_assistant/resources")],
-    hiddenimports=["tiktoken_ext", "tiktoken_ext.openai_public"],
+    # `anthropic` is imported inside a function (git_assistant.claude_client)
+    # so a build without it still runs the other providers. Declared here
+    # anyway: a lazily-imported optional dependency is exactly the shape
+    # PyInstaller can miss, and the failure lands at generate time.
+    hiddenimports=["anthropic", "tiktoken_ext", "tiktoken_ext.openai_public"],
     hookspath=[],
     runtime_hooks=[],
     excludes=EXCLUDED,

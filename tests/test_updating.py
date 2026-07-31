@@ -615,3 +615,69 @@ def test_a_failed_launch_raises_rather_than_failing_silently(tmp_path: Path) -> 
         client._launch_installer(tmp_path / "was-never-downloaded.exe")
 
     assert "Windows error 2" in str(caught.value)  # ERROR_FILE_NOT_FOUND
+
+
+# --------------------------------------------- which installer to update into
+# A per-user and a per-machine install are the same bundle in different
+# installers, so nothing about which one ran can be baked in at package time.
+# It matters anyway: offered the per-user installer, a Program Files install
+# would not upgrade -- it would put a second copy under %LOCALAPPDATA% and
+# leave itself stale.
+
+
+def _frozen_at(monkeypatch: pytest.MonkeyPatch, executable: Path) -> None:
+    executable.parent.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "executable", str(executable))
+
+
+def test_a_source_checkout_is_not_a_per_machine_install() -> None:
+    """Nothing is installed anywhere; the question does not arise."""
+    assert client.is_per_machine_install() is False
+    assert client.default_channel() == client.DEFAULT_CHANNEL
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Program Files is Windows-only")
+def test_a_per_user_install_follows_the_default_channel(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("ProgramFiles", str(tmp_path / "Program Files"))
+    _frozen_at(monkeypatch, tmp_path / "Local" / "Programs" / "GitAssistant" / "app.exe")
+
+    assert client.is_per_machine_install() is False
+    assert client.default_channel() == client.DEFAULT_CHANNEL
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Program Files is Windows-only")
+def test_a_per_machine_install_follows_its_own_channel(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    program_files = tmp_path / "Program Files"
+    monkeypatch.setenv("ProgramFiles", str(program_files))
+    _frozen_at(monkeypatch, program_files / "GitAssistant" / "app.exe")
+
+    assert client.is_per_machine_install() is True
+    assert client.default_channel() == f"{client.DEFAULT_CHANNEL}-machine"
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Program Files is Windows-only")
+def test_the_32_bit_program_files_counts_too(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A 32-bit install lands under Program Files (x86) and is no less machine-wide."""
+    monkeypatch.setenv("ProgramFiles", str(tmp_path / "Program Files"))
+    x86 = tmp_path / "Program Files (x86)"
+    monkeypatch.setenv("ProgramFiles(x86)", str(x86))
+    _frozen_at(monkeypatch, x86 / "GitAssistant" / "app.exe")
+
+    assert client.is_per_machine_install() is True
+
+
+def test_an_explicit_channel_still_wins(monkeypatch: pytest.MonkeyPatch) -> None:
+    """update.json exists so an operator can override what the build decided."""
+    monkeypatch.setattr(
+        client,
+        "user_update_config",
+        lambda: client.UserUpdateConfig(url="https://example.test", channel="beta"),
+    )
+    assert client.UpdateConfig.load().channel == "beta"

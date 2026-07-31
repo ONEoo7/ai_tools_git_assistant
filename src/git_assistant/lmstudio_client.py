@@ -9,26 +9,18 @@ endpoint is unavailable.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-
 import httpx
 
+from git_assistant.llm import LLMError, ModelInfo
 
-class LMStudioError(RuntimeError):
+
+class LMStudioError(LLMError):
     """Raised when the LM Studio server cannot be reached or returns an error."""
 
 
-@dataclass
-class ModelInfo:
-    id: str
-    max_context_length: int | None = None
-    loaded: bool = False
-
-    def label(self) -> str:
-        if self.max_context_length:
-            state = "loaded" if self.loaded else "available"
-            return f"{self.id}  ({self.max_context_length:,} ctx, {state})"
-        return self.id
+# Re-exported: `ModelInfo` is the shape every provider returns, and lived here
+# before there was more than one. See git_assistant.llm.
+ModelInfo = ModelInfo
 
 
 class LMStudioClient:

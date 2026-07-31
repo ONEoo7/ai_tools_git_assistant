@@ -116,7 +116,7 @@ class CommitGenerator:
     def _detected_context(self) -> int | None:
         """Model's real loaded context, or None if it can't be determined."""
         try:
-            return self.client.context_length_for(self.settings.selected_model)
+            return self.client.context_length_for(self.settings.active_model())
         except Exception:
             return None
 
@@ -150,7 +150,7 @@ class CommitGenerator:
         repo = s.active_repo
         if not repo:
             raise ValueError("No active repository is selected.")
-        if not s.selected_model:
+        if not s.active_model():
             raise ValueError("No model is selected. Open Settings and pick one.")
 
         progress("Reading git diff...")
@@ -199,7 +199,7 @@ class CommitGenerator:
         if full_tokens <= usable:
             progress("Diff fits context - generating (single-shot)...")
             message = self.client.chat(
-                model=s.selected_model,
+                model=s.active_model(),
                 system=prompts.COMMIT_SYSTEM,
                 user=full_prompt,
                 max_tokens=out_tokens,
@@ -256,7 +256,7 @@ class CommitGenerator:
         progress("Synthesizing final commit message...")
         self._check_cancel(is_cancelled)
         message = self.client.chat(
-            model=s.selected_model,
+            model=s.active_model(),
             system=prompts.COMMIT_SYSTEM,
             user=final_prompt,
             max_tokens=out_tokens,
@@ -385,7 +385,7 @@ class CommitGenerator:
                 "{files}", _files_in_chunk(chunk)
             ).replace("{diff}", chunk)
             return self.client.chat(
-                model=self.settings.selected_model,
+                model=self.settings.active_model(),
                 system=prompts.MAP_SYSTEM,
                 user=user,
                 max_tokens=MAP_OUTPUT_TOKENS,
@@ -420,7 +420,7 @@ class CommitGenerator:
                 break  # not converging; hard-truncate happens downstream
             def condense(group: str) -> str:
                 return self.client.chat(
-                    model=self.settings.selected_model,
+                    model=self.settings.active_model(),
                     system=prompts.REDUCE_SYSTEM,
                     user=prompts.REDUCE_TEMPLATE.replace("{notes}", group),
                     max_tokens=MAP_OUTPUT_TOKENS,

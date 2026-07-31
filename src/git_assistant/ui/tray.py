@@ -149,7 +149,7 @@ class TrayApp:
             )
             self._on_settings()
             return
-        if not self.settings.selected_model:
+        if not self.settings.active_model():
             self._notify(
                 "No model selected",
                 "Open Settings, test the connection, and pick a model.",

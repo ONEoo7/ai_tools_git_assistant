@@ -32,6 +32,7 @@ from git_assistant import git_ops
 from git_assistant.commit_generator import FileCoverage, GenerationResult
 from git_assistant.config import DEFAULT_TEMPLATE_NAME, Settings
 from git_assistant.diff_strategy import filter_files, split_diff
+from git_assistant.providers import PROVIDERS
 from git_assistant.ui.repo_picker import RepoPicker
 from git_assistant.ui.workers import FunctionWorker, GeneratorWorker, run_worker
 
@@ -117,6 +118,17 @@ class CommitPanel(QWidget):
         )
         self.template_combo.currentIndexChanged.connect(self._on_template_changed)
 
+        # Which backend generates the message. Application-wide, not per repo:
+        # it is an account and a connection, not a property of a project.
+        self.provider_combo = QComboBox()
+        self.provider_combo.setToolTip(
+            "Which inference provider generates the message. Configure it "
+            "under Inference Providers in the Connection & Model tab."
+        )
+        for provider in PROVIDERS:
+            self.provider_combo.addItem(provider.display(), provider.key)
+        self.provider_combo.currentIndexChanged.connect(self._on_provider_changed)
+
         self.status = QLabel("")
         self.status.setWordWrap(True)
         self.progress = QLabel("")
@@ -126,6 +138,11 @@ class CommitPanel(QWidget):
         self.editor.setPlaceholderText("The generated commit message will appear here...")
 
         self.regen_btn = QPushButton("Regenerate" if auto_start else "Generate")
+        self.refresh_btn = QPushButton("Refresh")
+        self.refresh_btn.setToolTip(
+            "Re-read the staged files and clear the generated message.\n"
+            "Use after staging or unstaging something outside this window."
+        )
         self.copy_btn = QPushButton("Copy")
         self.commit_btn = QPushButton("Commit")
         self.push_btn = QPushButton("Push")
@@ -133,12 +150,14 @@ class CommitPanel(QWidget):
             "Push the current branch to its remote (asks for confirmation first)."
         )
         self.regen_btn.clicked.connect(self._start)
+        self.refresh_btn.clicked.connect(self._on_refresh)
         self.copy_btn.clicked.connect(self._on_copy)
         self.commit_btn.clicked.connect(self._on_commit)
         self.push_btn.clicked.connect(self._on_push)
 
         self.btn_row = QHBoxLayout()
         self.btn_row.addWidget(self.regen_btn)
+        self.btn_row.addWidget(self.refresh_btn)
         self.btn_row.addStretch(1)
         self.btn_row.addWidget(self.copy_btn)
         self.btn_row.addWidget(self.commit_btn)
@@ -152,6 +171,8 @@ class CommitPanel(QWidget):
         repos_box.addSpacing(SECTION_GAP)
         repos_box.addWidget(QLabel("Template:"))
         repos_box.addWidget(self.template_combo)
+        repos_box.addWidget(QLabel("Inference Providers:"))
+        repos_box.addWidget(self.provider_combo)
 
         # ---- left pane: the commit message -------------------------------
         left = QWidget()
@@ -217,6 +238,8 @@ class CommitPanel(QWidget):
 
         self.refresh_repos()
 
+        self.refresh_provider()
+
         if auto_start:
             self._start()
 
@@ -225,6 +248,8 @@ class CommitPanel(QWidget):
         """Reload the repo list (call after repositories are added/removed)."""
         self.repo_picker.refresh()
         self._refresh_templates()
+        # The Connection & Model tab can change this while we are not looking.
+        self.refresh_provider()
         self._load_staged_files()
         self._set_busy(False)
         if self.repo_picker.count() == 0:
@@ -279,6 +304,20 @@ class CommitPanel(QWidget):
         self.template_combo.setCurrentIndex(idx if idx >= 0 else 0)
         self.template_combo.blockSignals(False)
 
+    def refresh_provider(self) -> None:
+        """Show the stored provider, without treating that as a user choice."""
+        index = self.provider_combo.findData(self.settings.provider)
+        self.provider_combo.blockSignals(True)
+        self.provider_combo.setCurrentIndex(index if index >= 0 else 0)
+        self.provider_combo.blockSignals(False)
+
+    def _on_provider_changed(self, _index: int) -> None:
+        key = self.provider_combo.currentData()
+        if not key or key == self.settings.provider:
+            return
+        self.settings.provider = key
+        self.settings.save()
+
     def _on_template_changed(self, _index: int) -> None:
         repo = self._current_repo_path()
         name = self.template_combo.currentText()
@@ -287,13 +326,15 @@ class CommitPanel(QWidget):
         self.settings.set_repo_template(repo, name)
         self.settings.save()
 
-    def _on_repo_selected(self, path: str = "") -> None:
-        """React to the picker's selection (it already updated the settings)."""
-        if not path:
-            return
-        # Templates are per repository, so show the new one's assignment.
-        self._refresh_templates()
-        # Results belong to the previous repo - clear them rather than mislead.
+    def _clear_results(self) -> None:
+        """Drop everything a generation run produced.
+
+        A message describing a diff that is no longer the staged one is worse
+        than an empty box: it reads as current. So the editor, the file list,
+        the diff pane and the coverage all go together, and the button goes
+        back to saying "Generate" because there is no longer a result to
+        regenerate.
+        """
         self.editor.clear()
         self.file_list.clear()
         self.diff_view.clear()
@@ -301,6 +342,26 @@ class CommitPanel(QWidget):
         self.progress.setText("")
         self.regen_btn.setText("Generate")
         self.status.setText("")
+
+    def _on_refresh(self) -> None:
+        """Re-read what is staged, discarding the message written for the old set.
+
+        Staging happens outside this window -- in a terminal, an IDE, another
+        git client -- and nothing here notices. Without this the panel shows
+        whatever was staged when the tab was opened, and generating from it
+        produces a message for the wrong changes.
+        """
+        self._clear_results()
+        self._load_staged_files()
+
+    def _on_repo_selected(self, path: str = "") -> None:
+        """React to the picker's selection (it already updated the settings)."""
+        if not path:
+            return
+        # Templates are per repository, so show the new one's assignment.
+        self._refresh_templates()
+        # Results belong to the previous repo - clear them rather than mislead.
+        self._clear_results()
         # Show the new repository's staged files right away.
         self._load_staged_files()
 
@@ -428,6 +489,9 @@ class CommitPanel(QWidget):
 
     def _set_busy(self, busy: bool) -> None:
         self.regen_btn.setEnabled(not busy)
+        # Refresh clears the very widgets a running generation is about to
+        # fill, so it waits with the rest.
+        self.refresh_btn.setEnabled(not busy)
         self.copy_btn.setEnabled(not busy)
         self.commit_btn.setEnabled(not busy)
 

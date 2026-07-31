@@ -12,6 +12,7 @@ from pathlib import Path
 
 from platformdirs import user_config_dir
 
+from git_assistant.providers import DEFAULT_PROVIDER, is_known
 from git_assistant.prompts import DEFAULT_TEMPLATE
 
 APP_NAME = "git-assistant"
@@ -86,6 +87,19 @@ class RepoEntry:
 class Settings:
     """All persisted user configuration."""
 
+    #: Which backend generates the message. See git_assistant.providers.
+    provider: str = DEFAULT_PROVIDER
+    #: Per-provider endpoint, keyed by provider key. Only for providers whose
+    #: address the user supplies (Azure, a proxy); the rest have a fixed one.
+    #: API keys are NOT here -- they live in the Windows Credential Manager,
+    #: see git_assistant.credentials.
+    provider_endpoints: dict[str, str] = field(default_factory=dict)
+    #: Per-provider model, so switching provider does not carry a model name
+    #: the new one has never heard of into its request.
+    provider_models: dict[str, str] = field(default_factory=dict)
+    #: Azure pins its contract with this; a mismatch is a 404 that says
+    #: nothing about the version.
+    azure_api_version: str = "2024-10-21"
     lmstudio_ip: str = "127.0.0.1"
     lmstudio_port: int = 1234
     selected_model: str = ""
@@ -110,7 +124,42 @@ class Settings:
     # ---- URL helpers -------------------------------------------------------
     @property
     def base_url(self) -> str:
+        """LM Studio's address. Other providers use `provider_endpoint`."""
         return f"http://{self.lmstudio_ip}:{self.lmstudio_port}"
+
+    # ---- per-provider settings ---------------------------------------------
+    def provider_endpoint(self, key: str) -> str:
+        return (self.provider_endpoints.get(key) or "").strip()
+
+    def set_provider_endpoint(self, key: str, value: str) -> None:
+        value = (value or "").strip()
+        if value:
+            self.provider_endpoints[key] = value
+        else:
+            self.provider_endpoints.pop(key, None)
+
+    def provider_model(self, key: str) -> str:
+        """The model chosen for a provider.
+
+        LM Studio keeps using `selected_model` so existing settings files load
+        with their model intact; everything else is keyed by provider.
+        """
+        if key == DEFAULT_PROVIDER:
+            return self.selected_model
+        return (self.provider_models.get(key) or "").strip()
+
+    def set_provider_model(self, key: str, value: str) -> None:
+        value = (value or "").strip()
+        if key == DEFAULT_PROVIDER:
+            self.selected_model = value
+            return
+        if value:
+            self.provider_models[key] = value
+        else:
+            self.provider_models.pop(key, None)
+
+    def active_model(self) -> str:
+        return self.provider_model(self.provider)
 
     def active_repo_entry(self) -> RepoEntry | None:
         for r in self.repos:
@@ -190,6 +239,19 @@ class Settings:
     def from_dict(cls, data: dict) -> "Settings":
         known = {f.name for f in fields(cls)}
         clean = {k: v for k, v in data.items() if k in known}
+        # A provider this build has never heard of -- hand-edited, or written
+        # by a newer version -- falls back rather than stopping the app.
+        if not is_known(str(clean.get("provider", ""))):
+            clean["provider"] = DEFAULT_PROVIDER
+        # Hand-edited files can put anything here; a non-dict would crash on
+        # first use rather than at load, far from the cause.
+        for name in ("provider_endpoints", "provider_models"):
+            value = clean.get(name)
+            clean[name] = (
+                {str(k): str(v) for k, v in value.items()}
+                if isinstance(value, dict)
+                else {}
+            )
         repos = clean.get("repos") or []
         clean["repos"] = [
             RepoEntry(
