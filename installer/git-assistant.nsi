@@ -108,15 +108,13 @@ VIAddVersionKey "LegalCopyright"  "${PUBLISHER}"
 !insertmacro MUI_PAGE_DIRECTORY
 !insertmacro MUI_PAGE_INSTFILES
 
-; Offer to launch straight from the finish page -- but never from a per-machine
-; install, where the installer is elevated and the application would inherit
-; that token. A tray app running as administrator writes its settings into the
-; wrong profile and hands every git command it spawns rights it should not have.
-; Start it from the Start menu instead.
-!ifndef PERMACHINE
-  !define MUI_FINISHPAGE_RUN "$INSTDIR\${EXE_NAME}"
-  !define MUI_FINISHPAGE_RUN_TEXT "Start ${APP_NAME} (runs in the system tray)"
-!endif
+; No MUI_FINISHPAGE_RUN in any variant -- see the note above .onInstSuccess for
+; why nothing here launches the application. Since the checkbox is gone, the
+; page has to say how to start it, or "installed" is the last thing a first-time
+; user is told about a program that puts no window on screen.
+!define MUI_FINISHPAGE_TEXT "${APP_NAME} has been installed.$\r$\n$\r$\n\
+Start it from the Start menu. It runs in the system tray -- look for its icon \
+by the clock, and click it to open the window."
 !insertmacro MUI_PAGE_FINISH
 
 !insertmacro MUI_UNPAGE_CONFIRM
@@ -178,27 +176,22 @@ $INSTDIR$\n$\nDowngrade to ${VERSION}?" \
   continue:
 FunctionEnd
 
-; A silent run is a self-update: the application downloaded this installer,
-; verified it against signed metadata, and launched it. Restart it afterwards.
+; There is deliberately no .onInstSuccess, and no finish-page "run now" option.
+; No installer variant starts the application.
 ;
-; The finish page is where an interactive install offers that, and silent mode
-; has no pages - so without this the app would vanish mid-update and the user
-; would have to start it again from the Start menu, which reads as a crash.
+; It used to relaunch after a silent (self-update) run, so the tray icon did not
+; simply vanish mid-update. That is friendlier, but an installer that executes a
+; program when it finishes is a defining behaviour of a dropper, and this one is
+; already being quarantined -- see the README for what has and has not been
+; ruled out. Not launching is the one thing an installer can do about that which
+; costs nothing but a click.
 ;
-; .onInstSuccess rather than the end of the section: it runs once, after every
-; section has succeeded, so a failed install never relaunches into a
-; half-replaced directory.
-Function .onInstSuccess
-!ifndef PERMACHINE
-  ${If} ${Silent}
-    Exec '"$INSTDIR\${EXE_NAME}"'
-  ${EndIf}
-!else
-  ; Never here: a silent per-machine run is a deployment, not a self-update --
-  ; there is no updater in this build to have started it -- and the process
-  ; would inherit the installer's elevated token.
-!endif
-FunctionEnd
+; It also removes a real hazard in the per-machine variants: the installer runs
+; elevated, so anything it started would inherit that token. A tray app running
+; as administrator writes its settings into the wrong profile and hands every
+; git subprocess it spawns rights it should not have.
+;
+; The user starts it from the Start menu. The finish page says so.
 
 ; Nothing to choose when a copy already exists - it is replaced in place, and
 ; offering a different directory would strand the old install.

@@ -332,10 +332,16 @@ class TrayApp:
         not strictly required -- but being killed means settings edited in this
         session are never written. Quitting on a short timer leaves the
         notification on screen long enough to read.
+
+        The installer no longer starts the new version -- no variant does, see
+        installer/git-assistant.nsi -- so this is the last thing the user is
+        told before the tray icon disappears. It has to say that reopening is
+        theirs to do, or an update looks like a crash.
         """
         self._notify(
             "Installing update",
-            "Git Assistant will close and reopen once the update is applied.",
+            "Git Assistant will close while the update is applied. "
+            "Start it again from the Start menu when it finishes.",
         )
         QTimer.singleShot(2000, self.app.quit)
 

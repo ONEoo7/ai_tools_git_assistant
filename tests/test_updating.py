@@ -10,6 +10,7 @@ not.
 from __future__ import annotations
 
 import json
+import sys
 import tomllib
 from pathlib import Path
 
@@ -571,3 +572,46 @@ def test_sweeping_a_directory_that_is_not_there_is_fine(
     # A fresh install has never staged anything.
     monkeypatch.setattr(client, "staged_dir", lambda: tmp_path / "never-created")
     client.clear_staged_updates()
+
+
+# ------------------------------------------------------------ launching it
+# `subprocess.Popen` used to start the installer, and `CreateProcess` beneath it
+# does not elevate: an installer manifested requireAdministrator fails with
+# ERROR_ELEVATION_REQUIRED (740) rather than prompting. The launch goes through
+# ShellExecuteEx now, which uses the elevation broker.
+
+
+def test_declining_the_elevation_prompt_is_explained_as_a_choice() -> None:
+    """Not "error 1223". The user dismissed a dialog and nothing was changed."""
+    message = client._launch_error_message(1223)
+    assert "declined" in message
+    assert "nothing has been changed" in message
+    assert "1223" not in message
+
+
+def test_elevation_required_is_reported_as_a_bug() -> None:
+    """740 means the launch did not elevate, which is the thing that was fixed.
+
+    If it reappears it is a regression, not a condition to explain away, so the
+    message says so rather than reading like ordinary bad luck.
+    """
+    message = client._launch_error_message(740)
+    assert "bug" in message
+
+
+def test_an_unrecognised_failure_still_names_the_code() -> None:
+    assert "Windows error 3" in client._launch_error_message(3)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="ShellExecuteEx is Windows-only")
+def test_a_failed_launch_raises_rather_than_failing_silently(tmp_path: Path) -> None:
+    """Exercises the real ShellExecuteExW call: struct layout, call, GetLastError.
+
+    A missing file is the cheapest way to reach the failure path without
+    starting anything. Getting the structure wrong would surface here as a
+    crash or a bogus code rather than ERROR_FILE_NOT_FOUND.
+    """
+    with pytest.raises(client.UpdateUnavailableError) as caught:
+        client._launch_installer(tmp_path / "was-never-downloaded.exe")
+
+    assert "Windows error 2" in str(caught.value)  # ERROR_FILE_NOT_FOUND

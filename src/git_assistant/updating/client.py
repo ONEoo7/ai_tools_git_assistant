@@ -667,24 +667,106 @@ def _verify_staged(result: UpdateResult, path: Path) -> None:
     )
 
 
+#: Windows error codes ShellExecuteEx reports that mean something specific to a
+#: person, as opposed to a number to paste into a search engine.
+_ERROR_CANCELLED = 1223  # the UAC consent dialog was dismissed or declined
+_ERROR_ELEVATION_REQUIRED = 740
+
+
+def _launch_error_message(code: int) -> str:
+    """Explain a failed launch in terms of what the user did or can do."""
+    if code == _ERROR_CANCELLED:
+        return (
+            "the update needs administrator approval to install, and the "
+            "prompt was declined; nothing has been changed"
+        )
+    if code == _ERROR_ELEVATION_REQUIRED:
+        # Should be unreachable now that the launch elevates, so say so rather
+        # than pretending it is a normal condition.
+        return (
+            "the installer requires elevation and could not obtain it "
+            f"(error {code}); this is a bug, please report it"
+        )
+    return f"the installer could not be started (Windows error {code})"
+
+
 def _launch_installer(path: Path) -> None:
-    """Start the installer detached and return.
+    """Start the installer and return, leaving it running.
 
     `/S` is NSIS's silent switch. The installer stops the running application,
-    replaces the files and starts it again; none of that can happen while this
-    process is waiting on it, so it must not be a child that dies with us.
+    replaces the files and exits; none of that can happen while this process is
+    waiting on it, so it must outlive us.
+
+    Uses ShellExecuteEx rather than subprocess. `CreateProcess`, which `Popen`
+    calls, does not elevate: handed an installer whose manifest asks for
+    administrator it fails with ERROR_ELEVATION_REQUIRED (740) instead of
+    prompting. ShellExecuteEx goes through the elevation broker, so one call
+    serves both -- silent for a per-user installer, a UAC consent dialog for a
+    per-machine one.
+
+    That is not hypothetical. This build cannot know which installer the update
+    service publishes; a per-user installation offered a per-machine build
+    would hit 740 and report "the installer could not be started" for a file it
+    had just downloaded and verified.
+
+    The verb is "open", not "runas": "open" honours the target's manifest,
+    where "runas" would force a consent prompt onto the per-user installer,
+    which does not need one and never used to show one.
     """
-    import subprocess
+    if sys.platform != "win32":
+        import subprocess
 
-    flags = 0
-    if sys.platform == "win32":
-        # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP: survives this process
-        # exiting, and does not receive the Ctrl+C this one would.
-        flags = 0x00000008 | 0x00000200
+        subprocess.Popen(  # noqa: S603 - a path we built, holding verified bytes
+            [str(path), "/S"], close_fds=True, cwd=str(path.parent)
+        )
+        return
 
-    subprocess.Popen(  # noqa: S603 - a path we constructed, holding bytes just verified
-        [str(path), "/S"],
-        creationflags=flags,
-        close_fds=True,
-        cwd=str(path.parent),
-    )
+    import ctypes
+    from ctypes import wintypes
+
+    class _ShellExecuteInfo(ctypes.Structure):
+        _fields_ = [
+            ("cbSize", wintypes.DWORD),
+            ("fMask", ctypes.c_ulong),
+            ("hwnd", wintypes.HWND),
+            ("lpVerb", wintypes.LPCWSTR),
+            ("lpFile", wintypes.LPCWSTR),
+            ("lpParameters", wintypes.LPCWSTR),
+            ("lpDirectory", wintypes.LPCWSTR),
+            ("nShow", ctypes.c_int),
+            ("hInstApp", wintypes.HINSTANCE),
+            ("lpIDList", ctypes.c_void_p),
+            ("lpClass", wintypes.LPCWSTR),
+            ("hkeyClass", wintypes.HKEY),
+            ("dwHotKey", wintypes.DWORD),
+            ("hIcon", wintypes.HANDLE),  # union with hMonitor
+            ("hProcess", wintypes.HANDLE),
+        ]
+
+    see_mask_nocloseprocess = 0x00000040
+    # NOASYNC: complete the call before returning. Documented as required when
+    # the caller exits soon afterwards, which is exactly what happens here --
+    # the tray quits about two seconds later.
+    see_mask_noasync = 0x00000100
+    see_mask_no_ui = 0x00000400  # errors are reported by the caller, not a dialog
+    sw_shownormal = 1
+
+    shell32 = ctypes.WinDLL("shell32", use_last_error=True)
+    shell32.ShellExecuteExW.argtypes = [ctypes.POINTER(_ShellExecuteInfo)]
+    shell32.ShellExecuteExW.restype = wintypes.BOOL
+
+    info = _ShellExecuteInfo()
+    info.cbSize = ctypes.sizeof(info)
+    info.fMask = see_mask_nocloseprocess | see_mask_noasync | see_mask_no_ui
+    info.lpVerb = "open"
+    info.lpFile = str(path)
+    info.lpParameters = "/S"
+    info.lpDirectory = str(path.parent)
+    info.nShow = sw_shownormal
+
+    if not shell32.ShellExecuteExW(ctypes.byref(info)):
+        raise UpdateUnavailableError(_launch_error_message(ctypes.get_last_error()))
+
+    if info.hProcess:
+        # The installer keeps running; this only drops our handle to it.
+        ctypes.windll.kernel32.CloseHandle(info.hProcess)
