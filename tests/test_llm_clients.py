@@ -279,8 +279,8 @@ def test_context_length_is_unknown_not_wrong(monkeypatch):
 
 
 # ---- the self-hosted, OpenAI-compatible providers ----------------------------
-# Ollama and a Litellm proxy speak the same chat-completions shape as LM Studio,
-# so they share one client and differ only in configuration.
+# Ollama, Lemonade Server and a Litellm proxy speak the same chat-completions
+# shape as LM Studio, so they share one client and differ only in configuration.
 
 
 def test_self_hosted_providers_default_to_localhost():
@@ -289,6 +289,7 @@ def test_self_hosted_providers_default_to_localhost():
 
     assert providers.get("ollama").base_url == "http://localhost:11434/v1"
     assert providers.get("litellm-proxy").base_url == "http://localhost:4000/v1"
+    assert providers.get("lemonade").base_url == "http://localhost:13305/api/v1"
 
 
 def test_a_litellm_proxy_without_a_key_still_connects():
@@ -323,6 +324,24 @@ def test_ollama_offers_no_key_field():
     from git_assistant import providers
 
     assert providers.get("ollama").needs_api_key is False
+
+
+def test_lemonade_offers_no_key_field():
+    """Same as Ollama: nothing to authenticate against."""
+    from git_assistant import providers
+
+    assert providers.get("lemonade").needs_api_key is False
+
+
+def test_lemonade_keeps_its_api_v1_prefix():
+    """Its OpenAI-compatible routes are under /api/v1, not /v1; dropping the
+    prefix would post to a path the server does not serve."""
+    from git_assistant.llm import build_client
+
+    settings = Settings()
+    settings.provider = "lemonade"
+
+    assert build_client(settings).base_url == "http://localhost:13305/api/v1"
 
 
 def test_an_overridden_endpoint_beats_the_default():

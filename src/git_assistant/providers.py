@@ -129,6 +129,18 @@ PROVIDERS: tuple[Provider, ...] = (
         key_help="Runs locally; no API key required.",
         endpoint_hint="http://localhost:11434/v1",
     ),
+    Provider(
+        "lemonade",
+        "Lemonade Server",
+        implemented=True,
+        openai_compatible=True,
+        # Same reasoning as Ollama: no authentication of its own, so no key
+        # field. Its OpenAI-compatible routes live under /api/v1, not /v1.
+        needs_endpoint=True,
+        base_url="http://localhost:13305/api/v1",
+        key_help="Runs locally; no API key required.",
+        endpoint_hint="http://localhost:13305/api/v1",
+    ),
 )
 
 #: What a settings file that predates this choice, or names something unknown,

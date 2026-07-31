@@ -515,7 +515,14 @@ class SettingsDialog(QDialog):
             form.setRowVisible(field, provider.needs_api_key)
 
         self.endpoint_edit.setPlaceholderText(provider.endpoint_hint)
-        self.endpoint_edit.setText(self.settings.provider_endpoint(provider.key))
+        # Real, editable text rather than a greyed hint. For the local servers
+        # the default address *is* the answer, and a placeholder reads as an
+        # example you still have to type out yourself. Azure has no default --
+        # its address is per-resource -- so that field stays empty and the hint
+        # is all there is to show.
+        self.endpoint_edit.setText(
+            self.settings.provider_endpoint(provider.key) or provider.base_url
+        )
         self._refresh_key_status(provider)
 
     # ---- API keys ----------------------------------------------------------
@@ -898,7 +905,14 @@ class SettingsDialog(QDialog):
             provider_key,
             self.model_combo.currentData() or self.model_combo.currentText(),
         )
-        s.set_provider_endpoint(provider_key, self.endpoint_edit.text())
+        # An untouched default is stored as "unset", so it keeps tracking
+        # `Provider.base_url` instead of pinning today's value into
+        # settings.json -- where a later change to the default would never
+        # reach the people who never edited the field.
+        endpoint = self.endpoint_edit.text().strip()
+        if endpoint == providers.get(provider_key).base_url:
+            endpoint = ""
+        s.set_provider_endpoint(provider_key, endpoint)
 
         repos, roots, watched = self._collect_repos_and_roots()
         s.repos = repos

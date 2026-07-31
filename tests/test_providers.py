@@ -16,6 +16,7 @@ def test_every_provider_is_offered_in_order():
         "Azure AI Foundry",
         "Litellm Proxy",
         "Ollama",
+        "Lemonade Server",
     ]
 
 
@@ -188,8 +189,57 @@ def test_choosing_in_the_generate_tab_persists(qapp, settings):
 
 
 def test_no_provider_is_flagged_as_unavailable(qapp, settings):
-    """All six work now, so the warning note should stay empty for each."""
+    """All of them work now, so the warning note should stay empty for each."""
     dlg = SettingsDialog(settings)
     for row in range(dlg.provider_list.count()):
         dlg.provider_list.setCurrentRow(row)
         assert dlg.provider_note.text() == "", dlg.provider_list.item(row).text()
+
+
+# ---- the endpoint field -----------------------------------------------------
+def test_a_default_endpoint_is_editable_text_not_a_greyed_hint(qapp, settings):
+    """A placeholder reads as an example to type out; for a local server the
+    default address is the answer, so it goes in as real text."""
+    dlg = SettingsDialog(settings)
+    for provider in PROVIDERS:
+        if not provider.base_url:
+            continue
+        settings.provider = provider.key
+        dlg._apply_provider_fields(provider)
+        assert dlg.endpoint_edit.text() == provider.base_url, provider.key
+
+
+def test_azure_has_no_default_to_prefill(qapp, settings):
+    """Its address is per-resource, so the hint is all there is to show."""
+    dlg = SettingsDialog(settings)
+    dlg._apply_provider_fields(providers.get("azure-ai-foundry"))
+
+    assert dlg.endpoint_edit.text() == ""
+    assert dlg.endpoint_edit.placeholderText()
+
+
+def test_a_stored_endpoint_beats_the_prefilled_default(qapp, settings):
+    settings.provider = "lemonade"
+    settings.set_provider_endpoint("lemonade", "http://gpu-box.lan:13305/api/v1")
+    dlg = SettingsDialog(settings)
+
+    assert dlg.endpoint_edit.text() == "http://gpu-box.lan:13305/api/v1"
+
+
+def test_an_untouched_default_is_not_written_into_settings(qapp, settings):
+    """Storing it would pin today's value; the provider default must keep
+    applying to anyone who never edited the field."""
+    settings.provider = "lemonade"
+    dlg = SettingsDialog(settings)
+    dlg._apply_to_settings()
+
+    assert "lemonade" not in settings.provider_endpoints
+
+
+def test_an_edited_endpoint_is_written_into_settings(qapp, settings):
+    settings.provider = "lemonade"
+    dlg = SettingsDialog(settings)
+    dlg.endpoint_edit.setText("http://gpu-box.lan:13305/api/v1")
+    dlg._apply_to_settings()
+
+    assert settings.provider_endpoint("lemonade") == "http://gpu-box.lan:13305/api/v1"

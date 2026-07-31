@@ -68,8 +68,9 @@ choice appears as **AI Provider** in the Generate tab. The form reshapes around 
 | **Azure AI Foundry** | API key + endpoint | Endpoint is per-resource; `api-version` is configurable |
 | **Litellm Proxy** | endpoint (+ optional key) | Defaults to `localhost:4000`; connects unauthenticated if your proxy has no auth |
 | **Ollama** | endpoint | Defaults to `localhost:11434`; no key — Ollama has no auth of its own |
+| **Lemonade Server** | endpoint | Defaults to `localhost:13305/api/v1`; no key — Lemonade has no auth of its own |
 
-Both self-hosted providers default to localhost, so the usual setup needs no
+The self-hosted providers all default to localhost, so the usual setup needs no
 typing. Put a remote one behind auth via the **Litellm Proxy** entry, which has a
 key field.
 
