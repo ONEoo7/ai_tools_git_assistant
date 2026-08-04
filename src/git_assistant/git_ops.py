@@ -195,6 +195,49 @@ def current_branch(repo: str | Path) -> str:
     return res.stdout.strip() if res.ok else "(unknown)"
 
 
+#: What `git rev-parse --abbrev-ref HEAD` reports when no branch is checked out.
+DETACHED_HEAD = "HEAD"
+
+
+def list_branches(repo: str | Path) -> list[str]:
+    """Local branches, most recently committed to first.
+
+    Recency order rather than alphabetical: the branches someone is working on
+    are the ones they want at the top of a picker, which is how the repository
+    list is ordered too.
+    """
+    res = _run(
+        repo,
+        [
+            "for-each-ref",
+            "--format=%(refname:short)",
+            "--sort=-committerdate",
+            "refs/heads",
+        ],
+    )
+    if not res.ok:
+        return []
+    return [line.strip() for line in res.stdout.splitlines() if line.strip()]
+
+
+def has_uncommitted_changes(repo: str | Path) -> bool:
+    """True when anything is staged, modified or untracked in the work tree."""
+    res = _run(repo, ["status", "--porcelain"])
+    return bool(res.ok and res.stdout.strip())
+
+
+def switch_branch(repo: str | Path, name: str) -> GitResult:
+    """Check out an existing local branch.
+
+    ``git switch`` rather than ``git checkout``: it only ever means "change
+    branch", so a branch name that also matches a path cannot be read as a
+    request to discard that file's changes. Git refuses the switch by itself
+    when carrying the local changes over would overwrite something, and that
+    refusal is returned here rather than being worked around.
+    """
+    return _run(repo, ["switch", name])
+
+
 # scp-style remote, e.g. git@github.com:ONEoo7/ai_tools.git
 _SCP_RE = re.compile(r"^[^/@]+@([^/:]+):(.+)$")
 

@@ -183,3 +183,123 @@ def test_picker_filter_keeps_the_parent_of_a_matching_submodule(qapp, settings):
     assert not alpha.isHidden()  # a match must not be stranded out of its tree
     assert not alpha.child(0).isHidden()
     assert tree.topLevelItem(1).isHidden()  # beta matches nothing
+
+
+# ---- the branch selector ----------------------------------------------------
+# Picking a branch checks it out: the diff being described is the work tree's,
+# and so is the commit, so the choice cannot mean anything else.
+def _run_git(repo, *args):
+    import subprocess
+    import sys
+
+    flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+    return subprocess.run(
+        ["git", "-C", str(repo), *args], capture_output=True, creationflags=flags
+    )
+
+
+def _repo_with_branches(tmp_path):
+    """A repo with a commit and a second branch, so there is something to pick."""
+    repo = _repo(tmp_path)
+    (repo / "a.txt").write_text("a\n", encoding="utf-8")
+    _run_git(repo, "add", "a.txt")
+    _run_git(repo, "commit", "-m", "first")
+    _run_git(repo, "branch", "feature")
+    return repo
+
+
+def _panel_for(settings, repo):
+    settings.repos = [RepoEntry(str(repo))]
+    settings.active_repo = str(repo)
+    return CommitPanel(settings, auto_start=False)
+
+
+def test_branch_selector_lists_branches_and_shows_the_current_one(qapp, settings, tmp_path):
+    from git_assistant import git_ops
+
+    repo = _repo_with_branches(tmp_path)
+    panel = _panel_for(settings, repo)
+
+    shown = [panel.branch_combo.itemText(i) for i in range(panel.branch_combo.count())]
+    assert set(shown) == {git_ops.current_branch(repo), "feature"}
+    assert panel.branch_combo.currentData() == git_ops.current_branch(repo)
+
+
+def test_choosing_a_branch_checks_it_out(qapp, settings, tmp_path):
+    from git_assistant import git_ops
+
+    repo = _repo_with_branches(tmp_path)
+    panel = _panel_for(settings, repo)
+
+    panel.branch_combo.setCurrentIndex(panel.branch_combo.findData("feature"))
+
+    assert git_ops.current_branch(repo) == "feature"
+    assert "feature" in panel.status.text()
+
+
+def test_switching_branch_drops_the_message_written_for_the_other_one(
+    qapp, settings, tmp_path
+):
+    repo = _repo_with_branches(tmp_path)
+    panel = _panel_for(settings, repo)
+    panel.editor.setPlainText("feat: something about the other branch")
+
+    panel.branch_combo.setCurrentIndex(panel.branch_combo.findData("feature"))
+
+    assert panel.editor.toPlainText() == ""
+
+
+def test_declining_the_confirmation_leaves_the_branch_alone(
+    qapp, settings, tmp_path, monkeypatch
+):
+    """Uncommitted work follows you across, so the switch is never silent."""
+    from PyQt6.QtWidgets import QMessageBox
+
+    from git_assistant import git_ops
+
+    repo = _repo_with_branches(tmp_path)
+    (repo / "a.txt").write_text("edited\n", encoding="utf-8")  # now dirty
+    panel = _panel_for(settings, repo)
+    start = git_ops.current_branch(repo)
+    monkeypatch.setattr(
+        QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Cancel
+    )
+
+    panel.branch_combo.setCurrentIndex(panel.branch_combo.findData("feature"))
+
+    assert git_ops.current_branch(repo) == start
+    assert panel.branch_combo.currentData() == start, "the box must not lie"
+
+
+def test_a_clean_repo_switches_without_asking(qapp, settings, tmp_path, monkeypatch):
+    from PyQt6.QtWidgets import QMessageBox
+
+    from git_assistant import git_ops
+
+    repo = _repo_with_branches(tmp_path)
+    panel = _panel_for(settings, repo)
+
+    def refuse(*_a, **_k):
+        raise AssertionError("nothing to warn about in a clean work tree")
+
+    monkeypatch.setattr(QMessageBox, "question", refuse)
+    panel.branch_combo.setCurrentIndex(panel.branch_combo.findData("feature"))
+
+    assert git_ops.current_branch(repo) == "feature"
+
+
+def test_a_repo_without_commits_offers_nothing_to_switch_to(qapp, settings, tmp_path):
+    """An unborn branch has no ref; the box shows the state and stays inert."""
+    panel = _panel_for(settings, _repo(tmp_path))
+
+    assert panel.branch_combo.isEnabled() is False
+
+
+def test_the_branch_box_is_disabled_while_generating(qapp, settings, tmp_path):
+    """Switching mid-run changes the diff the worker is describing."""
+    panel = _panel_for(settings, _repo_with_branches(tmp_path))
+
+    panel._set_busy(True)
+    assert not panel.branch_combo.isEnabled()
+    panel._set_busy(False)
+    assert panel.branch_combo.isEnabled()

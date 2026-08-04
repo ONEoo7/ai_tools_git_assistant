@@ -105,9 +105,21 @@ class CommitPanel(QWidget):
         self._push_thread = None
         self._push_worker = None
         self._coverage: list[FileCoverage] = []
+        self._branches: list[str] = []  # local branches of the selected repo
 
         self.repo_picker = RepoPicker(settings)
         self.repo_picker.repoChanged.connect(self._on_repo_selected)
+
+        # The branch the commit will land on. Picking one here checks it out,
+        # because that is the only way the choice could mean anything: the diff
+        # being described is the work tree's, and so is the commit.
+        self.branch_combo = QComboBox()
+        self.branch_combo.setToolTip(
+            "Branch checked out in this repository.\n"
+            "Choosing another one runs 'git switch'; uncommitted changes come "
+            "along with you, and git refuses the switch if they would be lost."
+        )
+        self.branch_combo.currentIndexChanged.connect(self._on_branch_changed)
 
         # Each project can use its own prompt template; picking one here is what
         # assigns it to the selected repository.
@@ -169,6 +181,8 @@ class CommitPanel(QWidget):
         repos_box.setContentsMargins(0, 0, SECTION_GAP, 0)
         repos_box.addWidget(self.repo_picker, 1)
         repos_box.addSpacing(SECTION_GAP)
+        repos_box.addWidget(QLabel("Branch:"))
+        repos_box.addWidget(self.branch_combo)
         repos_box.addWidget(QLabel("Template:"))
         repos_box.addWidget(self.template_combo)
         repos_box.addWidget(QLabel("Inference Providers:"))
@@ -247,6 +261,7 @@ class CommitPanel(QWidget):
     def refresh_repos(self) -> None:
         """Reload the repo list (call after repositories are added/removed)."""
         self.repo_picker.refresh()
+        self._refresh_branches()
         self._refresh_templates()
         # The Connection & Model tab can change this while we are not looking.
         self.refresh_provider()
@@ -289,6 +304,78 @@ class CommitPanel(QWidget):
         self._populate_files(coverage)
         if not coverage:
             self.files_label.setText("Staged files - nothing staged")
+
+    # ---- branch ------------------------------------------------------------
+    def _refresh_branches(self) -> None:
+        """List the repository's local branches, with the checked-out one shown.
+
+        Populated with signals blocked: filling the box is not the user choosing
+        a branch, and treating it as one would check out whatever landed first.
+        """
+        repo = self._current_repo_path()
+        self._branches = git_ops.list_branches(repo) if repo else []
+        current = git_ops.current_branch(repo) if repo else ""
+
+        self.branch_combo.blockSignals(True)
+        self.branch_combo.clear()
+        for name in self._branches:
+            # The branch to switch to is the item's data, so the entry below --
+            # which is a state, not a branch -- cannot be checked out by name.
+            self.branch_combo.addItem(name, name)
+        if current and current not in self._branches:
+            # Detached HEAD, or a repo git cannot read: show the state rather
+            # than silently selecting a branch that is not checked out.
+            label = (
+                "(detached HEAD)" if current == git_ops.DETACHED_HEAD else current
+            )
+            self.branch_combo.insertItem(0, label, None)
+            self.branch_combo.setCurrentIndex(0)
+        else:
+            self.branch_combo.setCurrentIndex(self.branch_combo.findData(current))
+        self.branch_combo.setEnabled(bool(self._branches))
+        self.branch_combo.blockSignals(False)
+
+    def _on_branch_changed(self, _index: int) -> None:
+        repo = self._current_repo_path()
+        target = self.branch_combo.currentData()
+        current = git_ops.current_branch(repo) if repo else ""
+        if not repo or not target or target == current:
+            return
+
+        if git_ops.has_uncommitted_changes(repo) and (
+            QMessageBox.question(
+                self,
+                "Switch branch",
+                f"Switch from '{current}' to '{target}'?\n\n"
+                f"Repository: {repo}\n\n"
+                "This repository has uncommitted changes. They stay in the "
+                f"work tree and come with you, so anything staged is committed "
+                f"on '{target}' instead.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel,
+            )
+            != QMessageBox.StandardButton.Yes
+        ):
+            self._refresh_branches()  # put the box back on the real branch
+            return
+
+        result = git_ops.switch_branch(repo, target)
+        if not result.ok:
+            QMessageBox.warning(
+                self,
+                "Could not switch branch",
+                f"git refused to switch to '{target}':\n\n"
+                f"{result.stderr.strip() or result.stdout.strip()}",
+            )
+            self._refresh_branches()
+            return
+
+        # The work tree is a different one now, so anything on screen describes
+        # the branch we just left.
+        self._clear_results()
+        self._refresh_branches()
+        self._load_staged_files()
+        self.status.setText(f"Switched to '{target}'.")
 
     def _refresh_templates(self) -> None:
         """Show the template list, selecting the active repo's assignment."""
@@ -352,13 +439,17 @@ class CommitPanel(QWidget):
         produces a message for the wrong changes.
         """
         self._clear_results()
+        # Branches are switched outside this window too, and the box would
+        # otherwise keep naming the one that was checked out when it was opened.
+        self._refresh_branches()
         self._load_staged_files()
 
     def _on_repo_selected(self, path: str = "") -> None:
         """React to the picker's selection (it already updated the settings)."""
         if not path:
             return
-        # Templates are per repository, so show the new one's assignment.
+        # Branches and templates are both per repository, so show the new one's.
+        self._refresh_branches()
         self._refresh_templates()
         # Results belong to the previous repo - clear them rather than mislead.
         self._clear_results()
@@ -494,6 +585,8 @@ class CommitPanel(QWidget):
         self.refresh_btn.setEnabled(not busy)
         self.copy_btn.setEnabled(not busy)
         self.commit_btn.setEnabled(not busy)
+        # Switching branch mid-run changes the diff the worker is describing.
+        self.branch_combo.setEnabled(not busy and bool(self._branches))
 
     # ---- actions -----------------------------------------------------------
     def _on_copy(self) -> None:

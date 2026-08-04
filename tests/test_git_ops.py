@@ -10,7 +10,7 @@ from git_assistant.commit_generator import render_template
 _NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
 
 
-def _git(repo, *args, stdin=None):
+def _git(repo, *args, stdin=None, env=None):
     return subprocess.run(
         ["git", "-C", str(repo), *args],
         input=stdin,
@@ -18,6 +18,7 @@ def _git(repo, *args, stdin=None):
         text=True,
         creationflags=_NO_WINDOW,
         check=True,
+        env={**os.environ, **env} if env else None,
     )
 
 
@@ -359,3 +360,68 @@ def test_delete_tag_removes_only_that_tag(repo):
     git_ops.create_tag(repo, "v0.2.0")
     assert git_ops.delete_tag(repo, "v0.1.0").ok
     assert git_ops.list_tags(repo) == ["v0.2.0"]
+
+
+# ---- branches ---------------------------------------------------------------
+def _commit_file(repo, name="a.txt", text="a\n", when=None):
+    """Commit a file, optionally stamping the committer date the sort reads."""
+    (repo / name).write_text(text, encoding="utf-8")
+    _git(repo, "add", name)
+    _git(
+        repo,
+        "commit",
+        "-m",
+        f"add {name}",
+        env={"GIT_COMMITTER_DATE": when} if when else None,
+    )
+
+
+def test_list_branches_is_most_recent_first(repo):
+    # Explicit dates: commits made in the same second tie, and a tie is decided
+    # by name, which would make this pass or fail on how fast the machine is.
+    _commit_file(repo, when="2020-01-01T00:00:00")
+    first = git_ops.current_branch(repo)
+    _git(repo, "branch", "older")
+    _git(repo, "checkout", "-b", "newer")
+    _commit_file(repo, "b.txt", when="2024-06-01T00:00:00")
+
+    branches = git_ops.list_branches(repo)
+
+    assert set(branches) == {first, "older", "newer"}
+    assert branches[0] == "newer", "the branch just committed to leads"
+
+
+def test_list_branches_is_empty_before_the_first_commit(repo):
+    """An unborn branch has no ref yet - nothing to switch to."""
+    assert git_ops.list_branches(repo) == []
+
+
+def test_switch_branch_changes_the_checked_out_one(repo):
+    _commit_file(repo)
+    start = git_ops.current_branch(repo)
+    _git(repo, "branch", "feature")
+
+    assert git_ops.switch_branch(repo, "feature").ok
+    assert git_ops.current_branch(repo) == "feature"
+    assert git_ops.switch_branch(repo, start).ok
+    assert git_ops.current_branch(repo) == start
+
+
+def test_switch_branch_reports_gits_refusal(repo):
+    result = git_ops.switch_branch(repo, "no-such-branch")
+    assert not result.ok
+    assert result.stderr.strip()
+
+
+def test_uncommitted_changes_are_detected(repo):
+    _commit_file(repo)
+    assert not git_ops.has_uncommitted_changes(repo)
+    (repo / "a.txt").write_text("changed\n", encoding="utf-8")
+    assert git_ops.has_uncommitted_changes(repo)
+
+
+def test_an_untracked_file_counts_as_uncommitted(repo):
+    """It would follow you onto the other branch, so the switch is not silent."""
+    _commit_file(repo)
+    (repo / "new.txt").write_text("x\n", encoding="utf-8")
+    assert git_ops.has_uncommitted_changes(repo)

@@ -1,0 +1,24 @@
+# Line endings are decided here rather than by each contributor's core.autocrlf,
+# so an editor that rewrites a file with the other convention cannot turn a
+# one-line change into a whole-file diff.
+#
+# LF everywhere: that is what 57 of the 68 tracked files already used, and what
+# every tool in this project (Python, git hooks, CI) reads without complaint.
+# Windows handles LF fine; the exceptions that genuinely need CRLF are below.
+* text=auto eol=lf
+
+# Batch and PowerShell scripts: cmd.exe and older PowerShell hosts mis-parse a
+# script that arrives with LF endings, so these are checked out with CRLF.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# Never rewrite the bytes of these, and never try to diff them as text.
+*.ico binary
+*.png binary
+*.jpg binary
+*.gif binary
+*.exe binary
+*.dll binary
+*.zip binary
+*.whl binary
