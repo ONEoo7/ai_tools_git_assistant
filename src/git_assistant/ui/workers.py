@@ -22,6 +22,7 @@ from git_assistant.commit_generator import (
 )
 from git_assistant.config import Settings
 from git_assistant.llm import build_client
+from git_assistant.llm_log import RecordingClient
 
 
 # Threads still running, kept referenced so Python cannot collect them early.
@@ -31,6 +32,9 @@ _IN_FLIGHT: set = set()
 
 class GeneratorWorker(QObject):
     progress = pyqtSignal(str)
+    #: Emitted as each call to the model comes back, so a long map-reduce run
+    #: can be watched rather than waited out. Carries an llm_log.LlmCall.
+    call = pyqtSignal(object)
     finished = pyqtSignal(object)  # GenerationResult
     error = pyqtSignal(str)
 
@@ -49,11 +53,17 @@ class GeneratorWorker(QObject):
             # says "Claude" would put that model's output under the wrong name,
             # and the user would have no way to tell.
             client = build_client(self._settings)
-            generator = CommitGenerator(self._settings, client)
+            # Wrapped so every exchange can be inspected afterwards. The
+            # recorder forwards each call unchanged, so what it shows is what
+            # was sent -- see git_assistant.llm_log.
+            recorder = RecordingClient(client, on_call=self.call.emit)
+            self.calls = recorder.calls
+            generator = CommitGenerator(self._settings, recorder)
             result: GenerationResult = generator.generate(
                 progress=self.progress.emit,
                 is_cancelled=lambda: self._cancelled,
             )
+            result.calls = list(recorder.calls)
             self.finished.emit(result)
         except CancelledError:
             self.error.emit("Cancelled.")

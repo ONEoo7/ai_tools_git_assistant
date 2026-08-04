@@ -79,8 +79,29 @@ exe = EXE(
     version=version_resource(read_version(ROOT), "GitAssistant"),
 )
 
+# The MCP server: a client starts it and talks over stdin/stdout, which a
+# windowed build cannot do. Same analysis and script as the app; argv decides
+# which one a process becomes. See git_assistant/__main__.py.
+mcp_exe = EXE(
+    pyz,
+    a.scripts,
+    [],
+    exclude_binaries=True,
+    name="GitAssistantMcp",
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=False,
+    console=True,  # stdio IS the transport
+    hide_console="hide-early",  # ...but no window flash when a client starts it
+    disable_windowed_traceback=False,
+    icon=str(ICON),
+    version=version_resource(read_version(ROOT), "GitAssistantMcp"),
+)
+
 coll = COLLECT(
     exe,
+    mcp_exe,
     a.binaries,
     a.datas,
     strip=False,

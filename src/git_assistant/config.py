@@ -177,6 +177,12 @@ class Settings:
     #: Recorded runs kept per repository and agent (0 keeps everything). The
     #: runs themselves live beside this file; see git_assistant.agents.history.
     agent_history_limit: int = 20
+    # ---- MCP server --------------------------------------------------------
+    #: Whether the command registered with a client offers the write tools.
+    #: The flag lives in that command line, not here -- this only remembers
+    #: what the tab last showed. See git_assistant.mcp.launch.
+    mcp_allow_writes: bool = False
+    mcp_scope: str = "user"  # which Claude Code scope to register in
     context_window: int = 32768  # total tokens for input+output (0 => auto-detect)
     safety_margin: float = 0.10  # fraction of the window reserved for the model's output
     ignore_globs: list[str] = field(default_factory=lambda: list(DEFAULT_IGNORE_GLOBS))

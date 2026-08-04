@@ -68,3 +68,41 @@ exe = EXE(
     # See the onedir spec and tools/win_version_info.py.
     version=version_resource(read_version(ROOT), "GitAssistant"),
 )
+
+# ---- the MCP server -------------------------------------------------------
+# A second file beside the first, because a windowed build has no usable
+# standard streams on Windows and stdio is how a client talks to this.
+#
+# Its own analysis rather than a second EXE over the one above: the server
+# never imports Qt (tests/test_mcp_no_qt.py enforces that), so leaving PyQt6
+# out makes this a fraction of the size of the application it ships beside.
+mcp_a = Analysis(
+    ["src/git_assistant/mcp/__main__.py"],
+    pathex=["src"],
+    binaries=[],
+    datas=[],
+    hiddenimports=["anthropic", "tiktoken_ext", "tiktoken_ext.openai_public"],
+    hookspath=[],
+    runtime_hooks=[],
+    excludes=["tkinter", "matplotlib", "numpy", "PySide6", "PyQt5", "PyQt6"],
+    noarchive=False,
+)
+mcp_pyz = PYZ(mcp_a.pure)
+
+mcp_exe = EXE(
+    mcp_pyz,
+    mcp_a.scripts,
+    mcp_a.binaries,
+    mcp_a.datas,
+    [],
+    name="GitAssistantMcp",
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=False,
+    console=True,  # stdio IS the transport
+    hide_console="hide-early",  # ...but no window flash when a client starts it
+    disable_windowed_traceback=False,
+    icon=str(ICON),
+    version=version_resource(read_version(ROOT), "GitAssistantMcp"),
+)

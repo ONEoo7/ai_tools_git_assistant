@@ -178,29 +178,14 @@ jobs:
       # inside that wheel. PyInstaller does not follow a ctypes load, so
       # without it the packaged application would import dist_client and then
       # fail to find the library it wraps.
+      # Built from the spec, like the variant below it. A command line can only
+      # produce one executable, and this build needs two: the tray application
+      # and the console MCP server a client starts over stdio. It was also a
+      # fourth place that had to agree with the specs about what ships, and did
+      # not. The spec picks up dist_client conditionally through find_spec and
+      # bundles the update metadata itself, so nothing here has to.
       - name: Build
-        run: |
-          $args = @(
-            "--noconfirm", "--windowed",
-            "--name", "git-assistant",
-            "--paths", "src",
-            "--icon", "src/git_assistant/resources/icon.ico",
-            "--add-data", "src/git_assistant/resources;git_assistant/resources"
-          )
-          if ("${{ steps.updater.outputs.present }}" -eq "true") {
-            $args += @(
-              "--collect-all", "dist_client",
-              "--add-data", "src/git_assistant/updating/root.json;git_assistant/updating"
-            )
-            # Unconditional: the previous step fails the build if there is no
-            # address, so by here there is always a file to bundle. Making this
-            # conditional is how a build shipped without one and said nothing.
-            $args += @(
-              "--add-data", "src/git_assistant/updating/update_url.txt;git_assistant/updating"
-            )
-          }
-          $args += "src/git_assistant/__main__.py"
-          uv run pyinstaller @args
+        run: uv run pyinstaller --noconfirm git-assistant-onedir.spec
 
       # The second variant: the same application with the self-updater left out
       # of the bundle entirely. It is what both the portable zip and the
@@ -213,8 +198,7 @@ jobs:
       # build that died on launch) is expressed there and covered by tests.
       #
       # Its own dist directory, so neither installer can package the other's
-      # build. The spec names the executable GitAssistant.exe, unlike this
-      # workflow's git-assistant.exe.
+      # build.
       - name: Build the no-update variant
         run: uv run pyinstaller --noconfirm git-assistant-onedir-noupdate.spec
 
@@ -361,11 +345,11 @@ jobs:
       # Wraps the self-updating onedir tree from the Build step. The portable
       # zip is NOT this build -- it is cut from the no-update variant, for the
       # reason given at the Package step -- so the two are no longer the same
-      # binary and this must keep pointing at dist/git-assistant.
+      # binary and this must keep pointing at the updating build's directory.
       #
-      # SRC_DIR/EXE_NAME are passed because this workflow names the build
-      # git-assistant, while the local spec uses GitAssistant; the script
-      # defaults to the latter.
+      # SRC_DIR/EXE_NAME are still passed explicitly even though both variants
+      # now come from a spec and are named the same: the .nsi has its own
+      # default, and a release should not depend on it agreeing.
       #
       # The .nsi path must be ABSOLUTE. Given a relative one, NSIS resolves
       # ${__FILEDIR__} to <cwd>\installer\installer -- the script's own
@@ -386,8 +370,8 @@ jobs:
           $version = "${{ steps.v.outputs.version }}"
           $root = $PWD.Path
           $variants = @(
-            @{ key = "user";           dir = "dist\git-assistant";           exe = "git-assistant.exe"; machine = $false },
-            @{ key = "machine";        dir = "dist\git-assistant";           exe = "git-assistant.exe"; machine = $true  },
+            @{ key = "user";           dir = "dist\GitAssistant";            exe = "GitAssistant.exe";  machine = $false },
+            @{ key = "machine";        dir = "dist\GitAssistant";            exe = "GitAssistant.exe";  machine = $true  },
             @{ key = "noupdate-user";  dir = "dist\GitAssistant-noupdate";   exe = "GitAssistant.exe";  machine = $false },
             @{ key = "noupdate-machine"; dir = "dist\GitAssistant-noupdate"; exe = "GitAssistant.exe";  machine = $true  }
           )

@@ -51,6 +51,7 @@ from git_assistant.prompts import DEFAULT_TEMPLATE
 from git_assistant.providers import PROVIDERS
 from git_assistant.ui.agents_panel import AgentsPanel
 from git_assistant.ui.identities_panel import IdentitiesPanel
+from git_assistant.ui.mcp_panel import McpPanel
 from git_assistant.ui.identity_bar import IdentityBar
 from git_assistant.ui.preview_dialog import SECTION_GAP, CommitPanel
 from git_assistant.ui.tags_panel import TagsPanel
@@ -125,6 +126,7 @@ class SettingsDialog(QDialog):
         self.identity_store = IdentityStore.bootstrap()
         self.identities_panel = IdentitiesPanel(self.identity_store)
         self.identities_tab_index = tabs.addTab(self.identities_panel, "Identities")
+        tabs.addTab(self._build_mcp_tab(), "MCP Server")
         tabs.addTab(self._build_template_tab(), "Template")
         tabs.addTab(self._build_advanced_tab(), "Advanced")
 
@@ -395,6 +397,10 @@ class SettingsDialog(QDialog):
             self.settings, before_run=self._apply_to_settings
         )
         return self.agents_panel
+
+    def _build_mcp_tab(self) -> QWidget:
+        self.mcp_panel = McpPanel(self.settings)
+        return self.mcp_panel
 
     def _build_connection_tab(self) -> QWidget:
         w = QWidget()

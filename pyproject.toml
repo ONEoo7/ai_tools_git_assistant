@@ -20,6 +20,9 @@ dependencies = [
 
 [project.scripts]
 git-assistant = "git_assistant.app:main"
+# The MCP server, for a source checkout. A packaged build ships it as its own
+# executable instead; see git-assistant.spec.
+git-assistant-mcp = "git_assistant.mcp.server:main"
 
 [project.optional-dependencies]
 dev = [

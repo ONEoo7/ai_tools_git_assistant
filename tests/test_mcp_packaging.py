@@ -1,0 +1,105 @@
+"""The server has to be in what ships, and the installer has to know about it.
+
+Text assertions over the build files, in the idiom of test_features.py: three
+build paths that have to agree about what ships, and have not before.
+"""
+
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+ROOT = Path(__file__).resolve().parents[1]
+ONEDIR_SPECS = ("git-assistant-onedir.spec", "git-assistant-onedir-noupdate.spec")
+MCP_EXE = "GitAssistantMcp"
+
+
+def _read(name: str) -> str:
+    return (ROOT / name).read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("spec", ONEDIR_SPECS)
+def test_every_installed_build_carries_the_mcp_executable(spec):
+    text = _read(spec)
+    assert f'name="{MCP_EXE}"' in text
+    assert "console=True" in text, "stdio needs a console subsystem build"
+
+
+@pytest.mark.parametrize("spec", ONEDIR_SPECS)
+def test_the_mcp_executable_is_collected_beside_the_app(spec):
+    """Built but not collected would leave it out of the payload entirely."""
+    text = _read(spec)
+    collect = text[text.index("COLLECT(") :]
+    assert "mcp_exe" in collect
+
+
+def test_the_portable_build_carries_it_too():
+    text = _read("git-assistant.spec")
+    assert f'name="{MCP_EXE}"' in text
+    assert "console=True" in text
+    # Its own analysis, without Qt: the server never imports it, so a portable
+    # zip should not pay for it twice.
+    assert '"PyQt6"' in text
+
+
+def test_the_app_itself_is_still_windowed():
+    for spec in (*ONEDIR_SPECS, "git-assistant.spec"):
+        assert "console=False" in _read(spec), spec
+
+
+def test_both_executables_are_signed():
+    text = _read("tools/build.py")
+    assert 'payload / "GitAssistantMcp.exe"' in text
+    assert 'DIST / "GitAssistantMcp.exe"' in text
+
+
+def test_the_installer_stops_a_running_server_before_replacing_it():
+    """A client keeps it alive for its whole session, holding _internal open."""
+    text = _read("installer/git-assistant.nsi")
+    macro = text[text.index("!macro StopRunningApp") : text.index("!macroend")]
+    assert "GitAssistantMcp.exe" in macro
+
+
+def test_the_uninstaller_removes_it():
+    text = _read("installer/git-assistant.nsi")
+    assert 'Delete "$INSTDIR\\GitAssistantMcp.exe"' in text
+
+
+def test_released_builds_come_from_the_spec():
+    """A command line can only make one executable; this build needs two."""
+    text = _read(".github/workflows/release.yml")
+    assert "pyinstaller --noconfirm git-assistant-onedir.spec" in text
+    assert "--windowed" not in text
+
+
+def test_the_workflow_points_at_what_the_spec_produces():
+    text = _read(".github/workflows/release.yml")
+    assert "dist\\GitAssistant\\" not in text.replace("dist\\GitAssistant-noupdate", "")
+    assert 'dir = "dist\\git-assistant"' not in text
+
+
+def test_the_source_install_exposes_a_console_script():
+    assert 'git-assistant-mcp = "git_assistant.mcp.server:main"' in _read("pyproject.toml")
+
+
+# ---- the entry point ----------------------------------------------------------
+def test_the_module_runs_the_server_without_a_display():
+    """The whole point of the argv dispatch: no Qt, no tray, no single instance."""
+    done = subprocess.run(
+        [sys.executable, "-m", "git_assistant", "--mcp"],
+        input=b"",  # EOF straight away
+        capture_output=True,
+        timeout=60,
+        cwd=ROOT,
+        env={**__import__("os").environ, "PYTHONPATH": str(ROOT / "src")},
+    )
+    assert done.returncode == 0
+    assert done.stdout == b"", "nothing but MCP messages may reach stdout"
+
+
+def test_the_console_companion_refuses_to_open_a_tray_icon(tmp_path):
+    """Both executables run the same script; only argv tells them apart."""
+    from git_assistant.__main__ import _entry
+
+    assert _entry(["GitAssistantMcp.exe"], "GitAssistantMcp.exe") == 2

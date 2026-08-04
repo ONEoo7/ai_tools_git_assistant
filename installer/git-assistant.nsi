@@ -230,6 +230,13 @@ FunctionEnd
   Pop $0  ; ignored: not running is the ordinary case
   nsExec::Exec 'taskkill /IM "git-assistant.exe" /F'
   Pop $0
+  ; The MCP server, which an MCP client keeps alive for its whole session.
+  ; It holds _internal open, and the RMDir below fails SILENTLY if it does --
+  ; after which File /r installs over a half-deleted payload.
+  nsExec::Exec 'taskkill /IM "GitAssistantMcp.exe" /F'
+  Pop $0
+  nsExec::Exec 'taskkill /IM "git-assistant-mcp.exe" /F'
+  Pop $0
   Sleep 500
 !macroend
 
@@ -355,6 +362,10 @@ Section "Uninstall"
   ; Only the install directory - never a blind RMDir /r of a user-chosen path.
   RMDir /r "$INSTDIR\_internal"
   Delete "$INSTDIR\${EXE_NAME}"
+  ; Both names the MCP companion is built under; leaving one behind would make
+  ; the RMDir below fail and strand the install directory forever.
+  Delete "$INSTDIR\GitAssistantMcp.exe"
+  Delete "$INSTDIR\git-assistant-mcp.exe"
   Delete "$INSTDIR\Uninstall.exe"
   RMDir "$INSTDIR"
 

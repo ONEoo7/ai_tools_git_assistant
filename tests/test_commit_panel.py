@@ -303,3 +303,88 @@ def test_the_branch_box_is_disabled_while_generating(qapp, settings, tmp_path):
     assert not panel.branch_combo.isEnabled()
     panel._set_busy(False)
     assert panel.branch_combo.isEnabled()
+
+
+# ---- View LLM Calls -----------------------------------------------------------
+def _call(index=1, phase="summarizing a chunk", response="a note"):
+    from git_assistant.llm_log import LlmCall
+
+    return LlmCall(
+        index=index,
+        phase=phase,
+        model="qwen3.5-4b",
+        system="be terse",
+        user="diff fragment here",
+        max_tokens=384,
+        response=response,
+        seconds=1.5,
+    )
+
+
+def test_the_calls_pane_starts_empty(qapp, settings):
+    panel = CommitPanel(settings, auto_start=False)
+    assert panel.calls_list.count() == 0
+    assert panel.calls_label.text() == "View LLM Calls"
+    assert not panel.copy_all_calls_btn.isEnabled()
+
+
+def test_each_call_appears_as_it_finishes(qapp, settings):
+    """A map-reduce run is minutes long; the calls should not arrive all at once."""
+    panel = CommitPanel(settings, auto_start=False)
+
+    panel._on_call(_call(1))
+    panel._on_call(_call(2, phase="writing the message", response="feat: a change"))
+
+    assert panel.calls_list.count() == 2
+    assert "2" in panel.calls_label.text()
+    assert panel.copy_all_calls_btn.isEnabled()
+
+
+def test_selecting_a_call_shows_exactly_what_was_sent_and_returned(qapp, settings):
+    panel = CommitPanel(settings, auto_start=False)
+    panel._on_call(_call(response="the model's answer"))
+
+    panel.calls_list.setCurrentRow(0)
+    shown = panel.call_view.toPlainText()
+
+    assert "be terse" in shown  # the system prompt
+    assert "diff fragment here" in shown  # the user prompt, verbatim
+    assert "the model's answer" in shown
+    assert "qwen3.5-4b" in shown and "384" in shown
+
+
+def test_the_final_synthesis_call_is_listed_like_the_rest(qapp, settings):
+    panel = CommitPanel(settings, auto_start=False)
+    panel._on_call(_call(1, phase="summarizing a chunk"))
+    panel._on_call(_call(2, phase="writing the message"))
+
+    assert "writing the message" in panel.calls_list.item(1).text()
+
+
+def test_a_failed_call_is_marked(qapp, settings):
+    from git_assistant.llm_log import LlmCall
+
+    panel = CommitPanel(settings, auto_start=False)
+    panel._on_call(
+        LlmCall(1, "summarizing a chunk", "m", "s", "u", 384, error="HTTP 500")
+    )
+
+    assert "[failed]" in panel.calls_list.item(0).text()
+    panel.calls_list.setCurrentRow(0)
+    assert "HTTP 500" in panel.call_view.toPlainText()
+
+
+def test_starting_a_run_clears_the_previous_run_s_calls(qapp, settings, tmp_path):
+    """They describe the diff that was, which is exactly the confusing case."""
+    repo = _repo(tmp_path)
+    settings.repos = [RepoEntry(str(repo))]
+    settings.active_repo = str(repo)
+    panel = CommitPanel(settings, auto_start=False)
+    panel._on_call(_call())
+    assert panel.calls_list.count() == 1
+
+    panel._reset_calls()
+
+    assert panel.calls_list.count() == 0
+    assert panel.call_view.toPlainText() == ""
+    assert not panel.copy_all_calls_btn.isEnabled()

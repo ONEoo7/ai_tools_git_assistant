@@ -8,12 +8,14 @@ and in ``PreviewDialog``, the standalone window the tray's quick action opens.
 from __future__ import annotations
 
 import html
+from pathlib import Path
 
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QFontDatabase, QGuiApplication
 from PyQt6.QtWidgets import (
     QComboBox,
     QDialog,
+    QFileDialog,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -49,6 +51,11 @@ SECTION_GAP = 12
 # Compared against the status text to clear it once repositories exist, so a
 # generation result shown in the same label is not wiped by a refresh.
 NO_REPOS_MESSAGE = "No repositories configured - add one in Repositories."
+
+
+def _transcript(calls: list) -> str:
+    header = f"{len(calls)} call(s) to the model\n\n"
+    return header + "\n\n".join(call.transcript() for call in calls)
 
 
 def _read_staged(repo: str, mode: str, ignore_globs: list[str]) -> list[FileCoverage]:
@@ -106,6 +113,7 @@ class CommitPanel(QWidget):
         self._push_worker = None
         self._coverage: list[FileCoverage] = []
         self._branches: list[str] = []  # local branches of the selected repo
+        self._calls: list = []  # every exchange with the model, this run
 
         self.repo_picker = RepoPicker(settings)
         self.repo_picker.repoChanged.connect(self._on_repo_selected)
@@ -234,10 +242,12 @@ class CommitPanel(QWidget):
         splitter.addWidget(repos_pane)
         splitter.addWidget(left)
         splitter.addWidget(right)
+        splitter.addWidget(self._build_calls_pane())
         splitter.setStretchFactor(0, 1)  # repo picker stays narrow
         splitter.setStretchFactor(1, 3)
         splitter.setStretchFactor(2, 4)
-        splitter.setSizes([220, 420, 520])
+        splitter.setStretchFactor(3, 3)
+        splitter.setSizes([200, 380, 440, 380])
 
         # Default margins, matching the other tabs. PreviewDialog zeroes its own
         # layout instead, so the standalone window keeps a single set of margins.
@@ -256,6 +266,107 @@ class CommitPanel(QWidget):
 
         if auto_start:
             self._start()
+
+    # ---- what was sent to the model ----------------------------------------
+    def _build_calls_pane(self) -> QWidget:
+        """Every request and answer, so a poor message can be traced to one.
+
+        A run is one call, or fifteen. When the result disappoints, the answer
+        is in which call went wrong -- a chunk summarised badly, or a final
+        prompt that arrived with its notes cut off -- and that cannot be read
+        off the message itself.
+        """
+        pane = QWidget()
+        box = QVBoxLayout(pane)
+        box.setContentsMargins(SECTION_GAP, 0, 0, 0)
+
+        self.calls_label = QLabel("View LLM Calls")
+        box.addWidget(self.calls_label)
+
+        self.calls_list = QListWidget()
+        self.calls_list.setMaximumHeight(150)
+        self.calls_list.currentRowChanged.connect(self._on_call_selected)
+        box.addWidget(self.calls_list)
+
+        self.call_view = QTextEdit()
+        self.call_view.setReadOnly(True)
+        self.call_view.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
+        self.call_view.setFont(
+            QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont)
+        )
+        self.call_view.setPlaceholderText(
+            "Every call made while generating appears here: the exact system "
+            "and user prompt sent, and exactly what came back."
+        )
+        box.addWidget(self.call_view, 1)
+
+        row = QHBoxLayout()
+        self.copy_call_btn = QPushButton("Copy call")
+        self.copy_call_btn.clicked.connect(self._on_copy_call)
+        self.copy_all_calls_btn = QPushButton("Copy all")
+        self.copy_all_calls_btn.clicked.connect(self._on_copy_all_calls)
+        self.save_calls_btn = QPushButton("Save...")
+        self.save_calls_btn.clicked.connect(self._on_save_calls)
+        for button in (self.copy_call_btn, self.copy_all_calls_btn, self.save_calls_btn):
+            button.setEnabled(False)
+            row.addWidget(button)
+        row.addStretch(1)
+        box.addLayout(row)
+        return pane
+
+    def _reset_calls(self) -> None:
+        self._calls = []
+        self.calls_list.clear()
+        self.call_view.clear()
+        self.calls_label.setText("View LLM Calls")
+        for button in (self.copy_call_btn, self.copy_all_calls_btn, self.save_calls_btn):
+            button.setEnabled(False)
+
+    def _on_call(self, call) -> None:
+        """One exchange finished. Shown as it happens, not only at the end."""
+        self._calls.append(call)
+        marker = "" if call.ok else "  [failed]"
+        self.calls_list.addItem(f"{call.index}. {call.summary()}{marker}")
+        self.calls_label.setText(f"View LLM Calls ({len(self._calls)})")
+        for button in (self.copy_all_calls_btn, self.save_calls_btn):
+            button.setEnabled(True)
+        if self.calls_list.currentRow() < 0:
+            self.calls_list.setCurrentRow(0)
+
+    def _on_call_selected(self, row: int) -> None:
+        if 0 <= row < len(self._calls):
+            self.call_view.setPlainText(self._calls[row].transcript())
+            self.copy_call_btn.setEnabled(True)
+
+    def _on_copy_call(self) -> None:
+        row = self.calls_list.currentRow()
+        if 0 <= row < len(self._calls):
+            QGuiApplication.clipboard().setText(self._calls[row].transcript())
+            self.progress.setText("Call copied to the clipboard.")
+
+    def _on_copy_all_calls(self) -> None:
+        if self._calls:
+            QGuiApplication.clipboard().setText(_transcript(self._calls))
+            self.progress.setText(f"{len(self._calls)} call(s) copied to the clipboard.")
+
+    def _on_save_calls(self) -> None:
+        if not self._calls:
+            return
+        repo = Path(self._current_repo_path()).name or "repo"
+        path, _chosen = QFileDialog.getSaveFileName(
+            self,
+            "Save the calls",
+            str(Path.home() / f"{repo}-llm-calls.txt"),
+            "Text (*.txt);;All files (*)",
+        )
+        if not path:
+            return
+        try:
+            Path(path).write_text(_transcript(self._calls), encoding="utf-8")
+        except OSError as exc:
+            QMessageBox.critical(self, "Could not save", str(exc))
+            return
+        self.progress.setText(f"Saved to {path}")
 
     # ---- repository selection ----------------------------------------------
     def refresh_repos(self) -> None:
@@ -465,8 +576,10 @@ class CommitPanel(QWidget):
         self.regen_btn.setText("Regenerate")
         self.progress.setText("Starting...")
         self.status.setText("")
+        self._reset_calls()  # these belong to the run about to start
         worker = GeneratorWorker(self.settings)
         worker.progress.connect(self.progress.setText)
+        worker.call.connect(self._on_call)
         worker.finished.connect(self._on_finished)
         worker.error.connect(self._on_error)
         self._worker = worker
@@ -484,6 +597,10 @@ class CommitPanel(QWidget):
             if result.strategy == "map-reduce"
             else ""
         )
+        # Said out loud: a message written from ten notes when twelve chunks
+        # were sent describes less than it appears to.
+        if result.blank_notes:
+            chunks += f" ({result.blank_notes} returned nothing)"
         self.status.setText(
             f"Strategy: {result.strategy}{chunks} - "
             f"~{result.input_tokens} input tokens / {result.input_budget} budget "

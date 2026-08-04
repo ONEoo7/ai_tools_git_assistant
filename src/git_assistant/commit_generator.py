@@ -18,7 +18,7 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 
-from git_assistant import git_ops, prompts
+from git_assistant import git_ops, llm_log, prompts
 from git_assistant.config import Settings
 from git_assistant.diff_strategy import (
     build_units_with_coverage,
@@ -77,6 +77,11 @@ class GenerationResult:
     num_chunks: int = 1
     dropped_files: list[str] = field(default_factory=list)
     file_coverage: list[FileCoverage] = field(default_factory=list)
+    #: Every exchange with the model, when the client was a recording one.
+    calls: list = field(default_factory=list)
+    #: Chunks whose summary came back empty, so their changes reached the final
+    #: message through nothing at all.
+    blank_notes: int = 0
 
 
 class CancelledError(RuntimeError):
@@ -232,6 +237,7 @@ class CommitGenerator:
 
         if full_tokens <= usable:
             progress("Diff fits context - generating (single-shot)...")
+            self._phase(llm_log.SINGLE)
             message = self.client.chat(
                 model=s.active_model(),
                 system=prompts.COMMIT_SYSTEM,
@@ -289,6 +295,7 @@ class CommitGenerator:
         )
         progress("Synthesizing final commit message...")
         self._check_cancel(is_cancelled)
+        self._phase(llm_log.FINAL)
         message = self.client.chat(
             model=s.active_model(),
             system=prompts.COMMIT_SYSTEM,
@@ -319,6 +326,7 @@ class CommitGenerator:
             num_chunks=self._last_chunk_count,
             dropped_files=dropped,
             file_coverage=coverage,
+            blank_notes=self._blank_notes,
         )
 
     # ---- parallel execution ------------------------------------------------
@@ -393,6 +401,7 @@ class CommitGenerator:
     _last_chunk_count: int = 0
     _workers: int = 1  # set from the context window before any parallel work
     _cold_start: bool = False  # the model still has to be loaded server-side
+    _blank_notes: int = 0  # chunks whose summary came back empty
     _model: ModelInfo | None = None
     _model_looked_up: bool = False
 
@@ -433,6 +442,7 @@ class CommitGenerator:
         )
         chunks = pack_units(units, budget, estimate_tokens)
         self._last_chunk_count = len(chunks)
+        self._phase(llm_log.MAP)
 
         def summarize(chunk: str) -> str:
             user = prompts.MAP_TEMPLATE.replace(
@@ -448,7 +458,18 @@ class CommitGenerator:
         notes = self._run_parallel(
             chunks, summarize, progress, is_cancelled, "summarizing chunk"
         )
-        return notes, omitted_by_path
+        # A chunk whose summary came back empty contributed nothing, and the
+        # blank line it leaves behind hides that. Drop it and say so: a message
+        # written from ten notes when twelve chunks were sent is a different
+        # thing from one written from twelve.
+        kept = [note for note in notes if note.strip()]
+        self._blank_notes = len(notes) - len(kept)
+        if self._blank_notes:
+            progress(
+                f"{self._blank_notes} of {len(notes)} chunk(s) returned nothing; "
+                "their changes are not described below."
+            )
+        return kept, omitted_by_path
 
     def _reduce_if_needed(
         self, notes, context, branch, diffstat, progress, is_cancelled
@@ -472,6 +493,7 @@ class CommitGenerator:
             groups = pack_units(notes, reduce_budget, estimate_tokens)
             if len(groups) >= len(notes):
                 break  # not converging; hard-truncate happens downstream
+            self._phase(llm_log.REDUCE)
             def condense(group: str) -> str:
                 return self.client.chat(
                     model=self.settings.active_model(),
@@ -490,6 +512,15 @@ class CommitGenerator:
     def _check_cancel(self, is_cancelled: CancelFn) -> None:
         if is_cancelled():
             raise CancelledError("Generation cancelled.")
+
+    def _phase(self, phase: str) -> None:
+        """Tell a recording client what the next calls are for.
+
+        Ignored by a plain client, which is the usual case -- generation does
+        not depend on being watched.
+        """
+        if hasattr(self.client, "phase"):
+            self.client.phase = phase
 
 
 def _files_in_chunk(chunk: str) -> str:

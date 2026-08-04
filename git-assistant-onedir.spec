@@ -79,8 +79,30 @@ exe = EXE(
     version=version_resource(read_version(ROOT), "GitAssistant"),
 )
 
+# The MCP server, which a client starts and talks to over stdin/stdout. It has
+# to be its own executable because a windowed build has no usable standard
+# streams on Windows. Same analysis and same script as the app above -- which
+# of the two a process becomes is decided by argv, in git_assistant/__main__.py.
+mcp_exe = EXE(
+    pyz,
+    a.scripts,
+    [],
+    exclude_binaries=True,
+    name="GitAssistantMcp",
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=False,
+    console=True,  # stdio IS the transport
+    hide_console="hide-early",  # ...but a client should not see a window flash
+    disable_windowed_traceback=False,
+    icon=str(ICON),
+    version=version_resource(read_version(ROOT), "GitAssistantMcp"),
+)
+
 coll = COLLECT(
     exe,
+    mcp_exe,
     a.binaries,
     a.datas,
     strip=False,

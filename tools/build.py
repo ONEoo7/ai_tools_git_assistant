@@ -124,10 +124,15 @@ def pyinstaller(spec: str) -> None:
 
 
 def build_portable() -> None:
-    """Single self-contained exe - no install, run from anywhere."""
+    """Two self-contained exes - no install, run from anywhere.
+
+    The MCP server is the second one: a client talks to it over stdin/stdout,
+    which the windowed application cannot do.
+    """
     pyinstaller("git-assistant.spec")
-    sign(DIST / "GitAssistant.exe")
+    sign(DIST / "GitAssistant.exe", DIST / "GitAssistantMcp.exe")
     print(f"portable  -> {DIST / 'GitAssistant.exe'}")
+    print(f"           + {DIST / 'GitAssistantMcp.exe'}")
 
 
 def build_installer(
@@ -159,7 +164,11 @@ def build_installer(
     # SmartScreen judges at download time, and the application is what Defender
     # judges every time it runs -- signing only the installer leaves the file
     # that actually gets flagged unsigned inside it.
-    sign(payload / "GitAssistant.exe")
+    #
+    # Both executables. An unsigned console binary that an MCP client starts in
+    # the background, which then shells out to git and talks to an inference
+    # endpoint, is exactly the behaviour profile that gets a build quarantined.
+    sign(payload / "GitAssistant.exe", payload / "GitAssistantMcp.exe")
 
     makensis = find_makensis()
     if makensis is None:

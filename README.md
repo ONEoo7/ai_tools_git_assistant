@@ -210,6 +210,13 @@ uv run git-assistant
      Every run is recorded (beside `settings.json`, marked with the commit it
      describes) and each new one is compared with the last, so *Previous runs*
      answers whether anything actually improved.
+   - **MCP Server:** offer the repositories, audits and commit-message
+     generation to an MCP client over stdio. *Test server* starts it and reports
+     what it answered; the buttons register it with Claude Desktop (a merge into
+     `claude_desktop_config.json` that leaves every other setting alone) or with
+     Claude Code (`claude mcp add`, user scope by default). Read-only unless
+     *Allow write operations* is ticked **and** the server is registered again —
+     the flag lives in the registered command, not in a file it re-reads.
    - **Identities:** add the identities you commit as; pick one for the active
      repo with the *Commit as* selector above the tabs.
    - **Template / Advanced:** optionally customize the prompt, diff source
