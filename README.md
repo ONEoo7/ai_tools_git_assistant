@@ -189,11 +189,27 @@ uv run git-assistant
 1. Start LM Studio, load a model, and start its server (default `127.0.0.1:1234`).
 2. Open the tray menu → **Settings…**
    - **Connection & Model:** enter IP/port, click *Test connection*, pick a model,
-     and optionally set the context window size.
+     and optionally set the context window size. With LM Studio selected there is
+     also *Set up LM Studio for me...*, which installs LM Studio via winget,
+     turns on developer mode and the background service, downloads
+     `lmstudio-community/Qwen3.5-4B-GGUF@Q8_0` (~5 GB) and configures it for
+     32,768 tokens with thinking off. It names every step before doing anything
+     and skips whatever is already in place. It reads and writes LM Studio's own
+     config files, so a future LM Studio may move them and break a step.
    - **Repositories:** add one or more git repos. *Add folder* scans for repos
      and picks up their submodules too, listing each one nested under the
      repository it belongs to — the same nesting the repository selector in the
      *Generate Commit Message* and *Tags* tabs shows.
+   - **Agents:** audits of the selected repository, read-only. *Repository size
+     audit* reports where the `.git` bytes went, what is reclaimable without a
+     history rewrite, and which paths dominate every version ever committed;
+     *Repository configuration audit* checks Git LFS coverage, whether line
+     endings are decided in `.gitattributes` rather than per machine, and a
+     dozen other things. Git measures, the configured provider writes the
+     prose — and any figure it invents is rejected before the report shows it.
+     Every run is recorded (beside `settings.json`, marked with the commit it
+     describes) and each new one is compared with the last, so *Previous runs*
+     answers whether anything actually improved.
    - **Identities:** add the identities you commit as; pick one for the active
      repo with the *Commit as* selector above the tabs.
    - **Template / Advanced:** optionally customize the prompt, diff source

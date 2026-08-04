@@ -169,6 +169,14 @@ class Settings:
     # Committer identities live in committer_identities.json, not here -- see
     # git_assistant.identities. An older build wrote them into this file; that
     # key is migrated and removed on first run.
+    # ---- Agents tab --------------------------------------------------------
+    agents_narrate: bool = True  # let the provider write the report's prose
+    agent_last_id: str = ""  # agent selected last time
+    agent_fast_mode: bool = False  # skip the per-file history breakdown
+    agent_large_file_mb: int = 5  # a binary this size is worth flagging
+    #: Recorded runs kept per repository and agent (0 keeps everything). The
+    #: runs themselves live beside this file; see git_assistant.agents.history.
+    agent_history_limit: int = 20
     context_window: int = 32768  # total tokens for input+output (0 => auto-detect)
     safety_margin: float = 0.10  # fraction of the window reserved for the model's output
     ignore_globs: list[str] = field(default_factory=lambda: list(DEFAULT_IGNORE_GLOBS))

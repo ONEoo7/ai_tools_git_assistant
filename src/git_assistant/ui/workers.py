@@ -1,7 +1,8 @@
 """QThread workers so git + network calls never block the Qt event loop.
 
-Two workers:
+Three workers:
 - ``GeneratorWorker``  : runs commit-message generation, emitting live progress.
+- ``AgentWorker``      : runs a repository audit, which can take minutes.
 - ``FunctionWorker``   : runs an arbitrary callable (e.g. listing models) off-thread.
 
 Each is a QObject meant to be moved onto a QThread; see ``run_worker`` for the
@@ -55,6 +56,86 @@ class GeneratorWorker(QObject):
             )
             self.finished.emit(result)
         except CancelledError:
+            self.error.emit("Cancelled.")
+        except Exception as exc:  # surface any failure to the UI
+            self.error.emit(str(exc))
+
+
+class AgentWorker(QObject):
+    """Runs one repository audit off-thread.
+
+    Separate from ``GeneratorWorker`` for one reason: an audit reports how far
+    through it is, not just what it is doing, because reading every object in a
+    large repository takes minutes and a spinner is not an answer.
+    """
+
+    progress = pyqtSignal(str)
+    progressPct = pyqtSignal(int)  # noqa: N815 - Qt signal naming
+    finished = pyqtSignal(object)  # agents.Report
+    error = pyqtSignal(str)
+
+    def __init__(
+        self, settings: Settings, agent_id: str, repo: str, *, fast: bool, narrate: bool
+    ) -> None:
+        super().__init__()
+        self._settings = settings
+        self._agent_id = agent_id
+        self._repo = repo
+        self._fast = fast
+        self._narrate = narrate
+        self._cancelled = False
+
+    def cancel(self) -> None:
+        self._cancelled = True
+
+    def run(self) -> None:
+        # Imported here rather than at module scope: this pulls in the whole
+        # agents package, and the tray's quick action must not pay for it.
+        from git_assistant import agents
+
+        try:
+            report = agents.run(
+                self._agent_id,
+                self._settings,
+                repo=self._repo,
+                progress=self.progress.emit,
+                progress_pct=self.progressPct.emit,
+                is_cancelled=lambda: self._cancelled,
+                fast=self._fast,
+                narrate=self._narrate,
+            )
+            self.finished.emit(report)
+        except agents.CancelledError:
+            self.error.emit("Cancelled.")
+        except Exception as exc:  # surface any failure to the UI
+            self.error.emit(str(exc))
+
+
+class SetupWorker(QObject):
+    """Runs the LM Studio setup: an install and a multi-gigabyte download."""
+
+    progress = pyqtSignal(str)
+    finished = pyqtSignal(object)  # lmstudio_setup.SetupOutcome
+    error = pyqtSignal(str)
+
+    def __init__(self, settings: Settings) -> None:
+        super().__init__()
+        self._settings = settings
+        self._cancelled = False
+
+    def cancel(self) -> None:
+        self._cancelled = True
+
+    def run(self) -> None:
+        from git_assistant import lmstudio_setup
+
+        ctx = lmstudio_setup.SetupContext(
+            progress=self.progress.emit,
+            is_cancelled=lambda: self._cancelled,
+        )
+        try:
+            self.finished.emit(lmstudio_setup.run(self._settings, ctx))
+        except lmstudio_setup.Cancelled:
             self.error.emit("Cancelled.")
         except Exception as exc:  # surface any failure to the UI
             self.error.emit(str(exc))

@@ -33,7 +33,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from git_assistant import __version__, git_ops
+from git_assistant import __version__, git_ops, lmstudio_setup
 from git_assistant.commit_generator import MIN_PARALLEL_CONTEXT
 from git_assistant.config import (
     DEFAULT_TEMPLATE_NAME,
@@ -49,6 +49,7 @@ from git_assistant.identities import IdentityStore
 from git_assistant.llm import LLMError, ModelInfo, build_client
 from git_assistant.prompts import DEFAULT_TEMPLATE
 from git_assistant.providers import PROVIDERS
+from git_assistant.ui.agents_panel import AgentsPanel
 from git_assistant.ui.identities_panel import IdentitiesPanel
 from git_assistant.ui.identity_bar import IdentityBar
 from git_assistant.ui.preview_dialog import SECTION_GAP, CommitPanel
@@ -64,7 +65,7 @@ if UPDATES_SUPPORTED:
         update_config_path,
     )
 from git_assistant.tokenizer import input_budget, reserved_output
-from git_assistant.ui.workers import FunctionWorker, run_worker
+from git_assistant.ui.workers import FunctionWorker, SetupWorker, run_worker
 
 INFO_COLOUR = "color: #8ab;"
 WARN_COLOUR = "color: #b36b00;"
@@ -92,6 +93,8 @@ class SettingsDialog(QDialog):
         self._conn_worker = None
         self._scan_thread = None
         self._scan_worker = None
+        self._setup_thread = None
+        self._setup_worker = None
         self._update_thread = None
         self._update_worker = None
         # The full UpdateResult from this window's own check. Needed to install:
@@ -115,6 +118,7 @@ class SettingsDialog(QDialog):
         tabs.currentChanged.connect(self._on_tab_changed)
         tabs.addTab(self._build_commit_tab(), "Generate Commit Message")
         tabs.addTab(self._build_tags_tab(), "Tags")
+        tabs.addTab(self._build_agents_tab(), "Agents")
         tabs.addTab(self._build_connection_tab(), "Connection && Model")
         tabs.addTab(self._build_repos_tab(), "Repositories")
         # Identities are read from their own file, seeded from git on first run.
@@ -128,7 +132,7 @@ class SettingsDialog(QDialog):
         # repository is active, and both repo-driven tabs can change that. Each
         # tab owns its own RepoPicker, so the bar follows both.
         self.identity_bar = IdentityBar(self.settings, self.identity_store)
-        for panel in (self.commit_panel, self.tags_panel):
+        for panel in (self.commit_panel, self.tags_panel, self.agents_panel):
             panel.repo_picker.repoChanged.connect(self.identity_bar.set_repo)
         # Editing the list must re-offer it; picking "Manage identities..."
         # is a request for the tab that owns the list.
@@ -187,6 +191,11 @@ class SettingsDialog(QDialog):
         self.refresh_update_status()
 
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        # An audit can still be reading the object store; stop it rather than
+        # leaving its git children running behind a closed window.
+        self.agents_panel.cancel_running()
+        if self._setup_worker is not None:
+            self._setup_worker.cancel()
         # Write any debounced edit that has not landed yet.
         if self._save_timer.isActive():
             self._save_timer.stop()
@@ -196,19 +205,28 @@ class SettingsDialog(QDialog):
     def _on_tab_changed(self, index: int) -> None:
         # Fires while tabs are still being added, before later tabs' widgets
         # exist - ignore until construction has finished.
-        if not self._ready or index > 1:
+        if not self._ready:
+            return
+        # The provider is one setting with three ways to change it, so the tab
+        # being opened re-reads it rather than showing what it saw last.
+        widget = self.tabs.widget(index)
+        if widget is self.connection_tab:
+            self._sync_provider_list()
+            return
+        # Which tabs are repo-driven is asked of the tabs themselves: a
+        # positional test ("the first two") silently stops being true the next
+        # time a tab is inserted, and does so without failing anything.
+        refresh = getattr(widget, "refresh_repos", None)
+        if refresh is None:
             return
         # Returning to a repo-driven tab: pick up repos added in other tabs.
         repos, roots, _watched = self._collect_repos_and_roots()
         self.settings.repos = repos
         self.settings.scan_roots = roots
-        if index == 0:
-            self.commit_panel.refresh_repos()
-        else:
-            self.tags_panel.refresh()
+        refresh()
         # RepoPicker.refresh() repopulates with signals blocked, so no
         # repoChanged arrives even when the active repo moved (via the tray, or
-        # the other tab). Re-read it here or the bar keeps naming the old repo's
+        # another tab). Re-read it here or the bar keeps naming the old repo's
         # identity.
         self.identity_bar.set_repo(self.settings.active_repo)
 
@@ -370,8 +388,19 @@ class SettingsDialog(QDialog):
         self.tags_panel = TagsPanel(self.settings)
         return self.tags_panel
 
+    def _build_agents_tab(self) -> QWidget:
+        # `before_run` mirrors the commit tab: a run must use the provider and
+        # model as they are on screen, not as they were when this was opened.
+        self.agents_panel = AgentsPanel(
+            self.settings, before_run=self._apply_to_settings
+        )
+        return self.agents_panel
+
     def _build_connection_tab(self) -> QWidget:
         w = QWidget()
+        # Kept so returning to this tab can re-read a provider that the Generate
+        # or Agents tab changed in the meantime.
+        self.connection_tab = w
         outer = QHBoxLayout(w)
 
         # ---- left: which backend generates the message --------------------
@@ -413,6 +442,30 @@ class SettingsDialog(QDialog):
         self.test_btn.clicked.connect(self._on_test_connection)
         self.conn_status = QLabel("")
         self.conn_status.setWordWrap(True)
+
+        # One press to go from nothing to a working local model. Shown only for
+        # LM Studio: it is the only provider this machine can install.
+        self.setup_btn = QPushButton("Set up LM Studio for me...")
+        self.setup_btn.setToolTip(
+            "Installs LM Studio, turns on developer mode and the background "
+            "service, downloads Qwen3.5 4B (Q8), and configures it for "
+            f"{lmstudio_setup.CONTEXT_LENGTH:,} tokens with thinking off.\n"
+            "Steps that are already done are skipped."
+        )
+        self.setup_btn.clicked.connect(self._on_setup_lmstudio)
+        self.setup_cancel_btn = QPushButton("Stop")
+        self.setup_cancel_btn.setEnabled(False)
+        self.setup_cancel_btn.clicked.connect(self._on_setup_cancel)
+        setup_row = QHBoxLayout()
+        setup_row.addWidget(self.setup_btn)
+        setup_row.addWidget(self.setup_cancel_btn)
+        setup_row.addStretch(1)
+        self.setup_row_host = QWidget()
+        self.setup_row_host.setLayout(setup_row)
+
+        self.setup_status = QLabel("")
+        self.setup_status.setWordWrap(True)
+        self.setup_status.setStyleSheet(INFO_COLOUR)
 
         self.model_combo = QComboBox()
         self.model_combo.setMinimumWidth(360)
@@ -480,6 +533,8 @@ class SettingsDialog(QDialog):
 
         form.addRow("LM Studio IP:", self.ip_edit)
         form.addRow("Port:", self.port_spin)
+        form.addRow("", self.setup_row_host)
+        form.addRow("", self.setup_status)
         form.addRow("Endpoint:", self.endpoint_edit)
         form.addRow("API key:", self.key_row_host)
         form.addRow("", self.key_status)
@@ -494,7 +549,12 @@ class SettingsDialog(QDialog):
         # because that is what setRowVisible takes, and hiding the field alone
         # would leave its label behind.
         self._provider_rows = {
-            "lmstudio_only": (self.ip_edit, self.port_spin),
+            "lmstudio_only": (
+                self.ip_edit,
+                self.port_spin,
+                self.setup_row_host,
+                self.setup_status,
+            ),
             "endpoint": (self.endpoint_edit,),
             "key": (self.key_row_host, self.key_status),
         }
@@ -526,6 +586,86 @@ class SettingsDialog(QDialog):
             self.settings.provider_endpoint(provider.key) or provider.base_url
         )
         self._refresh_key_status(provider)
+
+    # ---- setting LM Studio up ------------------------------------------------
+    def _on_setup_lmstudio(self) -> None:
+        """Install and configure LM Studio, after saying exactly what that means.
+
+        Every step is named before anything happens: this installs software,
+        starts a background service and downloads several gigabytes, and none
+        of that should be a surprise from a settings window.
+        """
+        plan = "\n".join(
+            f"  {i}. {step.title}"
+            for i, step in enumerate(lmstudio_setup.steps(self.settings), start=1)
+        )
+        state = "\n".join(f"  {line}" for line in lmstudio_setup.describe_state())
+        confirm = QMessageBox.question(
+            self,
+            "Set up LM Studio",
+            "This will, skipping anything already done:\n\n"
+            f"{plan}\n\n"
+            f"The model is about 5 GB, downloaded from Hugging Face "
+            f"({lmstudio_setup.MODEL_REPO}). LM Studio itself is installed with "
+            f"winget from its publisher's package ({lmstudio_setup.WINGET_PACKAGE}).\n\n"
+            f"On this machine right now:\n{state}\n\n"
+            "It reads and writes LM Studio's own configuration files, so a "
+            "future version of LM Studio may move them and break a step.\n\n"
+            "Go ahead?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
+
+        self._set_setup_running(True)
+        self.setup_status.setText("Starting...")
+        worker = SetupWorker(self.settings)
+        worker.progress.connect(self._on_setup_progress)
+        worker.finished.connect(self._on_setup_done)
+        worker.error.connect(self._on_setup_error)
+        self._setup_worker = worker
+        self._setup_thread = run_worker(worker)
+
+    def _on_setup_cancel(self) -> None:
+        if self._setup_worker is not None:
+            self._setup_worker.cancel()
+            self.setup_status.setText("Stopping...")
+
+    def _set_setup_running(self, running: bool) -> None:
+        self.setup_btn.setEnabled(not running)
+        self.setup_cancel_btn.setEnabled(running)
+        # A connection test mid-install would report a server that is being
+        # replaced underneath it.
+        self.test_btn.setEnabled(not running)
+
+    def _on_setup_progress(self, message: str) -> None:
+        self.setup_status.setText(message[:300])
+        self.setup_status.setStyleSheet(INFO_COLOUR)
+
+    def _on_setup_done(self, outcome) -> None:
+        self._setup_worker = None
+        self._set_setup_running(False)
+        self.setup_status.setText(outcome.summary())
+        self.setup_status.setStyleSheet(INFO_COLOUR if outcome.ok else WARN_COLOUR)
+        if outcome.ok:
+            # The last step changed the provider, model and context window in
+            # settings; show them. Targeted rather than a full reload, which
+            # would also rebuild the repository tree and discard edits made
+            # there but not yet saved.
+            self.ip_edit.setText(self.settings.lmstudio_ip)
+            self.port_spin.setValue(self.settings.lmstudio_port)
+            self.ctx_size_spin.setValue(self.settings.context_window)
+            self._sync_provider_list()
+            self._show_provider_model(providers.get(self.settings.provider))
+            self.commit_panel.refresh_provider()
+            self.agents_panel.refresh_provider()
+
+    def _on_setup_error(self, message: str) -> None:
+        self._setup_worker = None
+        self._set_setup_running(False)
+        self.setup_status.setText(message)
+        self.setup_status.setStyleSheet(WARN_COLOUR)
 
     # ---- API keys ----------------------------------------------------------
     def _refresh_key_status(self, provider) -> None:
@@ -596,6 +736,21 @@ class SettingsDialog(QDialog):
             QMessageBox.warning(self, "Could not remove the API key", str(exc))
         self._refresh_key_status(provider)
 
+    def _sync_provider_list(self) -> None:
+        """Point this tab's list at the stored provider.
+
+        Selecting the row is what reshapes the form (address, key, endpoint)
+        around the provider, so this both corrects the selection and the fields
+        under it.
+        """
+        for row in range(self.provider_list.count()):
+            item = self.provider_list.item(row)
+            if item.data(Qt.ItemDataRole.UserRole) != self.settings.provider:
+                continue
+            if self.provider_list.currentRow() != row:
+                self.provider_list.setCurrentRow(row)
+            return
+
     def _on_provider_selected(self, current=None, _previous=None) -> None:
         """Record the chosen provider and reshape the form around it.
 
@@ -626,6 +781,7 @@ class SettingsDialog(QDialog):
             self.settings.provider = key
             self._schedule_save()
             self.commit_panel.refresh_provider()
+            self.agents_panel.refresh_provider()
 
         self._apply_provider_fields(provider)
         self._show_provider_model(provider)

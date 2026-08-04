@@ -150,6 +150,10 @@ class TagsPanel(QWidget):
         self.repo_picker.refresh()
         self._reload_tags()
 
+    #: The name every repo-driven tab answers to, so the window can ask a tab
+    #: whether it is one instead of knowing where it sits.
+    refresh_repos = refresh
+
     def _reload_tags(self) -> None:
         repo = self._repo_path()
         self.tag_list.clear()
