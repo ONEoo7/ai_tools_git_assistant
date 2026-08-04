@@ -76,6 +76,72 @@ def test_find_git_repos_prunes_noise_dirs(tmp_path):
     assert found == ["real"]
 
 
+def _declare_submodule(parent, rel_path):
+    """Record a submodule in ``parent``'s .gitmodules, as `git submodule add` does."""
+    gitmodules = parent / ".gitmodules"
+    existing = gitmodules.read_text(encoding="utf-8") if gitmodules.exists() else ""
+    name = rel_path.replace("/", "-")
+    gitmodules.write_text(
+        f'{existing}[submodule "{name}"]\n'
+        f"\tpath = {rel_path}\n"
+        f"\turl = https://example.invalid/{name}.git\n",
+        encoding="utf-8",
+    )
+
+
+def test_find_submodules_nests_recursively(tmp_path):
+    (tmp_path / "top" / ".git").mkdir(parents=True)
+    (tmp_path / "top" / "libs" / "inner" / ".git").mkdir(parents=True)
+    (tmp_path / "top" / "libs" / "inner" / "deep" / ".git").mkdir(parents=True)
+    _declare_submodule(tmp_path / "top", "libs/inner")
+    _declare_submodule(tmp_path / "top" / "libs" / "inner", "deep")
+
+    found = git_ops.find_submodules(tmp_path / "top")
+
+    assert found == [
+        os.path.normpath(str(tmp_path / "top" / "libs" / "inner")),
+        os.path.normpath(str(tmp_path / "top" / "libs" / "inner" / "deep")),
+    ]
+
+
+def test_find_submodules_skips_uninitialised_ones(tmp_path):
+    """A submodule that was never checked out has no working tree to act on."""
+    (tmp_path / "top" / ".git").mkdir(parents=True)
+    (tmp_path / "top" / "vendor").mkdir()  # cloned without --recurse-submodules
+    _declare_submodule(tmp_path / "top", "vendor")
+
+    assert git_ops.find_submodules(tmp_path / "top") == []
+
+
+def test_find_git_repos_includes_submodules(tmp_path):
+    (tmp_path / "alpha" / ".git").mkdir(parents=True)
+    (tmp_path / "alpha" / "sub" / ".git").mkdir(parents=True)
+    _declare_submodule(tmp_path / "alpha", "sub")
+    # A nested repo that is NOT a declared submodule stays out of the list.
+    (tmp_path / "alpha" / "stray" / ".git").mkdir(parents=True)
+
+    found = git_ops.find_git_repos(tmp_path)
+
+    assert found == [
+        os.path.normpath(str(tmp_path / "alpha")),
+        os.path.normpath(str(tmp_path / "alpha" / "sub")),
+    ]
+    assert git_ops.find_git_repos(tmp_path, include_submodules=False) == [
+        os.path.normpath(str(tmp_path / "alpha"))
+    ]
+
+
+def test_find_git_repos_includes_submodules_of_the_root(tmp_path):
+    (tmp_path / ".git").mkdir()
+    (tmp_path / "sub" / ".git").mkdir(parents=True)
+    _declare_submodule(tmp_path, "sub")
+
+    assert git_ops.find_git_repos(tmp_path) == [
+        os.path.normpath(str(tmp_path)),
+        os.path.normpath(str(tmp_path / "sub")),
+    ]
+
+
 def test_has_git_dir(tmp_path):
     (tmp_path / "repo" / ".git").mkdir(parents=True)
     (tmp_path / "plain").mkdir()

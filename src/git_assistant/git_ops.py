@@ -100,19 +100,75 @@ def has_git_dir(path: str | Path) -> bool:
     return (Path(path) / ".git").exists()
 
 
-def find_git_repos(root: str | Path, max_depth: int = 6) -> list[str]:
+# `path = <relative path>` inside a .gitmodules section.
+_GITMODULES_PATH_RE = re.compile(r"^\s*path\s*=\s*(.+?)\s*$", re.MULTILINE)
+
+
+def _gitmodules_paths(repo: str | Path) -> list[str]:
+    """Submodule paths declared in ``repo``'s ``.gitmodules``, relative to it.
+
+    Read from the file rather than via ``git submodule``: scanning stays
+    subprocess-free (and therefore fast), and a repo git refuses to touch
+    because of a dubious-ownership check still reports its submodules.
+    """
+    f = Path(repo) / ".gitmodules"
+    try:
+        text = f.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    return [m.group(1).replace("/", os.sep) for m in _GITMODULES_PATH_RE.finditer(text)]
+
+
+def find_submodules(repo: str | Path, max_depth: int = 4) -> list[str]:
+    """Return the normalized paths of ``repo``'s submodules, parents first.
+
+    Recurses into submodules that declare submodules of their own, up to
+    ``max_depth`` levels. Only checked-out submodules are returned: one that was
+    never initialised has no working tree to act on, so listing it would offer
+    the user a repository they cannot commit in.
+    """
+    found: list[str] = []
+    seen: set[str] = set()
+
+    def walk(base: Path, depth: int) -> None:
+        if depth > max_depth:
+            return
+        for rel in _gitmodules_paths(base):
+            child = base / rel
+            key = os.path.normcase(os.path.normpath(str(child)))
+            if key in seen or not has_git_dir(child):
+                continue
+            seen.add(key)
+            found.append(os.path.normpath(str(child)))
+            walk(child, depth + 1)
+
+    walk(Path(repo), 1)
+    return found
+
+
+def find_git_repos(
+    root: str | Path, max_depth: int = 6, include_submodules: bool = True
+) -> list[str]:
     """Scan ``root`` for git repositories and return their normalized paths.
 
     Walks up to ``max_depth`` levels deep, records any directory containing a
-    ``.git`` entry, and does not descend into a repo once found (nested repos
-    below a repo boundary are ignored). Noise directories are pruned for speed.
-    Uses a lightweight ``.git`` presence check rather than spawning git per dir.
+    ``.git`` entry, and does not descend into a repo once found. Noise
+    directories are pruned for speed. Uses a lightweight ``.git`` presence check
+    rather than spawning git per directory.
+
+    Directories nested below a repo boundary are only reported when the repo
+    declares them as submodules -- vendored checkouts and stray clones inside a
+    working tree are not repositories the user manages.
     """
     root = Path(root)
     if not root.is_dir():
         return []
+
+    def with_submodules(repo: str) -> list[str]:
+        return [repo, *find_submodules(repo)] if include_submodules else [repo]
+
     if has_git_dir(root):
-        return [os.path.normpath(str(root))]
+        return with_submodules(os.path.normpath(str(root)))
 
     found: list[str] = []
     root_depth = len(root.parts)
@@ -129,7 +185,9 @@ def find_git_repos(root: str | Path, max_depth: int = 6) -> list[str]:
         dirnames[:] = [
             d for d in dirnames if d not in _SCAN_PRUNE and not d.startswith(".")
         ]
-    return sorted(found)
+    # Sorted so a parent repo always precedes its submodules (its path is a
+    # prefix of theirs), which is the order the repository tree expects.
+    return [sub for repo in sorted(found) for sub in with_submodules(repo)]
 
 
 def current_branch(repo: str | Path) -> str:

@@ -364,3 +364,91 @@ def test_a_trailing_slash_does_not_double_up_the_path():
     settings.set_provider_endpoint("ollama", "http://localhost:11434/v1/")
 
     assert build_client(settings).base_url == "http://localhost:11434/v1"
+
+
+# ---- LM Studio: what the server said, and how big its context really is ------
+def _lmstudio_with(monkeypatch, handler):
+    from git_assistant.lmstudio_client import LMStudioClient
+
+    real_client = httpx.Client
+
+    def fake_client(*args, **kw):
+        kw["transport"] = _transport(handler)
+        return real_client(*args, **kw)
+
+    monkeypatch.setattr(httpx, "Client", fake_client)
+    return LMStudioClient(base_url="http://127.0.0.1:1234")
+
+
+def _models_response(**overrides):
+    model = {
+        "id": "qwen3.5-4b",
+        "type": "llm",
+        "state": "loaded",
+        "max_context_length": 262144,
+        "loaded_context_length": 32768,
+    }
+    model.update(overrides)
+    return httpx.Response(200, json={"data": [model]})
+
+
+def test_loaded_context_wins_over_the_models_maximum(monkeypatch):
+    """Planning against the weights' maximum overflows what is actually loaded."""
+    client = _lmstudio_with(monkeypatch, lambda request: _models_response())
+    assert client.context_length_for("qwen3.5-4b") == 32768
+
+
+def test_an_unloaded_model_reports_the_maximum_it_supports(monkeypatch):
+    """Nothing is loaded yet, so the ceiling is all there is to go on."""
+    client = _lmstudio_with(
+        monkeypatch,
+        lambda request: _models_response(state="not-loaded", loaded_context_length=None),
+    )
+    assert client.context_length_for("qwen3.5-4b") == 262144
+
+
+def test_the_load_state_is_reported(monkeypatch):
+    client = _lmstudio_with(
+        monkeypatch, lambda request: _models_response(state="not-loaded")
+    )
+    assert client.list_models()[0].loaded is False
+
+
+def test_a_failed_completion_quotes_the_server(monkeypatch):
+    """Without the body the user gets a status code and a link to its definition."""
+
+    def handler(request):
+        return httpx.Response(
+            400,
+            json={
+                "error": "request (40022 tokens) exceeds the available context "
+                "size (32768 tokens), try increasing it"
+            },
+        )
+
+    client = _lmstudio_with(monkeypatch, handler)
+    with pytest.raises(LLMError) as caught:
+        client.chat("qwen3.5-4b", "sys", "user", 100)
+    assert "exceeds the available context size" in str(caught.value)
+
+
+def test_a_nested_error_message_is_unwrapped(monkeypatch):
+    def handler(request):
+        return httpx.Response(500, json={"error": {"message": "engine crashed"}})
+
+    client = _lmstudio_with(monkeypatch, handler)
+    with pytest.raises(LLMError) as caught:
+        client.chat("qwen3.5-4b", "sys", "user", 100)
+    assert "engine crashed" in str(caught.value)
+
+
+def test_a_silent_500_names_the_likely_cause(monkeypatch):
+    """LM Studio answers a request sent mid-load with an empty 500."""
+
+    def handler(request):
+        return httpx.Response(500, text="")
+
+    client = _lmstudio_with(monkeypatch, handler)
+    with pytest.raises(LLMError) as caught:
+        client.chat("qwen3.5-4b", "sys", "user", 100)
+    assert "still loading" in str(caught.value)

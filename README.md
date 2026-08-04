@@ -190,7 +190,10 @@ uv run git-assistant
 2. Open the tray menu → **Settings…**
    - **Connection & Model:** enter IP/port, click *Test connection*, pick a model,
      and optionally set the context window size.
-   - **Repositories:** add one or more git repos.
+   - **Repositories:** add one or more git repos. *Add folder* scans for repos
+     and picks up their submodules too, listing each one nested under the
+     repository it belongs to — the same nesting the repository selector in the
+     *Generate Commit Message* and *Tags* tabs shows.
    - **Identities:** add the identities you commit as; pick one for the active
      repo with the *Commit as* selector above the tabs.
    - **Template / Advanced:** optionally customize the prompt, diff source

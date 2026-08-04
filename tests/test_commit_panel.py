@@ -127,3 +127,59 @@ def test_refresh_is_disabled_while_generating(qapp, settings, tmp_path):
     assert not panel.refresh_btn.isEnabled()
     panel._set_busy(False)
     assert panel.refresh_btn.isEnabled()
+
+
+# ---- submodules are nested under the repository that contains them ----------
+def _rows(picker):
+    """(label, depth) for every row of the picker, top to bottom."""
+    out = []
+
+    def rec(item, depth):
+        out.append((item.text(0), depth))
+        for i in range(item.childCount()):
+            rec(item.child(i), depth + 1)
+
+    tree = picker.repo_list
+    for i in range(tree.topLevelItemCount()):
+        rec(tree.topLevelItem(i), 0)
+    return out
+
+
+def test_picker_nests_submodules_under_their_repo(qapp, settings):
+    settings.repos = [
+        RepoEntry("/x/alpha"),
+        RepoEntry("/x/alpha/libs/inner"),
+        RepoEntry("/x/beta"),
+    ]
+    settings.active_repo = "/x/alpha"
+    panel = CommitPanel(settings, auto_start=False)
+
+    assert _rows(panel.repo_picker) == [("alpha", 0), ("inner", 1), ("beta", 0)]
+    # A submodule is a repository in its own right, so it counts as one.
+    assert panel.repo_picker.count() == 3
+
+
+def test_picker_can_select_a_submodule(qapp, settings):
+    settings.repos = [RepoEntry("/x/alpha"), RepoEntry("/x/alpha/libs/inner")]
+    settings.active_repo = "/x/alpha/libs/inner"
+    panel = CommitPanel(settings, auto_start=False)
+
+    assert panel.repo_picker.current_path() == "/x/alpha/libs/inner"
+
+
+def test_picker_filter_keeps_the_parent_of_a_matching_submodule(qapp, settings):
+    settings.repos = [
+        RepoEntry("/x/alpha"),
+        RepoEntry("/x/alpha/libs/inner"),
+        RepoEntry("/x/beta"),
+    ]
+    settings.active_repo = "/x/alpha"
+    panel = CommitPanel(settings, auto_start=False)
+    tree = panel.repo_picker.repo_list
+
+    panel.repo_picker.filter_edit.setText("inner")
+
+    alpha = tree.topLevelItem(0)
+    assert not alpha.isHidden()  # a match must not be stranded out of its tree
+    assert not alpha.child(0).isHidden()
+    assert tree.topLevelItem(1).isHidden()  # beta matches nothing

@@ -1,5 +1,6 @@
 from git_assistant.commit_generator import DEFAULT_CONTEXT_WINDOW, CommitGenerator
 from git_assistant.config import Settings
+from git_assistant.llm import ModelInfo
 from git_assistant.tokenizer import (
     estimate_tokens,
     input_budget,
@@ -192,3 +193,89 @@ def test_tiny_window_falls_back_to_sequential():
     g = _ctx_gen(8, 900)
     assert g.effective_parallel(900) == 1
     assert g.per_request_context(900) == 900
+
+
+# ---- a model the server has not loaded yet -----------------------------------
+# LM Studio loads on first use: the request that triggers the load is served and
+# the ones racing beside it come back 500. So the first call must go alone.
+class _ListingClient:
+    """A client that reports one model, loaded or not."""
+
+    def __init__(self, loaded, model_id="m"):
+        self._info = ModelInfo(id=model_id, max_context_length=8192, loaded=loaded)
+
+    def list_models(self):
+        return [self._info]
+
+    def context_length_for(self, model_id):
+        return self._info.max_context_length
+
+
+def _cold_gen(loaded, parallel=4):
+    settings = Settings(selected_model="m", parallel_calls=parallel)
+    g = CommitGenerator(settings, _ListingClient(loaded))
+    g._workers = parallel
+    g._cold_start = g._model_is_cold()
+    return g
+
+
+def test_a_loaded_model_is_not_cold():
+    assert _cold_gen(loaded=True)._model_is_cold() is False
+
+
+def test_an_unloaded_model_is_cold():
+    assert _cold_gen(loaded=False)._model_is_cold() is True
+
+
+def test_a_provider_that_cannot_report_load_state_is_treated_as_ready():
+    """A hosted model has nothing to load; a failed listing must not stall us."""
+    g = CommitGenerator(Settings(selected_model="m"), _StubClient(4096))
+    assert g._model_is_cold() is False
+
+
+def test_the_context_comes_from_the_listing_without_a_second_call():
+    g = CommitGenerator(Settings(selected_model="m"), _ListingClient(loaded=True))
+    assert g._context_window() == 8192
+
+
+def _first_call_concurrency(g, items=8):
+    """Run a probe through _run_parallel; report what overlapped the first call."""
+    import threading
+    import time
+
+    state = {"active": 0, "peak": 0, "during_first": 0}
+    lock = threading.Lock()
+
+    def probe(x):
+        with lock:
+            state["active"] += 1
+            state["peak"] = max(state["peak"], state["active"])
+        time.sleep(0.05)
+        with lock:
+            if x == 0:
+                state["during_first"] = state["active"]
+            state["active"] -= 1
+        return x
+
+    out = g._run_parallel(list(range(items)), probe, lambda _m: None, lambda: False, "t")
+    assert out == list(range(items)), "results must stay in input order"
+    return state
+
+
+def test_a_cold_model_gets_the_first_call_to_itself():
+    state = _first_call_concurrency(_cold_gen(loaded=False))
+    assert state["during_first"] == 1, "the load request must not race siblings"
+    assert state["peak"] > 1, "the rest must still fan out once it is loaded"
+
+
+def test_a_loaded_model_fans_out_immediately():
+    state = _first_call_concurrency(_cold_gen(loaded=True))
+    assert state["during_first"] > 1, "no reason to serialize a loaded model"
+
+
+def test_the_model_is_only_warmed_once():
+    """The reduce pass must not pay the serial call again."""
+    g = _cold_gen(loaded=False)
+    _first_call_concurrency(g)
+    assert g._cold_start is False
+    assert _first_call_concurrency(g)["during_first"] > 1

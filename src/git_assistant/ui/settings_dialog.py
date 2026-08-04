@@ -38,8 +38,10 @@ from git_assistant.commit_generator import MIN_PARALLEL_CONTEXT
 from git_assistant.config import (
     DEFAULT_TEMPLATE_NAME,
     RepoEntry,
+    RepoNode,
     Settings,
     Template,
+    build_repo_tree,
     config_path,
 )
 from git_assistant import credentials, providers
@@ -649,7 +651,8 @@ class SettingsDialog(QDialog):
         layout = QVBoxLayout(w)
         layout.addWidget(
             QLabel(
-                "Repositories in the tray menu, grouped by scanned folder.\n"
+                "Repositories in the tray menu, grouped by scanned folder and "
+                "nested under the repository they are a submodule of.\n"
                 "Tick a folder to auto-add new repos cloned into it."
             )
         )
@@ -1182,15 +1185,22 @@ class SettingsDialog(QDialog):
                 best, best_len = r, len(nr)
         return best
 
+    def _repo_items_under(self, item: QTreeWidgetItem):
+        """Repo rows below ``item``, parents before their submodules."""
+        for j in range(item.childCount()):
+            child = item.child(j)
+            if self._item_kind(child) == "repo":
+                yield child
+            yield from self._repo_items_under(child)
+
     def _all_repo_items(self):
+        """Every repo row in the tree, at any nesting depth."""
         tree = self.repo_tree
         for i in range(tree.topLevelItemCount()):
             top = tree.topLevelItem(i)
             if self._item_kind(top) == "repo":
                 yield top
-            else:
-                for j in range(top.childCount()):
-                    yield top.child(j)
+            yield from self._repo_items_under(top)
 
     def _repo_items_by_path(self) -> dict:
         out = {}
@@ -1236,6 +1246,26 @@ class SettingsDialog(QDialog):
             root = os.path.dirname(path.rstrip("\\/"))
         return self._ensure_root_header(root) if root else self._ensure_other_header()
 
+    def _containing_repo_item(self, path: str) -> QTreeWidgetItem | None:
+        """Deepest repo row whose working tree contains ``path``, if any.
+
+        A submodule lives inside its parent's working tree, so containment is
+        what nests it -- no second source of truth to keep in step with the
+        paths themselves.
+        """
+        np = self._norm(path)
+        best, best_len = None, -1
+        for it in self._all_repo_items():
+            entry: RepoEntry = it.data(0, Qt.ItemDataRole.UserRole)
+            key = self._norm(entry.path)
+            if np.startswith(key + os.sep) and len(key) > best_len:
+                best, best_len = it, len(key)
+        return best
+
+    def _parent_for_repo_path(self, path: str) -> QTreeWidgetItem:
+        """Row a repo should hang off: its containing repo, else its folder."""
+        return self._containing_repo_item(path) or self._header_for_repo_path(path)
+
     def _ensure_other_header(self) -> QTreeWidgetItem:
         existing = self._find_header("other")
         if existing is not None:
@@ -1250,7 +1280,8 @@ class SettingsDialog(QDialog):
         for i in range(self.repo_tree.topLevelItemCount()):
             top = self.repo_tree.topLevelItem(i)
             kind = self._item_kind(top)
-            n = top.childCount()
+            # Submodules are repos of their own, so they count towards the total.
+            n = sum(1 for _ in self._repo_items_under(top))
             if kind == "root":
                 top.setText(0, f"{self._header_path(top)}   ({n})")
             elif kind == "other":
@@ -1271,12 +1302,14 @@ class SettingsDialog(QDialog):
         if header is None:
             return 0
         gone = [
-            header.child(j)
-            for j in range(header.childCount())
-            if not git_ops.has_git_dir(
-                header.child(j).data(0, Qt.ItemDataRole.UserRole).path
-            )
+            it
+            for it in self._repo_items_under(header)
+            if not git_ops.has_git_dir(it.data(0, Qt.ItemDataRole.UserRole).path)
         ]
+        # A missing repo takes its submodules with it; listing those separately
+        # would inflate the count with rows the user cannot see anyway.
+        gone_ids = {id(it) for it in gone}
+        gone = [it for it in gone if id(it.parent()) not in gone_ids]
         if not gone:
             return 0
         listing = "\n".join(
@@ -1295,24 +1328,27 @@ class SettingsDialog(QDialog):
         ):
             return 0
         for c in gone:
-            header.removeChild(c)
+            c.parent().removeChild(c)  # may be a submodule row, not a header child
         return len(gone)
 
     def _populate_repo_tree(self, repos: list[RepoEntry], roots: list[str]) -> None:
         self.repo_tree.clear()
+        # Submodules hang off their parent repo, so only the outermost repos are
+        # assigned to a folder group; the rest travel with their parent.
+        nodes = build_repo_tree(repos)
         # Keyed by normalized path so "D:/x" and "D:\x" are one group, not two.
-        grouped: dict[str, list[RepoEntry]] = {self._norm(r): [] for r in roots}
+        grouped: dict[str, list[RepoNode]] = {self._norm(r): [] for r in roots}
         display: dict[str, str] = {self._norm(r): r for r in roots}
-        ungrouped: list[RepoEntry] = []
+        ungrouped: list[RepoNode] = []
         inferred: list[str] = []
-        for entry in repos:
-            r = self._root_for(entry.path, roots)
+        for node in nodes:
+            r = self._root_for(node.entry.path, roots)
             if r is None:
                 # No explicit scan root covers this repo (e.g. added before scan
                 # roots were recorded): group it under its containing directory.
-                r = os.path.dirname(entry.path.rstrip("\\/"))
+                r = os.path.dirname(node.entry.path.rstrip("\\/"))
                 if not r:
-                    ungrouped.append(entry)
+                    ungrouped.append(node)
                     continue
                 r = os.path.normpath(r)
             key = self._norm(r)
@@ -1320,7 +1356,7 @@ class SettingsDialog(QDialog):
                 grouped[key] = []
                 display[key] = r
                 inferred.append(key)
-            grouped[key].append(entry)
+            grouped[key].append(node)
 
         seen: set[str] = set()
         for key in [*(self._norm(x) for x in roots), *sorted(inferred)]:
@@ -1328,19 +1364,31 @@ class SettingsDialog(QDialog):
                 continue  # roots that normalize to the same folder
             seen.add(key)
             path = display[key]
-            header = self._new_root_header(
-                path, len(grouped[key]), self._is_watched(path)
-            )
+            header = self._new_root_header(path, 0, self._is_watched(path))
             self.repo_tree.addTopLevelItem(header)
-            for entry in grouped[key]:
-                header.addChild(self._make_repo_item(entry))
+            self._add_repo_nodes(header, grouped[key])
             header.setExpanded(True)
         if ungrouped:
             other = self._ensure_other_header()
-            for entry in ungrouped:
-                other.addChild(self._make_repo_item(entry))
+            self._add_repo_nodes(other, ungrouped)
             other.setExpanded(True)
+        # Header counts include the nested rows, so they are filled in here.
         self._refresh_counts()
+
+    def _add_repo_nodes(
+        self, parent: QTreeWidgetItem, nodes: list[RepoNode]
+    ) -> None:
+        """Add ``nodes`` under ``parent``, submodules nested in their repo."""
+
+        def add(node: RepoNode, target: QTreeWidgetItem) -> None:
+            item = self._make_repo_item(node.entry)
+            target.addChild(item)
+            for child in node.children:
+                add(child, item)
+            item.setExpanded(True)
+
+        for node in nodes:
+            add(node, parent)
 
     def _collect_repos_and_roots(
         self,
@@ -1358,7 +1406,9 @@ class SettingsDialog(QDialog):
                 if top.checkState(0) == Qt.CheckState.Checked:
                     watched.append(path)
             items = (
-                [top] if kind == "repo" else [top.child(j) for j in range(top.childCount())]
+                [top, *self._repo_items_under(top)]
+                if kind == "repo"
+                else list(self._repo_items_under(top))
             )
             for it in items:
                 entry: RepoEntry = it.data(0, Qt.ItemDataRole.UserRole)
@@ -1380,25 +1430,45 @@ class SettingsDialog(QDialog):
             return
         if self._norm(path) in self._repo_items_by_path():
             return  # already present
-        owner = git_ops.repo_owner(path) or ""
-        parent = self._header_for_repo_path(path)
-        parent.addChild(self._make_repo_item(RepoEntry(path=path, owner=owner)))
-        parent.setExpanded(True)
+        self._add_repo_row(path, git_ops.repo_owner(path) or "")
+        # A repo added by hand can bring submodules of its own with it.
+        for sub in git_ops.find_submodules(path):
+            if self._norm(sub) not in self._repo_items_by_path():
+                self._add_repo_row(sub, git_ops.repo_owner(sub) or "")
         self._refresh_counts()
+
+    def _add_repo_row(self, path: str, owner: str) -> QTreeWidgetItem:
+        """Insert a repo row under its containing repo, or its folder group."""
+        parent = self._parent_for_repo_path(path)
+        item = self._make_repo_item(RepoEntry(path=path, owner=owner))
+        parent.addChild(item)
+        parent.setExpanded(True)
+        return item
 
     def _on_remove_repo(self) -> None:
         selected = self.repo_tree.selectedItems()
         headers = [it for it in selected if self._item_kind(it) in ("root", "other")]
         # QTreeWidgetItem is unhashable; compare by id().
-        header_ids = {id(it) for it in headers}
-        # Repo items whose header is also being removed are dropped with it.
+        selected_ids = {id(it) for it in selected}
+
+        def has_selected_ancestor(item: QTreeWidgetItem) -> bool:
+            """True when a header or parent repo above it is going away too."""
+            parent = item.parent()
+            while parent is not None:
+                if id(parent) in selected_ids:
+                    return True
+                parent = parent.parent()
+            return False
+
+        # Rows removed along with an ancestor are not removed a second time; a
+        # repo takes its submodules with it, since they live inside it on disk.
         repo_items = [
             it
             for it in selected
-            if self._item_kind(it) == "repo" and id(it.parent()) not in header_ids
+            if self._item_kind(it) == "repo" and not has_selected_ancestor(it)
         ]
         if headers:
-            n = sum(h.childCount() for h in headers)
+            n = sum(sum(1 for _ in self._repo_items_under(h)) for h in headers)
             if (
                 QMessageBox.question(
                     self,
@@ -1423,13 +1493,12 @@ class SettingsDialog(QDialog):
         """Folder a tree item belongs to (the item itself if it is a header)."""
         if item is None:
             return None
-        kind = self._item_kind(item)
-        if kind == "root":
-            return self._header_path(item)
-        if kind == "repo":
-            parent = item.parent()
-            if parent is not None and self._item_kind(parent) == "root":
-                return self._header_path(parent)
+        # Walk up: a submodule row sits under its parent repo, not directly
+        # under the folder header it belongs to.
+        while item is not None:
+            if self._item_kind(item) == "root":
+                return self._header_path(item)
+            item = item.parent()
         return None
 
     def _selected_root_folder(self) -> str | None:
@@ -1494,7 +1563,15 @@ class SettingsDialog(QDialog):
             item = existing.get(self._norm(path))
             if item is None:
                 new_item = self._make_repo_item(RepoEntry(path=path, owner=owner))
-                (header or self._ensure_other_header()).addChild(new_item)
+                # Submodules come back after their parent (the scan sorts by
+                # path), so the row they nest under already exists here.
+                parent = (
+                    self._containing_repo_item(path)
+                    or header
+                    or self._ensure_other_header()
+                )
+                parent.addChild(new_item)
+                parent.setExpanded(True)
                 existing[self._norm(path)] = new_item
                 added += 1
             elif owner:

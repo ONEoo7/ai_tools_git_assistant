@@ -7,6 +7,8 @@ template round-trips losslessly without a third-party TOML writer.
 from __future__ import annotations
 
 import json
+import os
+from collections.abc import Iterable
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 
@@ -81,6 +83,56 @@ class RepoEntry:
             return self.label
         name = Path(self.path).name or self.path
         return f"{self.owner}\\{name}" if self.owner else name
+
+
+def norm_path(path: str) -> str:
+    """Comparison form of a path: case- and separator-insensitive."""
+    return os.path.normcase(os.path.normpath(path))
+
+
+@dataclass
+class RepoNode:
+    """A repository plus the repositories nested inside it (its submodules)."""
+
+    entry: "RepoEntry"
+    children: list["RepoNode"] = field(default_factory=list)
+
+    def walk(self) -> "Iterable[tuple[RepoEntry, int]]":
+        """Yield ``(entry, depth)`` for this node and its descendants."""
+
+        def rec(node: "RepoNode", depth: int):
+            yield node.entry, depth
+            for child in node.children:
+                yield from rec(child, depth + 1)
+
+        yield from rec(self, 0)
+
+
+def build_repo_tree(entries: Iterable[RepoEntry]) -> list[RepoNode]:
+    """Nest each repository under the deepest repository that contains it.
+
+    Submodules live inside their parent's working tree, so containment is what
+    identifies them -- no extra field to keep in step with the paths, and repos
+    recorded before submodules were scanned nest correctly on the next load.
+    Input order is preserved among siblings, and duplicates are dropped.
+    """
+    nodes: dict[str, RepoNode] = {}
+    order: list[str] = []
+    for entry in entries:
+        key = norm_path(entry.path)
+        if key in nodes:
+            continue
+        nodes[key] = RepoNode(entry)
+        order.append(key)
+
+    roots: list[RepoNode] = []
+    for key in order:
+        parent = ""
+        for other in nodes:
+            if key.startswith(other + os.sep) and len(other) > len(parent):
+                parent = other
+        (nodes[parent].children if parent else roots).append(nodes[key])
+    return roots
 
 
 @dataclass

@@ -82,12 +82,21 @@ class LMStudioClient:
             # Only language models are useful for chat completions.
             if item.get("type") not in (None, "llm", "vlm"):
                 continue
+            loaded = item.get("state") == "loaded"
             models.append(
                 ModelInfo(
                     id=item.get("id", ""),
-                    max_context_length=item.get("max_context_length")
-                    or item.get("loaded_context_length"),
-                    loaded=item.get("state") == "loaded",
+                    # For a loaded model the context it was loaded WITH is the
+                    # binding constraint, not the maximum it could support: a
+                    # model whose weights allow 262k but was loaded at 32k
+                    # rejects anything past 32k with "exceeds the available
+                    # context size". Plan against what is actually loaded.
+                    max_context_length=(
+                        (item.get("loaded_context_length") if loaded else None)
+                        or item.get("max_context_length")
+                        or item.get("loaded_context_length")
+                    ),
+                    loaded=loaded,
                 )
             )
         if not models:
@@ -138,6 +147,8 @@ class LMStudioClient:
                 resp = client.post(f"{self.base_url}/v1/chat/completions", json=body)
                 resp.raise_for_status()
                 payload = resp.json()
+        except httpx.HTTPStatusError as exc:
+            raise LMStudioError(f"chat completion failed: {_explain(exc)}") from exc
         except httpx.HTTPError as exc:
             raise LMStudioError(f"chat completion failed: {exc}") from exc
 
@@ -152,3 +163,43 @@ class LMStudioClient:
         if not models:
             raise LMStudioError("connected, but no models are available")
         return models
+
+
+#: Cap on quoted server text, so one runaway body cannot fill the status label.
+_DETAIL_LIMIT = 300
+
+
+def _detail(response: httpx.Response) -> str:
+    """What the server said, dug out of whichever error shape it used.
+
+    LM Studio answers with ``{"error": "..."}`` in some paths and with the
+    OpenAI ``{"error": {"message": ...}}`` shape in others, so both are unwrapped
+    before falling back to the raw text.
+    """
+    try:
+        body = response.json()
+    except ValueError:
+        return response.text.strip()[:_DETAIL_LIMIT]
+    error = body.get("error", body) if isinstance(body, dict) else body
+    if isinstance(error, dict):
+        error = error.get("message") or error
+    return str(error).strip()[:_DETAIL_LIMIT]
+
+
+def _explain(exc: httpx.HTTPStatusError) -> str:
+    """Turn a status code into what the user has to go and fix.
+
+    The status alone is not actionable -- httpx renders it as a code and a link
+    to its definition -- while the reason is in the body LM Studio sent with it.
+    """
+    status = exc.response.status_code
+    detail = _detail(exc.response)
+    if status >= 500 and not detail:
+        # What a request that arrives mid-load looks like: the load is
+        # triggered by the first request and the rest are refused until it ends.
+        detail = (
+            "LM Studio reported an internal error and said nothing more. "
+            "This is what requests sent while a model is still loading look "
+            "like -- load the model in LM Studio, then try again."
+        )
+    return f"HTTP {status} from LM Studio. {detail}".strip()

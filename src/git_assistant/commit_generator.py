@@ -27,6 +27,7 @@ from git_assistant.diff_strategy import (
     split_diff,
     truncate_to_budget,
 )
+from git_assistant.llm import ModelInfo
 from git_assistant.lmstudio_client import LMStudioClient
 from git_assistant.tokenizer import (
     estimate_tokens,
@@ -112,9 +113,39 @@ class CommitGenerator:
         """
         return self.settings.template_for_repo(self.settings.active_repo)
 
+    # ---- what the server says about the model ------------------------------
+    def _model_report(self) -> ModelInfo | None:
+        """The listing entry for the selected model, looked up once per run.
+
+        Both the context window and the load state come from the same listing,
+        and a generator is built per generation, so one call answers both.
+        """
+        if not self._model_looked_up:
+            self._model_looked_up = True
+            wanted = self.settings.active_model()
+            try:
+                self._model = next(
+                    (m for m in self.client.list_models() if m.id == wanted), None
+                )
+            except Exception:
+                self._model = None
+        return self._model
+
+    def _model_is_cold(self) -> bool:
+        """True when the server has the model available but not loaded yet.
+
+        A provider that cannot report this (hosted models, or a listing that
+        failed) is treated as ready: there is nothing to wait for.
+        """
+        model = self._model_report()
+        return model is not None and not model.loaded
+
     # ---- budget helpers ----------------------------------------------------
     def _detected_context(self) -> int | None:
         """Model's real loaded context, or None if it can't be determined."""
+        model = self._model_report()
+        if model is not None:
+            return model.max_context_length
         try:
             return self.client.context_length_for(self.settings.active_model())
         except Exception:
@@ -186,6 +217,9 @@ class CommitGenerator:
         out_tokens = self._reserved_output(context)
         # Concurrency is bounded by the context: parallel slots share the window.
         self._workers = self.effective_parallel(context)
+        # A model the server has not loaded yet cannot take a fan-out; see
+        # _run_parallel. Read before any request, since the first one loads it.
+        self._cold_start = self._model_is_cold()
 
         # Does the full single-shot prompt fit?
         full_prompt = render_template(
@@ -313,14 +347,31 @@ class CommitGenerator:
                 self._check_cancel(is_cancelled)
                 progress(f"map-reduce: {label} {i}/{total}...")
                 results.append(fn(item))
+                self._cold_start = False  # a call came back, so it is loaded
             return results
 
         results: list = [None] * total
-        done = 0
         lock = threading.Lock()
-        progress(f"map-reduce: {label} 0/{total} ({workers} in parallel)...")
+
+        # A model that still has to be loaded serves only the request that
+        # triggered the load and refuses its siblings with a 500, so the first
+        # call goes on its own and the fan-out meets a loaded model. Costs
+        # nothing when the model is already up, which is the usual case.
+        first = 0
+        if self._cold_start:
+            progress(f"map-reduce: {label} 1/{total} (loading the model)...")
+            results[0] = fn(items[0])
+            self._cold_start = False  # loaded now, by that very request
+            first = 1
+            self._check_cancel(is_cancelled)
+
+        done = first
+        progress(f"map-reduce: {label} {done}/{total} ({workers} in parallel)...")
         with ThreadPoolExecutor(max_workers=workers) as pool:
-            futures = {pool.submit(fn, item): i for i, item in enumerate(items)}
+            futures = {
+                pool.submit(fn, item): i
+                for i, item in enumerate(items[first:], start=first)
+            }
             try:
                 for fut in as_completed(futures):
                     if is_cancelled():
@@ -341,6 +392,9 @@ class CommitGenerator:
     # ---- map / reduce ------------------------------------------------------
     _last_chunk_count: int = 0
     _workers: int = 1  # set from the context window before any parallel work
+    _cold_start: bool = False  # the model still has to be loaded server-side
+    _model: ModelInfo | None = None
+    _model_looked_up: bool = False
 
     def effective_parallel(self, context: int) -> int:
         """How many requests we may safely run at once for this context size.
