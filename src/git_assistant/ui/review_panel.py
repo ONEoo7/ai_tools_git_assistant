@@ -43,6 +43,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from git_assistant import estimate
 from git_assistant.config import Settings, norm_path
 from git_assistant.providers import PROVIDERS
 from git_assistant.review import history
@@ -50,6 +51,7 @@ from git_assistant.review import report as report_mod
 from git_assistant.review import xlsx
 from git_assistant.review.reviewer import Candidate, staged_files
 from git_assistant.review.rules import RuleStore, RuleTable
+from git_assistant.ui.estimate_dialog import confirm
 from git_assistant.ui.preview_dialog import SECTION_GAP
 from git_assistant.ui.repo_picker import RepoPicker
 from git_assistant.ui.side_panel import SidePanel
@@ -660,6 +662,9 @@ class ReviewPanel(QWidget):
             return
         if self._before_run is not None:
             self._before_run()  # pick up settings edited in sibling tabs
+        # Forty files is forty calls; say so before making them.
+        if not confirm(self, estimate.for_review(self.settings, repo, paths, table)):
+            return
 
         self._set_running(True)
         self.status.setText("Starting...")

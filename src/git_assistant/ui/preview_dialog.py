@@ -31,11 +31,12 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from git_assistant import commit_history, git_ops
+from git_assistant import commit_history, estimate, git_ops
 from git_assistant.commit_generator import FileCoverage, GenerationResult
 from git_assistant.config import DEFAULT_TEMPLATE_NAME, Settings
 from git_assistant.diff_strategy import filter_files, split_diff
 from git_assistant.providers import PROVIDERS
+from git_assistant.ui.estimate_dialog import confirm
 from git_assistant.ui.repo_picker import RepoPicker
 from git_assistant.ui.side_panel import SidePanel
 from git_assistant.ui.workers import FunctionWorker, GeneratorWorker, run_worker
@@ -554,6 +555,9 @@ class CommitPanel(QWidget):
         if self._before_generate is not None:
             # Pick up any settings edited in sibling tabs but not yet saved.
             self._before_generate()
+        # What this is about to send, while it can still be declined.
+        if not confirm(self, estimate.for_commit(self.settings)):
+            return
         self._set_busy(True)
         self.regen_btn.setText("Regenerate")
         self.progress.setText("Starting...")

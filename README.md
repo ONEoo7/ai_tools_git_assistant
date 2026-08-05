@@ -25,6 +25,9 @@ Its first feature generates git commit messages; more Git helpers are planned.
   kept in a spreadsheet (see below).
 - **LLM usage**: every completion is counted, per provider and per model, and
   shown beside the connection settings (see below).
+- **Asked before it spends**: pressing Generate, Review or Run shows what the run
+  will send - how many calls, and roughly how many tokens - before the first
+  request goes out.
 
 ## Handling large diffs (context overflow)
 
@@ -228,6 +231,33 @@ estimate as measured.
 The file is `llm_usage.json`, beside `settings.json`. The recent-calls list is
 capped at 500 rows; the totals are never pruned, because "how much has this
 cost" must not change when the log is trimmed.
+
+## Before a run spends anything
+
+Generating a message, reviewing files and narrating an audit all cost tokens,
+and how many is not obvious: a diff that has quietly grown past the context
+window becomes fifteen calls instead of one, and a review is one call per marked
+file. So each of those buttons shows what the run will send, and waits:
+
+```
+4 call(s), about 21,879 tokens in and 2,048 out (23,927 in total).
+
+LM Studio - qwen3.5-4b
+
+- One call per marked file: 4 file(s), 4 at a time.
+- Each carries the 5 rule(s), the file's diff and the file itself.
+- Room reserved for the findings: up to 512 tokens per file.
+- 3 file(s) will not fit whole and are cut to the budget.
+```
+
+Tokens only, no cost: the price list belongs to your provider, and a made-up
+figure would be worse than none. The estimate never contacts the provider, so
+the dialog appears the moment the button is pressed.
+
+An audit is the honest exception: it measures the repository first, and what
+each section of the report is handed does not exist until that scan has run. It
+reports the calls and the output exactly, and says the input is not knowable yet
+rather than multiplying the per-call cap into a ceiling nobody reaches.
 
 ## Install & run
 

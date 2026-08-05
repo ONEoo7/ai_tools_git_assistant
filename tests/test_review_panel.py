@@ -446,3 +446,45 @@ def test_the_middle_pane_is_findings_and_rules_only(qapp, with_repo, staged):
         "Findings",
         "Rules",
     ]
+
+
+# ---- asked before anything is sent ------------------------------------------------
+def _decide(monkeypatch, answer, seen=None):
+    def confirm(parent, est):
+        if seen is not None:
+            seen.append(est)
+        return answer
+
+    monkeypatch.setattr("git_assistant.ui.review_panel.confirm", confirm)
+
+
+def test_reviewing_asks_what_it_will_send_first(qapp, with_repo, staged, monkeypatch):
+    monkeypatch.setattr(RuleStore, "load", staticmethod(_with_table))
+    seen = []
+    _decide(monkeypatch, True, seen)
+    started = []
+    monkeypatch.setattr(
+        "git_assistant.ui.review_panel.run_worker", lambda w: started.append(w)
+    )
+    panel = ReviewPanel(with_repo)
+
+    panel._on_review()
+
+    assert seen and seen[0].feature == "Code review"
+    assert seen[0].calls == 2, "one per marked file"
+    assert started
+
+
+def test_declining_a_review_sends_nothing(qapp, with_repo, staged, monkeypatch):
+    monkeypatch.setattr(RuleStore, "load", staticmethod(_with_table))
+    _decide(monkeypatch, False)
+    started = []
+    monkeypatch.setattr(
+        "git_assistant.ui.review_panel.run_worker", lambda w: started.append(w)
+    )
+    panel = ReviewPanel(with_repo)
+
+    panel._on_review()
+
+    assert started == []
+    assert panel.review_btn.isEnabled()

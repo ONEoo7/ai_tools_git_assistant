@@ -529,3 +529,36 @@ def test_another_repository_s_messages_are_not_shown_here(qapp, settings, tmp_pa
 
     assert panel.runs_tree.topLevelItemCount() == 0
 
+
+# ---- asked before anything is sent ------------------------------------------------
+def test_generating_asks_what_it_will_send_first(qapp, settings, tmp_path, monkeypatch):
+    """The estimate is shown after the button is pressed and before the first call."""
+    asked = []
+    monkeypatch.setattr(
+        "git_assistant.ui.preview_dialog.confirm",
+        lambda parent, est: asked.append(est) or True,
+    )
+    started = []
+    monkeypatch.setattr(
+        "git_assistant.ui.preview_dialog.run_worker", lambda w: started.append(w)
+    )
+    panel = _panel_with_repo(settings, tmp_path)
+
+    panel._start()
+
+    assert asked and asked[0].feature == "Commit message"
+    assert started, "agreeing runs it"
+
+
+def test_declining_sends_nothing(qapp, settings, tmp_path, monkeypatch):
+    monkeypatch.setattr("git_assistant.ui.preview_dialog.confirm", lambda *a: False)
+    started = []
+    monkeypatch.setattr(
+        "git_assistant.ui.preview_dialog.run_worker", lambda w: started.append(w)
+    )
+    panel = _panel_with_repo(settings, tmp_path)
+
+    panel._start()
+
+    assert started == []
+    assert panel.regen_btn.isEnabled(), "the panel is not left looking busy"

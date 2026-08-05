@@ -41,8 +41,10 @@ from PyQt6.QtWidgets import (
 from git_assistant import agents
 from git_assistant.agents import compare, history
 from git_assistant.agents import report as report_mod
+from git_assistant import estimate
 from git_assistant.config import Settings, norm_path
 from git_assistant.providers import PROVIDERS
+from git_assistant.ui.estimate_dialog import confirm
 from git_assistant.ui.preview_dialog import SECTION_GAP
 from git_assistant.ui.repo_picker import RepoPicker
 from git_assistant.ui.side_panel import SidePanel
@@ -466,6 +468,15 @@ class AgentsPanel(QWidget):
             return
         if self._before_run is not None:
             self._before_run()  # pick up settings edited in sibling tabs
+        # Only the prose costs anything, so this is asked only when it is asked
+        # for -- an audit written from the measurements sends nothing.
+        if not confirm(
+            self,
+            estimate.for_audit(
+                self.settings, agent_id, narrate=self.narrate_check.isChecked()
+            ),
+        ):
+            return
         self._set_running(True)
         self.status.setText("Starting...")
         self.progress.setRange(0, 0)

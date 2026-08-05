@@ -528,3 +528,56 @@ def test_the_calls_that_wrote_the_report_are_shown(qapp, with_repo):
     assert panel.calls_pane.calls_list.count() == 1
     assert "writing a section" in panel.calls_pane.calls_list.item(0).text()
     assert panel.side_panel.tabs.tabText(1).endswith("(1)")
+
+
+# ---- asked before anything is sent ------------------------------------------------
+def test_an_audit_asks_what_its_narration_will_send(qapp, with_repo, monkeypatch):
+    seen = []
+    monkeypatch.setattr(
+        "git_assistant.ui.agents_panel.confirm",
+        lambda parent, est: seen.append(est) or True,
+    )
+    started = []
+    monkeypatch.setattr(
+        "git_assistant.ui.agents_panel.run_worker", lambda w: started.append(w)
+    )
+    panel = AgentsPanel(with_repo)
+    panel.narrate_check.setChecked(True)
+
+    panel._on_run()
+
+    assert seen and seen[0].feature == "Repository audit"
+    assert seen[0].calls > 0
+    assert started
+
+
+def test_an_audit_that_writes_no_prose_is_not_worth_asking_about(
+    qapp, with_repo, monkeypatch
+):
+    """Nothing reaches the model, so there is nothing to agree to."""
+    seen = []
+    monkeypatch.setattr(
+        "git_assistant.ui.agents_panel.confirm",
+        lambda parent, est: seen.append(est) or True,
+    )
+    monkeypatch.setattr("git_assistant.ui.agents_panel.run_worker", lambda w: None)
+    panel = AgentsPanel(with_repo)
+    panel.narrate_check.setChecked(False)
+
+    panel._on_run()
+
+    assert seen and seen[0].calls == 0
+
+
+def test_declining_an_audit_sends_nothing(qapp, with_repo, monkeypatch):
+    monkeypatch.setattr("git_assistant.ui.agents_panel.confirm", lambda *a: False)
+    started = []
+    monkeypatch.setattr(
+        "git_assistant.ui.agents_panel.run_worker", lambda w: started.append(w)
+    )
+    panel = AgentsPanel(with_repo)
+
+    panel._on_run()
+
+    assert started == []
+    assert panel.run_btn.isEnabled()
