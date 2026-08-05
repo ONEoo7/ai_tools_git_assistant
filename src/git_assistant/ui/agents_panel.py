@@ -45,6 +45,7 @@ from git_assistant.config import Settings, norm_path
 from git_assistant.providers import PROVIDERS
 from git_assistant.ui.preview_dialog import SECTION_GAP
 from git_assistant.ui.repo_picker import RepoPicker
+from git_assistant.ui.side_panel import SidePanel
 from git_assistant.ui.workers import AgentWorker, run_worker
 
 NO_REPOS_MESSAGE = "No repositories configured - add one in Repositories."
@@ -233,7 +234,10 @@ class AgentsPanel(QWidget):
 
         content = QWidget()
         layout = QVBoxLayout(content)
-        layout.setContentsMargins(SECTION_GAP, 0, 0, 0)
+        # A handle on both sides, so a gap on both: with one only, the report
+        # sits flush against the divider on the right and inset on the left,
+        # which reads as a misalignment rather than as a margin.
+        layout.setContentsMargins(SECTION_GAP, 0, SECTION_GAP, 0)
         layout.addWidget(self.header)
         layout.addWidget(self.status)
         layout.addWidget(self.progress)
@@ -255,14 +259,23 @@ class AgentsPanel(QWidget):
         picker_box.addWidget(self.provider_combo)
         picker_box.addWidget(self.provider_label)
 
+        # The same right-hand pane as the other run-and-read tabs: what previous
+        # runs found, and how this one got there.
+        self.side_panel = SidePanel(
+            self._build_history_pane(),
+            repo_name=lambda: Path(self._repo_path()).name,
+            margins=(SECTION_GAP, 0, 0, 0),
+        )
+        self.side_panel.calls.noted.connect(self.status.setText)
+
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.addWidget(picker_pane)
         splitter.addWidget(content)
-        splitter.addWidget(self._build_history_pane())
+        splitter.addWidget(self.side_panel)
         splitter.setStretchFactor(0, 1)
         splitter.setStretchFactor(1, 3)
-        splitter.setStretchFactor(2, 1)
-        splitter.setSizes([220, 640, 260])
+        splitter.setStretchFactor(2, 2)
+        splitter.setSizes([220, 600, 320])
 
         outer = QVBoxLayout(self)
         outer.addWidget(splitter)
@@ -270,12 +283,14 @@ class AgentsPanel(QWidget):
         self._select_stored_agent()
         self.refresh_repos()
 
+    #: The calls half of the side pane, which is what a run talks to.
+    calls_pane = property(lambda self: self.side_panel.calls)
+
     def _build_history_pane(self) -> QWidget:
         """Every previous run of this agent against this repository."""
         pane = QWidget()
         box = QVBoxLayout(pane)
-        box.setContentsMargins(SECTION_GAP, 0, 0, 0)
-        box.addWidget(QLabel("Previous runs"))
+        box.setContentsMargins(0, 0, 0, 0)
 
         self.runs_tree = QTreeWidget()
         self.runs_tree.setHeaderLabels(["When", "Result"])
@@ -455,6 +470,7 @@ class AgentsPanel(QWidget):
         self.status.setText("Starting...")
         self.progress.setRange(0, 0)
         self.progress.show()
+        self.side_panel.calls.reset()  # these belong to the run about to start
 
         worker = AgentWorker(
             self.settings,
@@ -465,6 +481,7 @@ class AgentsPanel(QWidget):
         )
         worker.progress.connect(self.status.setText)
         worker.progressPct.connect(self._on_pct)
+        worker.call.connect(self.side_panel.calls.add_call)
         worker.finished.connect(self._on_finished)
         worker.error.connect(self._on_error)
         self._worker = worker

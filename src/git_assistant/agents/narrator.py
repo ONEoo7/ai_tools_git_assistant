@@ -17,7 +17,7 @@ from git_assistant.agents.facts import (
     facts_block,
     unsupported_figures,
 )
-from git_assistant.agents.model_runtime import ModelRuntime
+from git_assistant.model_runtime import ModelRuntime
 from git_assistant.tokenizer import estimate_tokens
 
 #: Rows dropped from the end of a table when the facts do not fit. Tables are

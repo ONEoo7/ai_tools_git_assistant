@@ -24,9 +24,11 @@ from git_assistant.agents.base import (
     _noop_pct,
 )
 from git_assistant.agents.config_audit import ConfigAuditAgent
-from git_assistant.agents.model_runtime import ModelRuntime
+from git_assistant.model_runtime import ModelRuntime
 from git_assistant.agents.size_audit import SizeAuditAgent
+from git_assistant import llm_log
 from git_assistant.llm import build_client
+from git_assistant.llm_log import RecordingClient
 
 AGENTS: tuple[Agent, ...] = (SizeAuditAgent(), ConfigAuditAgent())
 
@@ -64,6 +66,7 @@ def run(
     is_cancelled=_never,
     fast: bool = False,
     narrate: bool = True,
+    on_call=None,
 ) -> Report:
     """Collect, then narrate.
 
@@ -71,6 +74,10 @@ def run(
     on a large repository -- so a provider that is missing, misconfigured or
     down is recorded as a warning on a finished report rather than being allowed
     to throw it away.
+
+    ``on_call`` is handed every exchange with the model as it finishes, for the
+    tab that shows them. The client is wrapped only when someone is listening,
+    so nothing pays for a recorder it will not read.
     """
     agent = get(agent_id)
     ctx = AgentContext(
@@ -95,7 +102,11 @@ def run(
         return report
 
     try:
-        runtime = ModelRuntime(settings, build_client(settings))
+        client = build_client(settings)
+        if on_call is not None:
+            client = RecordingClient(client, on_call=on_call)
+            client.phase = llm_log.NARRATE
+        runtime = ModelRuntime(settings, client)
     except Exception as exc:
         report.warnings.append(f"Written without the model: {exc}")
         return report

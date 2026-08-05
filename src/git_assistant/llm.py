@@ -74,12 +74,12 @@ def build_client(settings) -> ChatClient:
     if provider.key == "lmstudio":
         from git_assistant.lmstudio_client import LMStudioClient
 
-        return LMStudioClient(settings.base_url)
+        return LMStudioClient(settings.base_url, provider_key=provider.key)
 
     if provider.key == "claude":
         from git_assistant.claude_client import ClaudeClient
 
-        return ClaudeClient(api_key=_require_key(provider))
+        return ClaudeClient(api_key=_require_key(provider), provider_key=provider.key)
 
     if provider.openai_compatible:
         from git_assistant.openai_client import OpenAICompatibleClient
@@ -89,6 +89,9 @@ def build_client(settings) -> ChatClient:
             api_key=_require_key(provider),
             auth_header=provider.auth_header,
             extra_query=provider.extra_query(settings),
+            # One client, several providers: usage has to be filed under the
+            # one that was actually asked, not under "openai" for all of them.
+            provider_key=provider.key,
         )
 
     raise LLMError(f"no client is wired up for {provider.label}")

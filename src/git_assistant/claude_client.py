@@ -17,6 +17,7 @@ absorb:
 
 from __future__ import annotations
 
+from git_assistant import usage
 from git_assistant.llm import LLMError, ModelInfo
 
 #: Used when the user has not chosen a model. The current Opus is the default
@@ -45,8 +46,12 @@ def _sdk():
 class ClaudeClient:
     """Talks to the Messages API. Same four methods as every other provider."""
 
-    def __init__(self, api_key: str, timeout: float = CHAT_TIMEOUT) -> None:
+    def __init__(
+        self, api_key: str, timeout: float = CHAT_TIMEOUT, provider_key: str = "claude"
+    ) -> None:
         self._api_key = api_key
+        #: Which provider the recorded usage is filed under.
+        self.provider_key = provider_key
         self._timeout = timeout
 
     def _client(self, timeout: float):
@@ -120,7 +125,23 @@ class ClaudeClient:
         except anthropic.APIStatusError as exc:
             raise LLMError(f"Anthropic returned an error: {exc}") from exc
 
-        return _text_of(message)
+        text = _text_of(message)
+        # Anthropic reports its own count, and that is the one on the bill, so
+        # it is preferred over anything measured here.
+        counted = getattr(message, "usage", None)
+        if counted is not None:
+            usage.record(
+                self.provider_key,
+                model or DEFAULT_MODEL,
+                getattr(counted, "input_tokens", 0),
+                getattr(counted, "output_tokens", 0),
+            )
+        else:
+            estimated = usage.estimate(system=system, user=user, reply=text)
+            usage.record(
+                self.provider_key, model or DEFAULT_MODEL, *estimated, estimated=True
+            )
+        return text
 
     def ping(self) -> list[ModelInfo]:
         models = self.list_models()

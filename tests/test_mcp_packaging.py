@@ -83,6 +83,27 @@ def test_the_source_install_exposes_a_console_script():
     assert 'git-assistant-mcp = "git_assistant.mcp.server:main"' in _read("pyproject.toml")
 
 
+# ---- reading a rule table ------------------------------------------------------
+@pytest.mark.parametrize("spec", (*ONEDIR_SPECS, "git-assistant.spec"))
+def test_every_build_of_the_app_can_read_a_spreadsheet(spec):
+    """openpyxl is imported inside a function, which is what PyInstaller misses."""
+    text = _read(spec)
+    app = text[: text.index("mcp_a = Analysis")] if "mcp_a = Analysis" in text else text
+    assert '"openpyxl"' in app
+
+
+def test_the_mcp_server_does_not_pay_for_the_spreadsheet_reader():
+    text = _read("git-assistant.spec")
+    mcp = text[text.index("mcp_a = Analysis") :]
+    excludes = mcp[mcp.index("excludes=") : mcp.index("noarchive")]
+    assert '"openpyxl"' in excludes
+
+
+def test_the_dependency_is_declared_where_it_is_installed_from():
+    assert "openpyxl" in _read("pyproject.toml")
+    assert "openpyxl" in _read("uv.lock")
+
+
 # ---- the entry point ----------------------------------------------------------
 def test_the_module_runs_the_server_without_a_display():
     """The whole point of the argv dispatch: no Qt, no tray, no single instance."""

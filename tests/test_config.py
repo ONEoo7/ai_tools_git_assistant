@@ -111,3 +111,39 @@ def test_build_repo_tree_does_not_nest_on_a_partial_name_match():
     """`repo-tools` is not inside `repo`, however similar the paths look."""
     nodes = build_repo_tree([RepoEntry(_p("repo")), RepoEntry(_p("repo-tools"))])
     assert _paths(nodes) == [(_p("repo"), 0), (_p("repo-tools"), 0)]
+
+
+# ---- code-review rule tables ---------------------------------------------------
+def test_a_repository_s_rule_table_survives_a_round_trip_through_the_settings_file():
+    """RepoEntry is rebuilt field by field, so a new one is dropped unless named."""
+    s = Settings(repos=[RepoEntry("/a/repo", review_rules="House rules")])
+    assert Settings.from_dict(s.to_dict()).repos[0].review_rules == "House rules"
+
+
+def test_the_table_a_repository_uses_is_asked_of_the_settings():
+    s = _settings("/a/one", "/a/two")
+    s.set_repo_review_table("/a/one", "House rules")
+    assert s.review_table_for_repo("/a/one") == "House rules"
+    assert s.review_table_for_repo("/a/two") == ""
+
+
+def test_renaming_a_rule_table_repoints_the_repositories_that_used_it():
+    """Otherwise their next review runs against nothing, and looks clean."""
+    s = _settings("/a/one", "/a/two")
+    s.set_repo_review_table("/a/one", "House rules")
+    s.rename_review_table("House rules", "Team rules")
+    assert s.review_table_for_repo("/a/one") == "Team rules"
+
+
+def test_deleting_a_rule_table_leaves_its_repositories_without_one():
+    s = _settings("/a/one")
+    s.set_repo_review_table("/a/one", "House rules")
+    s.remove_review_table("House rules")
+    assert s.review_table_for_repo("/a/one") == ""
+
+
+def test_two_spellings_of_one_repository_path_share_one_key():
+    """Both stores file a repository under this; they must not disagree."""
+    from git_assistant.config import repo_key
+
+    assert repo_key(r"D:\Repo\Demo") == repo_key("d:/repo/demo/")

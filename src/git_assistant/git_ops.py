@@ -601,6 +601,26 @@ def has_changes(repo: str | Path, mode: str) -> bool:
     return bool(get_diffstat(repo, mode).strip())
 
 
+def file_content(repo: str | Path, path: str, mode: str) -> str:
+    """A file as it is *after* the change the given mode describes.
+
+    The mode decides where to read from, and getting that wrong is not
+    cosmetic: for staged changes the answer is the index, because a file staged
+    and then edited again would otherwise be shown alongside a diff it no
+    longer matches.
+
+    Returns "" for a file that no longer exists (a deletion has no content
+    after it) and for anything that cannot be decoded as text.
+    """
+    if mode == "working":
+        try:
+            return (Path(repo) / path).read_text(encoding="utf-8", errors="replace")
+        except (OSError, ValueError):
+            return ""
+    res = _run(repo, ["show", f":{path}"])
+    return res.stdout if res.ok else ""
+
+
 def list_tracked_files(repo: str | Path) -> list[str]:
     """Return repo-relative paths of all tracked files (respects .gitignore).
 

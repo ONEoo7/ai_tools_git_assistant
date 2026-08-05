@@ -54,8 +54,15 @@ a = Analysis(
     # `anthropic` is imported inside a function (git_assistant.claude_client)
     # so a build without it still runs the other providers. Declared here
     # anyway: a lazily-imported optional dependency is exactly the shape
-    # PyInstaller can miss, and the failure lands at generate time.
-    hiddenimports=["anthropic", "tiktoken_ext", "tiktoken_ext.openai_public"],
+    # PyInstaller can miss, and the failure lands at generate time. `openpyxl`
+    # is the same shape: imported inside git_assistant.review.xlsx, and missed
+    # here it fails when a rule table is imported, not at start-up.
+    hiddenimports=[
+        "anthropic",
+        "openpyxl",
+        "tiktoken_ext",
+        "tiktoken_ext.openai_public",
+    ],
     hookspath=[],
     runtime_hooks=[],
     excludes=EXCLUDED,

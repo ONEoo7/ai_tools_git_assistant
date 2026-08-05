@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import httpx
 
+from git_assistant import usage
 from git_assistant.llm import LLMError, ModelInfo
 
 CHAT_TIMEOUT = 600.0
@@ -38,8 +39,12 @@ class OpenAICompatibleClient:
         extra_query: dict[str, str] | None = None,
         chat_timeout: float = CHAT_TIMEOUT,
         list_timeout: float = LIST_TIMEOUT,
+        provider_key: str = "openai",
     ) -> None:
         self.base_url = base_url.rstrip("/")
+        # This client serves several providers, so it has to be told which one
+        # its usage is filed under; see git_assistant.usage.
+        self.provider_key = provider_key
         self._api_key = api_key
         self._auth_header = auth_header
         # Azure rejects an empty api-version rather than defaulting, so an
@@ -117,9 +122,13 @@ class OpenAICompatibleClient:
             "POST", "/chat/completions", self.chat_timeout, json=body
         )
         try:
-            return payload["choices"][0]["message"]["content"].strip()
+            text = payload["choices"][0]["message"]["content"].strip()
         except (KeyError, IndexError, TypeError, AttributeError) as exc:
             raise LLMError(f"unexpected response shape: {payload}") from exc
+        usage.record_openai_response(
+            self.provider_key, model, payload, system=system, user=user, reply=text
+        )
+        return text
 
     def ping(self) -> list[ModelInfo]:
         models = self.list_models()

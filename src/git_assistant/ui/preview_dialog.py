@@ -15,27 +15,29 @@ from PyQt6.QtGui import QFontDatabase, QGuiApplication
 from PyQt6.QtWidgets import (
     QComboBox,
     QDialog,
-    QFileDialog,
     QHBoxLayout,
     QLabel,
-    QLineEdit,
     QListWidget,
     QListWidgetItem,
+    QMenu,
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
     QSplitter,
     QTextEdit,
+    QTreeWidget,
+    QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
 
-from git_assistant import git_ops
+from git_assistant import commit_history, git_ops
 from git_assistant.commit_generator import FileCoverage, GenerationResult
 from git_assistant.config import DEFAULT_TEMPLATE_NAME, Settings
 from git_assistant.diff_strategy import filter_files, split_diff
 from git_assistant.providers import PROVIDERS
 from git_assistant.ui.repo_picker import RepoPicker
+from git_assistant.ui.side_panel import SidePanel
 from git_assistant.ui.workers import FunctionWorker, GeneratorWorker, run_worker
 
 # Cap rendered lines per file so a huge diff can't freeze the view.
@@ -53,9 +55,14 @@ SECTION_GAP = 12
 NO_REPOS_MESSAGE = "No repositories configured - add one in Repositories."
 
 
-def _transcript(calls: list) -> str:
-    header = f"{len(calls)} call(s) to the model\n\n"
-    return header + "\n\n".join(call.transcript() for call in calls)
+def _history_note(repo: str, runs: list, settings) -> str:
+    if not repo:
+        return ""
+    if not runs:
+        return "No messages generated for this repository yet."
+    if settings.commit_history_limit <= 0:
+        return "Keeping every generated message."
+    return f"Keeping the newest {settings.commit_history_limit} message(s)."
 
 
 def _read_staged(repo: str, mode: str, ignore_globs: list[str]) -> list[FileCoverage]:
@@ -113,7 +120,9 @@ class CommitPanel(QWidget):
         self._push_worker = None
         self._coverage: list[FileCoverage] = []
         self._branches: list[str] = []  # local branches of the selected repo
-        self._calls: list = []  # every exchange with the model, this run
+        #: The recorded run the editor is showing, so "has this been edited?"
+        #: has an answer before a stored message replaces it.
+        self._shown_run = None
 
         self.repo_picker = RepoPicker(settings)
         self.repo_picker.repoChanged.connect(self._on_repo_selected)
@@ -209,7 +218,10 @@ class CommitPanel(QWidget):
         # ---- right pane: staged files + what was omitted ------------------
         right = QWidget()
         right_box = QVBoxLayout(right)
-        right_box.setContentsMargins(SECTION_GAP, 0, 0, 0)
+        # A handle on both sides, so a gap on both: with one only, the file list
+        # sits flush against the divider on the right and inset on the left,
+        # which reads as a misalignment rather than as a margin.
+        right_box.setContentsMargins(SECTION_GAP, 0, SECTION_GAP, 0)
         self.files_label = QLabel("Staged files")
         right_box.addWidget(self.files_label)
 
@@ -242,7 +254,7 @@ class CommitPanel(QWidget):
         splitter.addWidget(repos_pane)
         splitter.addWidget(left)
         splitter.addWidget(right)
-        splitter.addWidget(self._build_calls_pane())
+        splitter.addWidget(self._build_side_pane())
         splitter.setStretchFactor(0, 1)  # repo picker stays narrow
         splitter.setStretchFactor(1, 3)
         splitter.setStretchFactor(2, 4)
@@ -267,106 +279,73 @@ class CommitPanel(QWidget):
         if auto_start:
             self._start()
 
-    # ---- what was sent to the model ----------------------------------------
-    def _build_calls_pane(self) -> QWidget:
-        """Every request and answer, so a poor message can be traced to one.
+    # ---- previous runs, and what was sent to the model ----------------------
+    def _build_side_pane(self) -> QWidget:
+        """The shared right-hand pane; see git_assistant.ui.side_panel."""
+        self.side_panel = SidePanel(
+            self._build_history_pane(),
+            repo_name=lambda: Path(self._current_repo_path()).name,
+            margins=(SECTION_GAP, 0, 0, 0),
+        )
+        self.calls_pane.noted.connect(self.progress.setText)
+        return self.side_panel
 
-        A run is one call, or fifteen. When the result disappoints, the answer
-        is in which call went wrong -- a chunk summarised badly, or a final
-        prompt that arrived with its notes cut off -- and that cannot be read
-        off the message itself.
+    def _build_history_pane(self) -> QWidget:
+        """Every message generated for this repository.
+
+        Regenerating is the normal thing to do, and the second message is often
+        worse than the first. Until this list existed, the first was gone.
         """
         pane = QWidget()
         box = QVBoxLayout(pane)
-        box.setContentsMargins(SECTION_GAP, 0, 0, 0)
+        box.setContentsMargins(0, 0, 0, 0)
 
-        self.calls_label = QLabel("View LLM Calls")
-        box.addWidget(self.calls_label)
-
-        self.calls_list = QListWidget()
-        self.calls_list.setMaximumHeight(150)
-        self.calls_list.currentRowChanged.connect(self._on_call_selected)
-        box.addWidget(self.calls_list)
-
-        self.call_view = QTextEdit()
-        self.call_view.setReadOnly(True)
-        self.call_view.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
-        self.call_view.setFont(
-            QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont)
-        )
-        self.call_view.setPlaceholderText(
-            "Every call made while generating appears here: the exact system "
-            "and user prompt sent, and exactly what came back."
-        )
-        box.addWidget(self.call_view, 1)
+        self.runs_tree = QTreeWidget()
+        self.runs_tree.setHeaderLabels(["When", "Message"])
+        self.runs_tree.setRootIsDecorated(False)
+        self.runs_tree.setColumnWidth(0, 110)
+        self.runs_tree.itemDoubleClicked.connect(lambda *_: self._on_open_run())
+        self.runs_tree.itemSelectionChanged.connect(self._on_run_selection)
+        self.runs_tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.runs_tree.customContextMenuRequested.connect(self._on_runs_menu)
+        box.addWidget(self.runs_tree, 1)
 
         row = QHBoxLayout()
-        self.copy_call_btn = QPushButton("Copy call")
-        self.copy_call_btn.clicked.connect(self._on_copy_call)
-        self.copy_all_calls_btn = QPushButton("Copy all")
-        self.copy_all_calls_btn.clicked.connect(self._on_copy_all_calls)
-        self.save_calls_btn = QPushButton("Save...")
-        self.save_calls_btn.clicked.connect(self._on_save_calls)
-        for button in (self.copy_call_btn, self.copy_all_calls_btn, self.save_calls_btn):
+        self.open_run_btn = QPushButton("Open")
+        self.open_run_btn.setToolTip("Put this message back in the editor.")
+        self.open_run_btn.clicked.connect(self._on_open_run)
+        self.delete_run_btn = QPushButton("Delete")
+        self.delete_run_btn.clicked.connect(self._on_delete_run)
+        for button in (self.open_run_btn, self.delete_run_btn):
             button.setEnabled(False)
             row.addWidget(button)
         row.addStretch(1)
         box.addLayout(row)
+
+        self.history_note = QLabel("")
+        self.history_note.setWordWrap(True)
+        self.history_note.setStyleSheet("color: #888;")
+        box.addWidget(self.history_note)
         return pane
 
+    #: The calls half of the side pane, which is what a run talks to.
+    calls_pane = property(lambda self: self.side_panel.calls)
+
+    # The pane owns these now. Kept as names on the panel because that is what
+    # the window, and the tests that pin this behaviour, reach for.
+    calls_label = property(lambda self: self.calls_pane.calls_label)
+    calls_list = property(lambda self: self.calls_pane.calls_list)
+    call_view = property(lambda self: self.calls_pane.call_view)
+    copy_call_btn = property(lambda self: self.calls_pane.copy_call_btn)
+    copy_all_calls_btn = property(lambda self: self.calls_pane.copy_all_calls_btn)
+    save_calls_btn = property(lambda self: self.calls_pane.save_calls_btn)
+    _calls = property(lambda self: self.calls_pane.calls)
+
     def _reset_calls(self) -> None:
-        self._calls = []
-        self.calls_list.clear()
-        self.call_view.clear()
-        self.calls_label.setText("View LLM Calls")
-        for button in (self.copy_call_btn, self.copy_all_calls_btn, self.save_calls_btn):
-            button.setEnabled(False)
+        self.calls_pane.reset()
 
     def _on_call(self, call) -> None:
-        """One exchange finished. Shown as it happens, not only at the end."""
-        self._calls.append(call)
-        marker = "" if call.ok else "  [failed]"
-        self.calls_list.addItem(f"{call.index}. {call.summary()}{marker}")
-        self.calls_label.setText(f"View LLM Calls ({len(self._calls)})")
-        for button in (self.copy_all_calls_btn, self.save_calls_btn):
-            button.setEnabled(True)
-        if self.calls_list.currentRow() < 0:
-            self.calls_list.setCurrentRow(0)
-
-    def _on_call_selected(self, row: int) -> None:
-        if 0 <= row < len(self._calls):
-            self.call_view.setPlainText(self._calls[row].transcript())
-            self.copy_call_btn.setEnabled(True)
-
-    def _on_copy_call(self) -> None:
-        row = self.calls_list.currentRow()
-        if 0 <= row < len(self._calls):
-            QGuiApplication.clipboard().setText(self._calls[row].transcript())
-            self.progress.setText("Call copied to the clipboard.")
-
-    def _on_copy_all_calls(self) -> None:
-        if self._calls:
-            QGuiApplication.clipboard().setText(_transcript(self._calls))
-            self.progress.setText(f"{len(self._calls)} call(s) copied to the clipboard.")
-
-    def _on_save_calls(self) -> None:
-        if not self._calls:
-            return
-        repo = Path(self._current_repo_path()).name or "repo"
-        path, _chosen = QFileDialog.getSaveFileName(
-            self,
-            "Save the calls",
-            str(Path.home() / f"{repo}-llm-calls.txt"),
-            "Text (*.txt);;All files (*)",
-        )
-        if not path:
-            return
-        try:
-            Path(path).write_text(_transcript(self._calls), encoding="utf-8")
-        except OSError as exc:
-            QMessageBox.critical(self, "Could not save", str(exc))
-            return
-        self.progress.setText(f"Saved to {path}")
+        self.calls_pane.add_call(call)
 
     # ---- repository selection ----------------------------------------------
     def refresh_repos(self) -> None:
@@ -377,6 +356,7 @@ class CommitPanel(QWidget):
         # The Connection & Model tab can change this while we are not looking.
         self.refresh_provider()
         self._load_staged_files()
+        self._refresh_history()
         self._set_busy(False)
         if self.repo_picker.count() == 0:
             self.status.setText(NO_REPOS_MESSAGE)
@@ -537,6 +517,7 @@ class CommitPanel(QWidget):
         self.file_list.clear()
         self.diff_view.clear()
         self._coverage = []
+        self._shown_run = None
         self.progress.setText("")
         self.regen_btn.setText("Generate")
         self.status.setText("")
@@ -566,6 +547,7 @@ class CommitPanel(QWidget):
         self._clear_results()
         # Show the new repository's staged files right away.
         self._load_staged_files()
+        self._refresh_history()
 
     # ---- generation --------------------------------------------------------
     def _start(self) -> None:
@@ -587,6 +569,7 @@ class CommitPanel(QWidget):
 
     def _on_finished(self, result: GenerationResult) -> None:
         self.editor.setPlainText(result.message)
+        self._record(result)
         dropped = (
             f" - {len(result.dropped_files)} noise file(s) skipped"
             if result.dropped_files
@@ -609,6 +592,134 @@ class CommitPanel(QWidget):
         self._populate_files(result.file_coverage)
         self.progress.setText("Done.")
         self._set_busy(False)
+
+    # ---- previous runs -----------------------------------------------------
+    def _record(self, result: GenerationResult) -> None:
+        """Keep the message, so regenerating cannot lose a better earlier one."""
+        repo = self._current_repo_path()
+        if not repo:
+            return
+        head = git_ops._run(repo, ["rev-parse", "HEAD"])
+        stored, problem = commit_history.record(
+            repo,
+            result,
+            branch=git_ops.current_branch(repo),
+            head=head.stdout.strip() if head.ok else "",
+            dirty=git_ops.has_uncommitted_changes(repo),
+            model=self.settings.active_model(),
+            provider=self.settings.provider,
+            limit=self.settings.commit_history_limit,
+        )
+        self._shown_run = stored
+        if problem:
+            self.progress.setText(f"Not saved to history: {problem}")
+        self._refresh_history(select=stored)
+
+    def _refresh_history(self, select=None) -> None:
+        repo = self._current_repo_path()
+        self.runs_tree.clear()
+        runs = commit_history.list_runs(repo) if repo else []
+        for stored in runs:
+            item = QTreeWidgetItem([stored.when_label(), stored.result_label()])
+            item.setData(0, Qt.ItemDataRole.UserRole, stored)
+            item.setToolTip(0, stored.describe())
+            item.setToolTip(1, stored.describe())
+            if stored.pinned:
+                item.setText(0, f"📌 {stored.when_label()}")
+            if stored.committed:
+                item.setForeground(1, Qt.GlobalColor.darkGreen)
+            if select is not None and stored.run_id == select.run_id:
+                self.runs_tree.setCurrentItem(item)
+            self.runs_tree.addTopLevelItem(item)
+        self._on_run_selection()
+        self.history_note.setText(_history_note(repo, runs, self.settings))
+
+    def _selected_runs(self) -> list:
+        return [
+            item.data(0, Qt.ItemDataRole.UserRole)
+            for item in self.runs_tree.selectedItems()
+        ]
+
+    def _on_run_selection(self) -> None:
+        chosen = self._selected_runs()
+        self.open_run_btn.setEnabled(len(chosen) == 1)
+        self.delete_run_btn.setEnabled(bool(chosen))
+
+    def _on_open_run(self) -> None:
+        chosen = self._selected_runs()
+        if len(chosen) != 1:
+            return
+        stored = chosen[0]
+        current = self.editor.toPlainText().strip()
+        # Only ask when there is something to lose: an edited message the user
+        # typed is not the same as the one this panel put there.
+        if current and current != (
+            self._shown_run.message.strip() if self._shown_run else ""
+        ):
+            if (
+                QMessageBox.question(
+                    self,
+                    "Replace the message",
+                    "Replace what is in the editor with the message from "
+                    f"{stored.when_label()}?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                    QMessageBox.StandardButton.Cancel,
+                )
+                != QMessageBox.StandardButton.Yes
+            ):
+                return
+        self.editor.setPlainText(stored.message)
+        self._shown_run = stored
+        self.progress.setText(f"Showing the message generated at {stored.when_label()}.")
+
+    def _on_delete_run(self) -> None:
+        chosen = self._selected_runs()
+        if not chosen:
+            return
+        for stored in chosen:
+            commit_history.delete_run(stored)
+            if self._shown_run is not None and stored.run_id == self._shown_run.run_id:
+                self._shown_run = None
+        self._refresh_history()
+
+    def _on_runs_menu(self, point) -> None:
+        chosen = self._selected_runs()
+        if not chosen:
+            return
+        menu = QMenu(self)
+        if len(chosen) == 1:
+            menu.addAction("Open", self._on_open_run)
+            pinned = chosen[0].pinned
+            menu.addAction(
+                "Unpin" if pinned else "Pin (never drop this one)",
+                lambda: self._on_pin(chosen[0], not pinned),
+            )
+        menu.addAction("Delete", self._on_delete_run)
+        menu.addSeparator()
+        menu.addAction("Clear this repository's messages", self._on_clear_history)
+        menu.exec(self.runs_tree.viewport().mapToGlobal(point))
+
+    def _on_pin(self, stored, pinned: bool) -> None:
+        commit_history.set_pinned(stored, pinned)
+        self._refresh_history(select=stored)
+
+    def _on_clear_history(self) -> None:
+        repo = self._current_repo_path()
+        if not repo:
+            return
+        if (
+            QMessageBox.question(
+                self,
+                "Clear messages",
+                f"Forget every generated message for {Path(repo).name}?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel,
+            )
+            == QMessageBox.StandardButton.Yes
+        ):
+            commit_history.clear_repo(repo)
+            self._shown_run = None
+            self._refresh_history()
 
     # ---- omitted-content view ---------------------------------------------
     def _populate_files(self, coverage: list[FileCoverage]) -> None:
@@ -795,6 +906,11 @@ class CommitPanel(QWidget):
 
         result = git_ops.commit(repo.path, message)
         if result.ok:
+            # Which of twenty stored messages is the one that shipped is the
+            # first thing asked of the list; record it while we know.
+            if self._shown_run is not None and message == self._shown_run.message.strip():
+                commit_history.mark_committed(self._shown_run)
+                self._refresh_history(select=self._shown_run)
             QMessageBox.information(
                 self, "Committed", result.stdout.strip() or "Commit created."
             )

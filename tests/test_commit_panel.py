@@ -6,6 +6,8 @@ pytest.importorskip("PyQt6.QtWidgets")
 
 from PyQt6.QtWidgets import QApplication  # noqa: E402
 
+from git_assistant import commit_history  # noqa: E402
+from git_assistant.commit_generator import GenerationResult  # noqa: E402
 from git_assistant.config import RepoEntry, Settings  # noqa: E402
 from git_assistant.ui.preview_dialog import NO_REPOS_MESSAGE, CommitPanel  # noqa: E402
 
@@ -14,6 +16,16 @@ from git_assistant.ui.preview_dialog import NO_REPOS_MESSAGE, CommitPanel  # noq
 def qapp():
     app = QApplication.instance() or QApplication([])
     yield app
+
+
+@pytest.fixture(autouse=True)
+def store(tmp_path, monkeypatch):
+    """Every finished run is recorded, so the store must not be the real one.
+
+    Patched where it is imported, as tests/test_identity.py does.
+    """
+    monkeypatch.setattr(commit_history, "user_config_dir", lambda *a, **k: str(tmp_path))
+    return tmp_path
 
 
 @pytest.fixture
@@ -388,3 +400,132 @@ def test_starting_a_run_clears_the_previous_run_s_calls(qapp, settings, tmp_path
     assert panel.calls_list.count() == 0
     assert panel.call_view.toPlainText() == ""
     assert not panel.copy_all_calls_btn.isEnabled()
+
+
+def test_the_commit_tab_uses_the_shared_calls_pane(qapp, settings):
+    """The same widget the Code Review tab shows, so the two cannot drift."""
+    from git_assistant.ui.calls_pane import CallsPane
+
+    panel = CommitPanel(settings, auto_start=False)
+
+    assert isinstance(panel.calls_pane, CallsPane)
+    assert panel.calls_list is panel.calls_pane.calls_list
+
+
+def test_copying_a_call_says_so_in_the_panel_s_own_status_line(qapp, settings):
+    panel = CommitPanel(settings, auto_start=False)
+    panel._on_call(_call())
+
+    panel.calls_pane._on_copy_all()
+
+    assert "copied to the clipboard" in panel.progress.text()
+
+
+# ---- Previous Runs ------------------------------------------------------------
+def _result(message="feat: a change", strategy="single-shot"):
+    return GenerationResult(
+        message=message,
+        strategy=strategy,
+        context_window=32768,
+        input_budget=29492,
+        input_tokens=1757,
+    )
+
+
+def _panel_with_repo(settings, tmp_path):
+    repo = _repo(tmp_path)
+    settings.repos = [RepoEntry(str(repo))]
+    settings.active_repo = str(repo)
+    return CommitPanel(settings, auto_start=False)
+
+
+def test_the_right_hand_pane_shows_previous_runs_first(qapp, settings):
+    from git_assistant.ui.side_panel import CALLS_TAB, HISTORY_TAB
+
+    panel = CommitPanel(settings, auto_start=False)
+
+    assert panel.side_panel.tabs.tabText(0) == HISTORY_TAB
+    assert panel.side_panel.tabs.tabText(1) == CALLS_TAB
+    assert panel.side_panel.tabs.currentIndex() == 0
+
+
+def test_a_generated_message_is_recorded_and_listed(qapp, settings, tmp_path):
+    """Regenerating is normal, and the second message is often worse."""
+    panel = _panel_with_repo(settings, tmp_path)
+
+    panel._on_finished(_result("feat: the first one"))
+
+    assert panel.runs_tree.topLevelItemCount() == 1
+    assert "feat: the first one" in panel.runs_tree.topLevelItem(0).text(1)
+
+
+def test_regenerating_keeps_the_earlier_message(qapp, settings, tmp_path):
+    panel = _panel_with_repo(settings, tmp_path)
+
+    panel._on_finished(_result("feat: the first one"))
+    panel._on_finished(_result("feat: the second one"))
+
+    subjects = [
+        panel.runs_tree.topLevelItem(i).text(1)
+        for i in range(panel.runs_tree.topLevelItemCount())
+    ]
+    assert any("the first one" in s for s in subjects)
+    assert any("the second one" in s for s in subjects)
+
+
+def test_opening_an_earlier_message_puts_it_back_in_the_editor(qapp, settings, tmp_path):
+    panel = _panel_with_repo(settings, tmp_path)
+    panel._on_finished(_result("feat: the first one"))
+    panel._on_finished(_result("feat: the second one"))
+
+    for i in range(panel.runs_tree.topLevelItemCount()):
+        item = panel.runs_tree.topLevelItem(i)
+        if "the first one" in item.text(1):
+            panel.runs_tree.setCurrentItem(item)
+    panel._on_open_run()
+
+    assert panel.editor.toPlainText() == "feat: the first one"
+
+
+def test_open_and_delete_are_offered_only_when_a_run_is_selected(qapp, settings, tmp_path):
+    panel = _panel_with_repo(settings, tmp_path)
+    panel._on_finished(_result())
+    panel.runs_tree.clearSelection()
+
+    panel._on_run_selection()
+    assert not panel.open_run_btn.isEnabled()
+
+    panel.runs_tree.setCurrentItem(panel.runs_tree.topLevelItem(0))
+    assert panel.open_run_btn.isEnabled() and panel.delete_run_btn.isEnabled()
+
+
+def test_deleting_a_message_removes_it_from_the_list(qapp, settings, tmp_path):
+    panel = _panel_with_repo(settings, tmp_path)
+    panel._on_finished(_result())
+    panel.runs_tree.setCurrentItem(panel.runs_tree.topLevelItem(0))
+
+    panel._on_delete_run()
+
+    assert panel.runs_tree.topLevelItemCount() == 0
+
+
+def test_a_run_that_produced_nothing_is_not_listed(qapp, settings, tmp_path):
+    panel = _panel_with_repo(settings, tmp_path)
+    panel._on_finished(_result(message="   "))
+    assert panel.runs_tree.topLevelItemCount() == 0
+
+
+def test_another_repository_s_messages_are_not_shown_here(qapp, settings, tmp_path):
+    panel = _panel_with_repo(settings, tmp_path)
+    panel._on_finished(_result())
+    assert panel.runs_tree.topLevelItemCount() == 1
+
+    (tmp_path / "other").mkdir()
+    other = _repo(tmp_path / "other")
+    settings.repos.append(RepoEntry(str(other)))
+    settings.active_repo = str(other)
+    panel.repo_picker.refresh()
+    panel._on_repo_selected(str(other))
+
+    assert panel.runs_tree.topLevelItemCount() == 0
+

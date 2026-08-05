@@ -54,7 +54,9 @@ from git_assistant.ui.identities_panel import IdentitiesPanel
 from git_assistant.ui.mcp_panel import McpPanel
 from git_assistant.ui.identity_bar import IdentityBar
 from git_assistant.ui.preview_dialog import SECTION_GAP, CommitPanel
+from git_assistant.ui.review_panel import ReviewPanel
 from git_assistant.ui.tags_panel import TagsPanel
+from git_assistant.ui.usage_pane import UsagePane
 from git_assistant.features import NO_UPDATES_NOTE, UPDATES_SUPPORTED
 
 # Absent from the no-update build; see git_assistant.features.
@@ -120,6 +122,7 @@ class SettingsDialog(QDialog):
         tabs.addTab(self._build_commit_tab(), "Generate Commit Message")
         tabs.addTab(self._build_tags_tab(), "Tags")
         tabs.addTab(self._build_agents_tab(), "Agents")
+        tabs.addTab(self._build_review_tab(), "Code Review")
         tabs.addTab(self._build_connection_tab(), "Connection && Model")
         tabs.addTab(self._build_repos_tab(), "Repositories")
         # Identities are read from their own file, seeded from git on first run.
@@ -134,7 +137,12 @@ class SettingsDialog(QDialog):
         # repository is active, and both repo-driven tabs can change that. Each
         # tab owns its own RepoPicker, so the bar follows both.
         self.identity_bar = IdentityBar(self.settings, self.identity_store)
-        for panel in (self.commit_panel, self.tags_panel, self.agents_panel):
+        for panel in (
+            self.commit_panel,
+            self.tags_panel,
+            self.agents_panel,
+            self.review_panel,
+        ):
             panel.repo_picker.repoChanged.connect(self.identity_bar.set_repo)
         # Editing the list must re-offer it; picking "Manage identities..."
         # is a request for the tab that owns the list.
@@ -193,9 +201,11 @@ class SettingsDialog(QDialog):
         self.refresh_update_status()
 
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt naming
-        # An audit can still be reading the object store; stop it rather than
-        # leaving its git children running behind a closed window.
+        # An audit can still be reading the object store, and a review can have
+        # thirty calls in flight; stop them rather than leaving them running
+        # behind a closed window.
         self.agents_panel.cancel_running()
+        self.review_panel.cancel_running()
         if self._setup_worker is not None:
             self._setup_worker.cancel()
         # Write any debounced edit that has not landed yet.
@@ -214,6 +224,9 @@ class SettingsDialog(QDialog):
         widget = self.tabs.widget(index)
         if widget is self.connection_tab:
             self._sync_provider_list()
+            # Every completion since this tab was last open counts towards the
+            # totals beside it.
+            self.usage_pane.refresh()
             return
         # Which tabs are repo-driven is asked of the tabs themselves: a
         # positional test ("the first two") silently stops being true the next
@@ -398,6 +411,12 @@ class SettingsDialog(QDialog):
         )
         return self.agents_panel
 
+    def _build_review_tab(self) -> QWidget:
+        self.review_panel = ReviewPanel(
+            self.settings, before_run=self._apply_to_settings
+        )
+        return self.review_panel
+
     def _build_mcp_tab(self) -> QWidget:
         self.mcp_panel = McpPanel(self.settings)
         return self.mcp_panel
@@ -408,6 +427,13 @@ class SettingsDialog(QDialog):
         # or Agents tab changed in the meantime.
         self.connection_tab = w
         outer = QHBoxLayout(w)
+
+        # The settings on the left, what they have cost on the right. Split so
+        # the usage table can be widened for a long model name, or pushed out
+        # of the way entirely.
+        settings_pane = QWidget()
+        settings_box = QHBoxLayout(settings_pane)
+        settings_box.setContentsMargins(0, 0, SECTION_GAP, 0)
 
         # ---- left: which backend generates the message --------------------
         providers_pane = QWidget()
@@ -437,8 +463,18 @@ class SettingsDialog(QDialog):
         form_container = QWidget()
         form = QFormLayout(form_container)
 
-        outer.addWidget(providers_pane)
-        outer.addWidget(form_container, 1)
+        settings_box.addWidget(providers_pane)
+        settings_box.addWidget(form_container, 1)
+
+        self.usage_pane = UsagePane(margins=(SECTION_GAP, 0, 0, 0))
+
+        split = QSplitter(Qt.Orientation.Horizontal)
+        split.addWidget(settings_pane)
+        split.addWidget(self.usage_pane)
+        split.setStretchFactor(0, 3)
+        split.setStretchFactor(1, 2)
+        split.setSizes([700, 460])
+        outer.addWidget(split)
 
         self.ip_edit = QLineEdit()
         self.port_spin = QSpinBox()
@@ -666,6 +702,7 @@ class SettingsDialog(QDialog):
             self._show_provider_model(providers.get(self.settings.provider))
             self.commit_panel.refresh_provider()
             self.agents_panel.refresh_provider()
+            self.review_panel.refresh_provider()
 
     def _on_setup_error(self, message: str) -> None:
         self._setup_worker = None
@@ -788,6 +825,7 @@ class SettingsDialog(QDialog):
             self._schedule_save()
             self.commit_panel.refresh_provider()
             self.agents_panel.refresh_provider()
+            self.review_panel.refresh_provider()
 
         self._apply_provider_fields(provider)
         self._show_provider_model(provider)

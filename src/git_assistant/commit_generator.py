@@ -13,9 +13,7 @@ Rendering avoids ``str.format`` so literal braces in a diff never raise.
 
 from __future__ import annotations
 
-import threading
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 
 from git_assistant import git_ops, llm_log, prompts
@@ -29,6 +27,13 @@ from git_assistant.diff_strategy import (
 )
 from git_assistant.llm import ModelInfo
 from git_assistant.lmstudio_client import LMStudioClient
+from git_assistant.parallel import (
+    MIN_PARALLEL_CONTEXT,
+    CancelledError,
+    effective_parallel,
+    per_request_context,
+    run_parallel,
+)
 from git_assistant.tokenizer import (
     estimate_tokens,
     input_budget,
@@ -38,11 +43,21 @@ from git_assistant.tokenizer import (
 DEFAULT_CONTEXT_WINDOW = 8192
 MAP_OUTPUT_TOKENS = 384
 MAX_REDUCE_DEPTH = 3
-# Never shrink a parallel request's share of the context below this.
-MIN_PARALLEL_CONTEXT = 1024
 
 ProgressFn = Callable[[str], None]
 CancelFn = Callable[[], bool]
+
+# MIN_PARALLEL_CONTEXT and CancelledError now live in git_assistant.parallel,
+# which the code reviewer fans out through as well. They are re-exported here
+# because that is where the settings tab and the workers import them from.
+__all__ = [
+    "CancelledError",
+    "CommitGenerator",
+    "FileCoverage",
+    "GenerationResult",
+    "MIN_PARALLEL_CONTEXT",
+    "render_template",
+]
 
 
 @dataclass
@@ -82,10 +97,6 @@ class GenerationResult:
     #: Chunks whose summary came back empty, so their changes reached the final
     #: message through nothing at all.
     blank_notes: int = 0
-
-
-class CancelledError(RuntimeError):
-    """Raised when generation is cancelled cooperatively."""
 
 
 def render_template(template: str, *, branch: str, diffstat: str, diff: str) -> str:
@@ -338,64 +349,23 @@ class CommitGenerator:
         is_cancelled: CancelFn,
         label: str,
     ) -> list:
-        """Apply ``fn`` to every item, up to ``parallel_calls`` at a time.
-
-        Results keep the input order. Network I/O releases the GIL, so threads
-        give a near-linear speed-up on the independent map/reduce calls.
-        """
-        total = len(items)
-        # Never exceed the concurrency the context window can service - the
-        # chunks were sized for exactly this many slots.
-        workers = max(1, min(self._workers, total))
-        self._check_cancel(is_cancelled)
-
-        if workers == 1 or total == 1:
-            results = []
-            for i, item in enumerate(items, start=1):
-                self._check_cancel(is_cancelled)
-                progress(f"map-reduce: {label} {i}/{total}...")
-                results.append(fn(item))
-                self._cold_start = False  # a call came back, so it is loaded
-            return results
-
-        results: list = [None] * total
-        lock = threading.Lock()
-
-        # A model that still has to be loaded serves only the request that
-        # triggered the load and refuses its siblings with a 500, so the first
-        # call goes on its own and the fan-out meets a loaded model. Costs
-        # nothing when the model is already up, which is the usual case.
-        first = 0
-        if self._cold_start:
-            progress(f"map-reduce: {label} 1/{total} (loading the model)...")
-            results[0] = fn(items[0])
-            self._cold_start = False  # loaded now, by that very request
-            first = 1
-            self._check_cancel(is_cancelled)
-
-        done = first
-        progress(f"map-reduce: {label} {done}/{total} ({workers} in parallel)...")
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            futures = {
-                pool.submit(fn, item): i
-                for i, item in enumerate(items[first:], start=first)
-            }
-            try:
-                for fut in as_completed(futures):
-                    if is_cancelled():
-                        pool.shutdown(wait=False, cancel_futures=True)
-                        raise CancelledError("Generation cancelled.")
-                    results[futures[fut]] = fut.result()
-                    with lock:
-                        done += 1
-                        progress(
-                            f"map-reduce: {label} {done}/{total} "
-                            f"({workers} in parallel)..."
-                        )
-            except BaseException:
-                pool.shutdown(wait=False, cancel_futures=True)
-                raise
-        return results
+        """Apply ``fn`` to every item, up to ``parallel_calls`` at a time."""
+        try:
+            return run_parallel(
+                items,
+                fn,
+                workers=self._workers,
+                cold_start=self._cold_start,
+                progress=progress,
+                is_cancelled=is_cancelled,
+                label=label,
+                prefix="map-reduce: ",
+            )
+        finally:
+            # Whatever branch ran, a call has come back by now, so the model is
+            # loaded. Cleared here rather than inside the helper, which must
+            # stay a function of its arguments.
+            self._cold_start = False
 
     # ---- map / reduce ------------------------------------------------------
     _last_chunk_count: int = 0
@@ -406,20 +376,12 @@ class CommitGenerator:
     _model_looked_up: bool = False
 
     def effective_parallel(self, context: int) -> int:
-        """How many requests we may safely run at once for this context size.
-
-        LM Studio (llama.cpp) divides the loaded context across parallel slots,
-        so N in-flight requests each get roughly ``context / N`` tokens. Running
-        more than the context can service makes the server abort with
-        "Context size has been exceeded", so cap concurrency by the window.
-        """
-        requested = max(1, int(self.settings.parallel_calls or 1))
-        affordable = max(1, context // MIN_PARALLEL_CONTEXT)
-        return min(requested, affordable)
+        """How many requests we may safely run at once for this context size."""
+        return effective_parallel(self.settings, context)
 
     def per_request_context(self, context: int) -> int:
         """Context a single request may use when running concurrently."""
-        return context // self.effective_parallel(context)
+        return per_request_context(self.settings, context)
 
     def _map_budget(self, context: int, scaffold: str) -> int:
         overhead = estimate_tokens(scaffold)

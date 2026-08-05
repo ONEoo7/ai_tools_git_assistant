@@ -56,6 +56,31 @@ def test_no_changes_when_clean(repo):
     assert not git_ops.has_changes(repo, "cached")
 
 
+# ---- the file behind a diff ---------------------------------------------------
+def test_staged_content_is_read_from_the_index_not_the_work_tree(repo):
+    """A file staged and then edited again must not be shown beside its old diff."""
+    (repo / "hello.py").write_text("print('staged')\n", encoding="utf-8")
+    _git(repo, "add", "hello.py")
+    (repo / "hello.py").write_text("print('edited since')\n", encoding="utf-8")
+
+    assert git_ops.file_content(repo, "hello.py", "cached") == "print('staged')\n"
+    assert git_ops.file_content(repo, "hello.py", "working") == "print('edited since')\n"
+
+
+def test_a_file_that_no_longer_exists_has_no_content_after_the_change(repo):
+    (repo / "gone.py").write_text("x\n", encoding="utf-8")
+    _git(repo, "add", "gone.py")
+    _git(repo, "commit", "-m", "add")
+    _git(repo, "rm", "gone.py")
+
+    assert git_ops.file_content(repo, "gone.py", "cached") == ""
+    assert git_ops.file_content(repo, "gone.py", "working") == ""
+
+
+def test_an_unreadable_file_reads_as_nothing_rather_than_raising(repo):
+    assert git_ops.file_content(repo, "never/existed.py", "working") == ""
+
+
 def test_find_git_repos_discovers_multiple(tmp_path):
     for name in ("alpha", "beta"):
         (tmp_path / name / ".git").mkdir(parents=True)

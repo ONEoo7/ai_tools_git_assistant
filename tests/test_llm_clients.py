@@ -5,13 +5,22 @@ import sys
 import httpx
 import pytest
 
-from git_assistant import credentials
+from git_assistant import credentials, usage
 from git_assistant.claude_client import ClaudeClient, _text_of
 from git_assistant.config import Settings
 from git_assistant.llm import LLMError, ModelInfo
 from git_assistant.openai_client import OpenAICompatibleClient
 
 TEST_KEY = "__git-assistant-test__"
+
+
+@pytest.fixture(autouse=True)
+def _usage_store(tmp_path, monkeypatch):
+    """Every completion is recorded, so the store must not be the real one.
+
+    Patched where it is imported, as tests/test_identity.py does.
+    """
+    monkeypatch.setattr(usage, "user_config_dir", lambda *a, **k: str(tmp_path))
 
 
 # ---- the credential store ---------------------------------------------------

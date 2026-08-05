@@ -1,8 +1,10 @@
 """QThread workers so git + network calls never block the Qt event loop.
 
-Three workers:
+The workers:
 - ``GeneratorWorker``  : runs commit-message generation, emitting live progress.
+- ``ReviewWorker``     : reviews the marked files against a rule table.
 - ``AgentWorker``      : runs a repository audit, which can take minutes.
+- ``SetupWorker``      : installs LM Studio and downloads a model.
 - ``FunctionWorker``   : runs an arbitrary callable (e.g. listing models) off-thread.
 
 Each is a QObject meant to be moved onto a QThread; see ``run_worker`` for the
@@ -71,6 +73,55 @@ class GeneratorWorker(QObject):
             self.error.emit(str(exc))
 
 
+class ReviewWorker(QObject):
+    """Reviews the marked files against a rule table, one call each.
+
+    Shaped like ``GeneratorWorker`` down to the recorder: a review is dozens of
+    calls, and being able to read the one that produced a doubtful finding is
+    the whole reason the calls pane is on that tab too.
+    """
+
+    progress = pyqtSignal(str)
+    call = pyqtSignal(object)  # an llm_log.LlmCall, as each one comes back
+    finished = pyqtSignal(object)  # review.reviewer.ReviewRun
+    error = pyqtSignal(str)
+
+    def __init__(self, settings: Settings, repo: str, paths: list[str], table) -> None:
+        super().__init__()
+        self._settings = settings
+        self._repo = repo
+        self._paths = list(paths)
+        self._table = table
+        self._cancelled = False
+
+    def cancel(self) -> None:
+        self._cancelled = True
+
+    def run(self) -> None:
+        # Imported here rather than at module scope: the tray's quick action
+        # must not pay to load the review package to write a commit message.
+        from git_assistant.review import reviewer
+
+        try:
+            client = build_client(self._settings)
+            recorder = RecordingClient(client, on_call=self.call.emit)
+            run = reviewer.review(
+                self._settings,
+                recorder,
+                repo=self._repo,
+                paths=self._paths,
+                table=self._table,
+                progress=self.progress.emit,
+                is_cancelled=lambda: self._cancelled,
+            )
+            run.calls = list(recorder.calls)
+            self.finished.emit(run)
+        except CancelledError:
+            self.error.emit("Cancelled.")
+        except Exception as exc:  # surface any failure to the UI
+            self.error.emit(str(exc))
+
+
 class AgentWorker(QObject):
     """Runs one repository audit off-thread.
 
@@ -81,6 +132,7 @@ class AgentWorker(QObject):
 
     progress = pyqtSignal(str)
     progressPct = pyqtSignal(int)  # noqa: N815 - Qt signal naming
+    call = pyqtSignal(object)  # an llm_log.LlmCall, as each one comes back
     finished = pyqtSignal(object)  # agents.Report
     error = pyqtSignal(str)
 
@@ -113,6 +165,7 @@ class AgentWorker(QObject):
                 is_cancelled=lambda: self._cancelled,
                 fast=self._fast,
                 narrate=self._narrate,
+                on_call=self.call.emit,
             )
             self.finished.emit(report)
         except agents.CancelledError:

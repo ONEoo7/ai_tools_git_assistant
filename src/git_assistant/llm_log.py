@@ -26,6 +26,8 @@ SINGLE = "single-shot"
 MAP = "summarizing a chunk"
 REDUCE = "condensing notes"
 FINAL = "writing the message"
+REVIEW = "reviewing a file"
+NARRATE = "writing a section"
 
 
 @dataclass

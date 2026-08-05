@@ -3,7 +3,9 @@
 Pure functions: no git, no Qt, no provider.
 """
 
-from git_assistant.agents.base import Fact, Report, Section, Table
+from git_assistant.agents.base import AgentInfo, Fact, Report, Section, Table
+from git_assistant.config import Settings
+from git_assistant.llm import ModelInfo
 from git_assistant.agents.facts import (
     allowed_figures,
     facts_block,
@@ -195,3 +197,83 @@ def test_scale_words_are_caught_however_they_are_written():
     allowed = allowed_figures([Fact("k", "Files", "2,680")], [])
     bad = unsupported_figures("Two thousand six hundred eighty files.", allowed)
     assert "thousand" in [b.lower() for b in bad]
+
+
+# ---- every call the narration makes -----------------------------------------------
+class _Narratable:
+    """An agent that collects instantly and leaves one paragraph to write."""
+
+    info = AgentInfo("stub", "Stub", "collects nothing", "free")
+
+    def collect(self, ctx):
+        return Report(
+            # A real agent id, so the narrator has an outline to write to.
+            agent_id="size-audit",
+            title="Stub",
+            subtitle="demo",
+            generated_at="05 August 2026 12:00",
+            repo_path=ctx.repo,
+            sections=[
+                Section(
+                    number="1",
+                    title="Executive summary",
+                    slot="exec_summary",
+                    facts=[Fact("total", "Total", "1.0 GiB")],
+                )
+            ],
+        )
+
+
+class _Client:
+    def chat(self, model, system, user, max_tokens, temperature=0.2):
+        return "The repository holds 1.0 GiB."
+
+    def list_models(self):
+        return [ModelInfo(id="m", max_context_length=32768, loaded=True)]
+
+    def context_length_for(self, model_id):
+        return 32768
+
+
+def _stub_run(monkeypatch, **kw):
+    import git_assistant.agents as agents_pkg
+
+    monkeypatch.setattr(agents_pkg, "get", lambda agent_id: _Narratable())
+    monkeypatch.setattr(agents_pkg, "_sample_point", lambda repo: ("abc", "main", False))
+    settings = Settings(selected_model="m")
+    settings.save = lambda: None
+    return agents_pkg.run("stub", settings, repo="/x/demo", narrate=True, **kw)
+
+
+def test_a_listener_is_handed_every_call_the_narration_makes(monkeypatch):
+    """The Agents tab shows them, so a poor paragraph traces to one exchange."""
+    import git_assistant.agents as agents_pkg
+
+    monkeypatch.setattr(agents_pkg, "build_client", lambda s: _Client())
+    seen = []
+
+    report = _stub_run(monkeypatch, on_call=seen.append)
+
+    assert seen, "the tab has nothing to show without these"
+    assert all(call.phase == "writing a section" for call in seen)
+    assert report.sections[0].prose
+
+
+def test_nothing_pays_for_a_recorder_it_will_not_read(monkeypatch):
+    import git_assistant.agents as agents_pkg
+    from git_assistant.llm_log import RecordingClient
+
+    given = []
+    monkeypatch.setattr(agents_pkg, "build_client", lambda s: _Client())
+    real = agents_pkg.ModelRuntime
+
+    class Spy(real):
+        def __init__(self, settings, client):
+            given.append(isinstance(client, RecordingClient))
+            super().__init__(settings, client)
+
+    monkeypatch.setattr(agents_pkg, "ModelRuntime", Spy)
+
+    _stub_run(monkeypatch)
+
+    assert given == [False]

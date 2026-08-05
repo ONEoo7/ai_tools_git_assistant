@@ -21,6 +21,10 @@ Its first feature generates git commit messages; more Git helpers are planned.
 - **Metrics** window: count lines of code across selected repos or a scanned
   directory, broken down by file type (uses `git ls-files`, so `.gitignore` is
   respected and binaries are skipped).
+- **Code review** tab: check the files you have staged against a table of rules
+  kept in a spreadsheet (see below).
+- **LLM usage**: every completion is counted, per provider and per model, and
+  shown beside the connection settings (see below).
 
 ## Handling large diffs (context overflow)
 
@@ -174,6 +178,53 @@ source of truth, so the two cannot drift apart. The trade-off is that a **fresh
 clone** starts on your global identity again, because the pin lived in the old
 clone's `.git/config`; use git's own `includeIf` if you want a rule that survives
 re-cloning.
+
+## Code review against your own rules
+
+The **Code Review** tab checks staged files against a table of rules - the
+spreadsheet a team already keeps its standard in, with a `ruleID` column and a
+`ruleDetails` column.
+
+- **Import** a `.xlsx` under *Rules*. The header is looked for rather than
+  assumed, so a title row above it and columns nobody here cares about are both
+  fine; `Rule ID`, `rule_id` and `RULEID` all read the same. Tables can be
+  exported back to `.xlsx`, or exported and imported as JSON to move them
+  between machines (an import never overwrites a table you already have).
+- **Several named tables**, each repository picking the one it is reviewed
+  against. The choice is remembered per repository.
+- **Mark the files to review.** Everything staged starts marked; unmark what you
+  do not want checked. Files dropped by the noise filter are listed as
+  unreviewable rather than silently left out.
+- **One call per file**, run `parallel_calls` at a time, each carrying the rules,
+  that file's diff and the file as it will be after the change. When they do not
+  all fit, the content is dropped before the diff, and the diff before the rules
+  - and whatever was cut is said on the file's row, above the findings, and in
+  the prompt itself, so a partial review cannot be mistaken for a clean one.
+- **View LLM Calls**, the same pane as the commit tab: the exact prompt sent for
+  each file and exactly what came back. A reply that cannot be read as findings
+  is asked again once, then kept verbatim as a visible finding - never as a
+  clean file.
+- **Previous reviews** records every run per repository beside the settings file
+  (`review_runs/`, newest 20 kept, pinnable), so you can reopen one and see
+  whether a repository improved. The findings carry their rule text with them, so
+  a stored review still reads after the table is edited or deleted.
+
+## What each provider has been asked to do
+
+The **Connection & Model** tab carries a usage pane on the right: lifetime
+totals per provider and per model, and the last few hundred calls behind them --
+provider, model, when, input tokens, output tokens, total.
+
+The count is taken where the answer comes back, inside the provider clients, so
+a run started from the tray, from a tab or through the MCP server all count the
+same. The numbers are the provider's own wherever it reports them (every
+OpenAI-shaped API and Anthropic do); when a proxy reports none, this build
+counts the tokens itself and marks those rows with `~` rather than presenting an
+estimate as measured.
+
+The file is `llm_usage.json`, beside `settings.json`. The recent-calls list is
+capped at 500 rows; the totals are never pruned, because "how much has this
+cost" must not change when the log is trimmed.
 
 ## Install & run
 

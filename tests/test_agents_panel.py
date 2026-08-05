@@ -502,3 +502,29 @@ def test_a_failed_setup_says_which_step_and_why(qapp, with_repo):
 
     assert "Install LM Studio" in dlg.setup_status.text()
     assert "no winget" in dlg.setup_status.text()
+
+
+# ---- the shared right-hand pane -------------------------------------------------
+def test_previous_runs_and_the_calls_share_the_right_hand_pane(qapp, with_repo):
+    from git_assistant.ui.side_panel import CALLS_TAB, HISTORY_TAB
+
+    panel = AgentsPanel(with_repo)
+
+    assert panel.side_panel.tabs.tabText(0) == HISTORY_TAB
+    assert panel.side_panel.tabs.tabText(1) == CALLS_TAB
+    assert panel.side_panel.tabs.currentIndex() == 0
+    assert panel.side_panel.history is panel.runs_tree.parentWidget()
+
+
+def test_the_calls_that_wrote_the_report_are_shown(qapp, with_repo):
+    """Narration is what the model did here; a poor paragraph traces to a call."""
+    from git_assistant.llm_log import LlmCall
+
+    panel = AgentsPanel(with_repo)
+    panel.side_panel.calls.add_call(
+        LlmCall(1, "writing a section", "m", "sys", "the facts", 512, response="prose")
+    )
+
+    assert panel.calls_pane.calls_list.count() == 1
+    assert "writing a section" in panel.calls_pane.calls_list.item(0).text()
+    assert panel.side_panel.tabs.tabText(1).endswith("(1)")

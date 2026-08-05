@@ -6,8 +6,10 @@ template round-trips losslessly without a third-party TOML writer.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import re
 from collections.abc import Iterable
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
@@ -77,6 +79,11 @@ class RepoEntry:
     label: str = ""
     owner: str = ""  # remote owner/org, e.g. "ONEoo7" (for disambiguation)
     template: str = ""  # named template to use; "" means the default one
+    #: Named rule table this repository is code-reviewed against; "" means none
+    #: has been chosen. The tables themselves live in code_review_rules.json --
+    #: see git_assistant.review.rules -- because a rule set is far too large to
+    #: rewrite on every debounced settings save.
+    review_rules: str = ""
 
     def display(self) -> str:
         if self.label:
@@ -88,6 +95,27 @@ class RepoEntry:
 def norm_path(path: str) -> str:
     """Comparison form of a path: case- and separator-insensitive."""
     return os.path.normcase(os.path.normpath(path))
+
+
+_UNSAFE_IN_FILENAME = re.compile(r"[^A-Za-z0-9._-]")
+
+
+def repo_key(repo_path: str) -> str:
+    """A filename for a repository whose path may contain anything.
+
+    The hash is the identity -- taken from ``norm_path``, so ``D:\\Repo`` and
+    ``d:\\repo\\`` are one history, the same answer the repository tree gives.
+    The readable stem is for whoever opens the folder.
+
+    It lives here rather than in one of the stores that needs it because both
+    the agent runs and the code reviews are filed under it, and two
+    implementations would be free to disagree about which paths are one
+    repository.
+    """
+    norm = norm_path(repo_path)
+    digest = hashlib.sha256(norm.encode("utf-8")).hexdigest()[:16]
+    stem = _UNSAFE_IN_FILENAME.sub("_", Path(norm).name)[:32].strip("._") or "repo"
+    return f"{stem}-{digest}"
 
 
 @dataclass
@@ -177,6 +205,13 @@ class Settings:
     #: Recorded runs kept per repository and agent (0 keeps everything). The
     #: runs themselves live beside this file; see git_assistant.agents.history.
     agent_history_limit: int = 20
+    #: Generated commit messages kept per repository (0 keeps everything).
+    #: They live beside this file; see git_assistant.commit_history.
+    commit_history_limit: int = 20
+    # ---- Code Review tab ---------------------------------------------------
+    #: Recorded reviews kept per repository (0 keeps everything). Like the agent
+    #: runs, the reviews live beside this file; see git_assistant.review.history.
+    review_history_limit: int = 20
     # ---- MCP server --------------------------------------------------------
     #: Whether the command registered with a client offers the write tools.
     #: The flag lives in that command line, not here -- this only remembers
@@ -276,6 +311,39 @@ class Settings:
             if r.template == name:
                 r.template = ""
 
+    # ---- code-review rule tables -------------------------------------------
+    # Only the *assignment* lives here. The tables are in their own file, so
+    # these four methods keep the pointers honest when one is renamed or gone.
+    def review_table_for_repo(self, repo_path: str) -> str:
+        """Name of the rule table this repository is reviewed against."""
+        for r in self.repos:
+            if r.path == repo_path:
+                return r.review_rules
+        return ""
+
+    def set_repo_review_table(self, repo_path: str, name: str) -> None:
+        for r in self.repos:
+            if r.path == repo_path:
+                r.review_rules = name or ""
+                return
+
+    def rename_review_table(self, old: str, new: str) -> None:
+        """Repoint every repository that used ``old``.
+
+        Without this a rename leaves repositories pointing at a table that no
+        longer exists, and their next review runs against no rules at all --
+        which looks exactly like a clean review.
+        """
+        for r in self.repos:
+            if r.review_rules == old:
+                r.review_rules = new
+
+    def remove_review_table(self, name: str) -> None:
+        """Forget a deleted table; its repositories are left without one."""
+        for r in self.repos:
+            if r.review_rules == name:
+                r.review_rules = ""
+
     # ---- recency ordering (for the tray menu) ------------------------------
     def ordered_repos(self) -> list[RepoEntry]:
         """Repos ordered active-first, then most-recently used, then the rest."""
@@ -325,6 +393,9 @@ class Settings:
                 label=r.get("label", ""),
                 owner=r.get("owner", ""),
                 template=r.get("template", ""),
+                # Built field by field, so a new one is dropped on load unless
+                # it is named here -- silent, and only visible after a restart.
+                review_rules=r.get("review_rules", ""),
             )
             for r in repos
             if isinstance(r, dict) and r.get("path")

@@ -17,10 +17,8 @@ story when the index is lost or torn.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
-import re
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -37,7 +35,7 @@ from git_assistant.agents.base import (
     Status,
     Table,
 )
-from git_assistant.config import APP_NAME, norm_path
+from git_assistant.config import APP_NAME, repo_key
 
 SCHEMA_VERSION = 1
 RUNS_DIR = "agent_runs"
@@ -46,25 +44,10 @@ INDEX_FILE = "index.json"
 #: cannot evict every size audit.
 DEFAULT_LIMIT = 20
 
-_UNSAFE = re.compile(r"[^A-Za-z0-9._-]")
-
 
 # ---- where things live --------------------------------------------------------
 def runs_root() -> Path:
     return Path(user_config_dir(APP_NAME, appauthor=False)) / RUNS_DIR
-
-
-def repo_key(repo_path: str) -> str:
-    """A filename for a repository whose path may contain anything.
-
-    The hash is the identity -- taken from ``norm_path``, so ``D:\\Repo`` and
-    ``d:\\repo\\`` are one history, the same answer the repository tree gives.
-    The readable stem is for whoever opens the folder.
-    """
-    norm = norm_path(repo_path)
-    digest = hashlib.sha256(norm.encode("utf-8")).hexdigest()[:16]
-    stem = _UNSAFE.sub("_", Path(norm).name)[:32].strip("._") or "repo"
-    return f"{stem}-{digest}"
 
 
 def runs_dir(repo_path: str) -> Path:

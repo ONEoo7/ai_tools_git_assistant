@@ -5,7 +5,7 @@ import pytest
 from git_assistant.agents import narrator, prompts
 from git_assistant.agents.base import AgentContext, Fact, Report, Section, Table
 from git_assistant.agents.facts import facts_block
-from git_assistant.agents.model_runtime import ModelRuntime
+from git_assistant.model_runtime import ModelRuntime
 from git_assistant.config import Settings
 from git_assistant.llm import LLMError, ModelInfo
 

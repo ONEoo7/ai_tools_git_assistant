@@ -5,10 +5,10 @@ what the model actually has, reserve room for the answer, subtract the prompt
 scaffolding -- with none of its map-reduce machinery, which narration does not
 need: an audit is a handful of short sections written one after another.
 
-There is deliberately no cold-model warm-up here. That exists in the commit
-generator because it fans several requests out at once and a model still being
-loaded serves one and refuses the rest; these calls are serial, so the first one
-simply waits for the load like any other.
+``is_cold`` is here rather than in the caller because it comes out of the same
+listing the context window does, and one lookup answers both. Narration never
+asks: its calls are serial, so the first simply waits for the load like any
+other. A code review fans out, and asks.
 """
 
 from __future__ import annotations
@@ -51,6 +51,15 @@ class ModelRuntime:
         if configured and configured > 0:
             return min(configured, detected) if detected else configured
         return detected or DEFAULT_CONTEXT_WINDOW
+
+    def is_cold(self) -> bool:
+        """True when the server has the model available but not loaded yet.
+
+        A provider that cannot report this -- a hosted model, or a listing that
+        failed -- is treated as ready: there is nothing to wait for.
+        """
+        model = self._report()
+        return model is not None and not model.loaded
 
     def reserved_output(self) -> int:
         return reserved_output(self.context_window(), self.settings.safety_margin)

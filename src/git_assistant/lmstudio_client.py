@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import httpx
 
+from git_assistant import usage
 from git_assistant.llm import LLMError, ModelInfo
 
 
@@ -30,8 +31,12 @@ class LMStudioClient:
         list_timeout: float = 8.0,
         chat_timeout: float = 600.0,
         connect_timeout: float = 3.0,
+        provider_key: str = "lmstudio",
     ) -> None:
         self.base_url = base_url.rstrip("/")
+        # Which provider the recorded usage is filed under; see
+        # git_assistant.usage.
+        self.provider_key = provider_key
         # Listing models must fail fast so the UI never appears to hang.
         # Chat completions may legitimately take a long time to generate.
         self.list_timeout = list_timeout
@@ -153,9 +158,15 @@ class LMStudioClient:
             raise LMStudioError(f"chat completion failed: {exc}") from exc
 
         try:
-            return payload["choices"][0]["message"]["content"].strip()
+            text = payload["choices"][0]["message"]["content"].strip()
         except (KeyError, IndexError, AttributeError) as exc:
             raise LMStudioError(f"unexpected response shape: {payload}") from exc
+        # Recorded here rather than in the UI, so a run started from the tray,
+        # a tab or the MCP server all count the same.
+        usage.record_openai_response(
+            self.provider_key, model, payload, system=system, user=user, reply=text
+        )
+        return text
 
     def ping(self) -> list[ModelInfo]:
         """Test connectivity by listing models; raises LMStudioError on failure."""
