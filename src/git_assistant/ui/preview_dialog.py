@@ -23,6 +23,7 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
+    QSizePolicy,
     QSplitter,
     QTextEdit,
     QTreeWidget,
@@ -159,6 +160,18 @@ class CommitPanel(QWidget):
             self.provider_combo.addItem(provider.display(), provider.key)
         self.provider_combo.currentIndexChanged.connect(self._on_provider_changed)
 
+        # The provider is half of what a generation uses; the model is the
+        # other half, and it is chosen a tab away. Named here as the Agents and
+        # Code Review tabs name it, so the three read alike.
+        self.provider_label = QLabel("")
+        self.provider_label.setWordWrap(True)
+        self.provider_label.setStyleSheet("color: #888;")
+        # Ignored, not Preferred: a long model id must not widen the pane it
+        # sits in, which is the narrowest of the three.
+        self.provider_label.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
+        )
+
         self.status = QLabel("")
         self.status.setWordWrap(True)
         self.progress = QLabel("")
@@ -205,6 +218,7 @@ class CommitPanel(QWidget):
         repos_box.addWidget(self.template_combo)
         repos_box.addWidget(QLabel("Inference Providers:"))
         repos_box.addWidget(self.provider_combo)
+        repos_box.addWidget(self.provider_label)
 
         # ---- left pane: the commit message -------------------------------
         left = QWidget()
@@ -489,6 +503,10 @@ class CommitPanel(QWidget):
         self.provider_combo.blockSignals(True)
         self.provider_combo.setCurrentIndex(index if index >= 0 else 0)
         self.provider_combo.blockSignals(False)
+        # The combo names the provider; the model is the other half of what a
+        # generation will actually use, and it is chosen in Connection & Model.
+        model = self.settings.active_model() or "no model selected"
+        self.provider_label.setText(f"Model: {model}")
 
     def _on_provider_changed(self, _index: int) -> None:
         key = self.provider_combo.currentData()
@@ -496,6 +514,7 @@ class CommitPanel(QWidget):
             return
         self.settings.provider = key
         self.settings.save()
+        self.refresh_provider()  # the model line belongs to the new provider
 
     def _on_template_changed(self, _index: int) -> None:
         repo = self._current_repo_path()

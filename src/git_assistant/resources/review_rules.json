@@ -1,0 +1,182 @@
+{
+  "version": 1,
+  "note": "Rules shipped with the application. `since`/`until` are version ids from git_assistant.review.languages; an absent one means 'from the beginning' or 'to the end'. Ids are prefixed per language because rule ids are matched with punctuation stripped, so an unprefixed one would collide with a user's own.",
+  "tables": {
+    "c": {
+      "label": "C",
+      "schema": 1,
+      "rules": [
+        {"id": "C-01", "details": "Every allocation has exactly one owner and one matching free on every path out, including the error paths."},
+        {"id": "C-02", "details": "The return value of malloc, calloc, realloc, fopen and every function that can fail is checked before it is used."},
+        {"id": "C-03", "details": "No unbounded string function: use snprintf, strncpy or memcpy with an explicit length rather than sprintf, strcpy or gets."},
+        {"id": "C-04", "details": "An array index or pointer offset derived from input is bounds-checked against the real size, not against a constant that is assumed to match."},
+        {"id": "C-05", "details": "Anything visible outside its translation unit is declared in a header; anything not is static."},
+        {"id": "C-06", "details": "No variable-length array whose length comes from input: the stack has no bound to check against.", "since": "c99"},
+        {"id": "C-07", "details": "Declare variables at first use with an initialiser rather than uninitialised at the top of the function.", "since": "c99"},
+        {"id": "C-08", "details": "Use bool from stdbool.h and fixed-width types from stdint.h rather than int for flags and sizes.", "since": "c99"},
+        {"id": "C-09", "details": "Use _Static_assert for invariants that can be checked at compile time.", "since": "c11"}
+      ]
+    },
+    "cpp": {
+      "label": "C++",
+      "schema": 1,
+      "rules": [
+        {"id": "CPP-01", "details": "Ownership is expressed in the type: no raw new or delete, and no owning raw pointer, in code that could hold a smart pointer or a container.", "since": "c++11"},
+        {"id": "CPP-02", "details": "A class that manages a resource obeys the rule of five, or declares itself as owning nothing and defaults all five."},
+        {"id": "CPP-03", "details": "Pass by const reference or by value with a move, never by non-const reference for an input-only parameter."},
+        {"id": "CPP-04", "details": "Every catch takes a const reference, and no catch is empty without a comment saying why the failure is being swallowed."},
+        {"id": "CPP-05", "details": "Prefer the algorithm over the hand-written loop, and range-for over an index the body does not need.", "since": "c++11"},
+        {"id": "CPP-06", "details": "Use nullptr rather than NULL or 0 for pointers.", "since": "c++11"},
+        {"id": "CPP-07", "details": "Mark a function constexpr when it can be evaluated at compile time, and const when it does not change the object.", "since": "c++11"},
+        {"id": "CPP-08", "details": "Use std::optional or std::variant instead of a sentinel value or an out parameter with a bool return.", "since": "c++17"},
+        {"id": "CPP-09", "details": "Mark a return value the caller must not ignore with [[nodiscard]].", "since": "c++17"},
+        {"id": "CPP-10", "details": "Constrain a template with a concept rather than with SFINAE or an unchecked duck-typed parameter.", "since": "c++20"}
+      ]
+    },
+    "csharp": {
+      "label": "C#",
+      "schema": 1,
+      "rules": [
+        {"id": "CS-01", "details": "Anything implementing IDisposable is disposed, through using or a using declaration, on every path."},
+        {"id": "CS-02", "details": "An async method returns Task or Task<T>, never void except for an event handler, and is awaited by its caller."},
+        {"id": "CS-03", "details": "No .Result or .Wait() on a Task: await it."},
+        {"id": "CS-04", "details": "A catch block either handles the failure or rethrows with `throw;`, never `throw ex;`, which discards the stack trace."},
+        {"id": "CS-05", "details": "Use string interpolation rather than concatenation or string.Format.", "since": "cs6"},
+        {"id": "CS-06", "details": "Use the null-conditional and null-coalescing operators rather than a chain of null checks.", "since": "cs6"},
+        {"id": "CS-07", "details": "A reference that can be null is declared nullable, and the compiler's nullable warnings are not suppressed without a comment.", "since": "cs8"},
+        {"id": "CS-08", "details": "Use a record for a type that is a value rather than a class with hand-written equality.", "since": "cs9"},
+        {"id": "CS-09", "details": "A long-running or IO-bound API takes a CancellationToken and passes it on."}
+      ]
+    },
+    "css": {
+      "label": "CSS",
+      "schema": 1,
+      "rules": [
+        {"id": "CSS-01", "details": "No !important except to override a third-party stylesheet, and then with a comment saying which."},
+        {"id": "CSS-02", "details": "No id selector for styling, and no selector more than three levels deep."},
+        {"id": "CSS-03", "details": "Colours, spacing and fonts come from custom properties rather than being repeated as literals.", "since": "css3"},
+        {"id": "CSS-04", "details": "Layout uses flexbox or grid rather than floats or absolute positioning.", "since": "css3"},
+        {"id": "CSS-05", "details": "Any colour pair must keep its contrast ratio; a colour is not the only thing distinguishing two states."},
+        {"id": "CSS-06", "details": "Sizes that must respond to the user's settings use rem or em rather than px."},
+        {"id": "CSS-07", "details": "An animation or transition is disabled under prefers-reduced-motion.", "since": "css3"},
+        {"id": "CSS-08", "details": "Use logical properties (inline/block) rather than left/right where the text direction can change.", "since": "css2020"}
+      ]
+    },
+    "html": {
+      "label": "HTML",
+      "schema": 1,
+      "rules": [
+        {"id": "HTML-01", "details": "Every img has an alt attribute; a decorative image has an empty one."},
+        {"id": "HTML-02", "details": "Every form control has a label associated with it, by for/id or by wrapping."},
+        {"id": "HTML-03", "details": "Interactive elements are buttons and anchors, not divs with click handlers."},
+        {"id": "HTML-04", "details": "Headings descend one level at a time and are not chosen for their size."},
+        {"id": "HTML-05", "details": "Use the semantic element (nav, main, header, footer, section) rather than a div with a class saying the same thing.", "since": "html5"},
+        {"id": "HTML-06", "details": "An external link that opens in a new tab carries rel=\"noopener\"."},
+        {"id": "HTML-07", "details": "No inline style or event handler attribute; both belong in a stylesheet or a script."},
+        {"id": "HTML-08", "details": "The document declares its language on the html element."}
+      ]
+    },
+    "java": {
+      "label": "Java",
+      "schema": 1,
+      "rules": [
+        {"id": "JAVA-01", "details": "Anything implementing AutoCloseable is closed with try-with-resources, not in a finally block."},
+        {"id": "JAVA-02", "details": "No empty catch, and no catch of Exception or Throwable where a specific type would do."},
+        {"id": "JAVA-03", "details": "A method that can return nothing returns Optional rather than null."},
+        {"id": "JAVA-04", "details": "Collections returned from a public method are unmodifiable, or documented as owned by the caller."},
+        {"id": "JAVA-05", "details": "equals and hashCode are defined together or not at all."},
+        {"id": "JAVA-06", "details": "Use var for a local whose type the initialiser already states, and not otherwise.", "since": "java11"},
+        {"id": "JAVA-07", "details": "Use a record for a data carrier rather than a class with getters and hand-written equality.", "since": "java17"},
+        {"id": "JAVA-08", "details": "Use a switch expression with exhaustive cases rather than a switch statement with fall-through.", "since": "java17"},
+        {"id": "JAVA-09", "details": "No string concatenation inside a loop; use StringBuilder or a stream collector."}
+      ]
+    },
+    "javascript": {
+      "label": "JavaScript",
+      "schema": 1,
+      "rules": [
+        {"id": "JS-01", "details": "No var: use const, and let only where the binding really changes.", "since": "es2015"},
+        {"id": "JS-02", "details": "Use === and !== rather than == and !=."},
+        {"id": "JS-03", "details": "Every promise is awaited or returned; no floating promise and no unhandled rejection.", "since": "es2017"},
+        {"id": "JS-04", "details": "A catch either handles the failure or rethrows; it never swallows it silently."},
+        {"id": "JS-05", "details": "No implicit global: every binding is declared."},
+        {"id": "JS-06", "details": "Use template literals rather than string concatenation.", "since": "es2015"},
+        {"id": "JS-07", "details": "Use optional chaining and nullish coalescing rather than a chain of truthiness checks, which treat 0 and \"\" as missing.", "since": "es2020"},
+        {"id": "JS-08", "details": "No console.* left in code that ships."},
+        {"id": "JS-09", "details": "Nothing derived from user input is passed to innerHTML, eval or a Function constructor."}
+      ]
+    },
+    "python": {
+      "label": "Python",
+      "schema": 1,
+      "rules": [
+        {"id": "PY-01", "details": "No bare `except:` and no `except Exception` without either handling the failure or re-raising it."},
+        {"id": "PY-02", "details": "Every public function, class and module carries a docstring saying what it is for."},
+        {"id": "PY-03", "details": "No mutable default argument: use None and build the default inside."},
+        {"id": "PY-04", "details": "Files are opened in a with block, never left to the garbage collector."},
+        {"id": "PY-05", "details": "No print() in library code: report through a logger or the caller's progress callback."},
+        {"id": "PY-06", "details": "Use f-strings rather than % formatting or .format().", "since": "py36"},
+        {"id": "PY-07", "details": "Public functions carry type hints on their parameters and return value.", "since": "py36"},
+        {"id": "PY-08", "details": "Use pathlib rather than os.path string juggling for paths."},
+        {"id": "PY-09", "details": "Use the built-in generics and the | union syntax rather than typing.List and typing.Optional.", "since": "py310"},
+        {"id": "PY-10", "details": "A subprocess is called with an argument list and never with shell=True on anything derived from input."}
+      ]
+    },
+    "rust": {
+      "label": "Rust",
+      "schema": 1,
+      "rules": [
+        {"id": "RS-01", "details": "No unwrap() or expect() outside tests and main; return a Result and let the caller decide."},
+        {"id": "RS-02", "details": "Errors are propagated with ? and carry context rather than being converted to a string."},
+        {"id": "RS-03", "details": "Any unsafe block is as small as it can be and carries a comment stating the invariant that makes it sound."},
+        {"id": "RS-04", "details": "A public function takes &str or &[T] rather than &String or &Vec<T>."},
+        {"id": "RS-05", "details": "No clone() to satisfy the borrow checker where a reference or a restructure would do."},
+        {"id": "RS-06", "details": "Public items are documented, and the crate denies missing docs where that is the standard."},
+        {"id": "RS-07", "details": "Use `dyn Trait` explicitly for trait objects.", "since": "rust2018"},
+        {"id": "RS-08", "details": "Prefer an iterator chain to an index loop, and avoid collecting into a Vec that is immediately iterated."},
+        {"id": "RS-09", "details": "Use let-else for the early-return shape rather than a match whose other arm only returns.", "since": "rust2021"}
+      ]
+    },
+    "typescript": {
+      "label": "TypeScript",
+      "schema": 1,
+      "rules": [
+        {"id": "TS-01", "details": "No `any`, explicit or implicit: use unknown and narrow it, or write the type."},
+        {"id": "TS-02", "details": "No non-null assertion (!) where a check or optional chaining would do."},
+        {"id": "TS-03", "details": "No @ts-ignore without an explanation and a linked issue; prefer @ts-expect-error.", "since": "ts3"},
+        {"id": "TS-04", "details": "Every exported function states its return type rather than leaving it inferred."},
+        {"id": "TS-05", "details": "A value with a fixed set of members is a union of literals or an as-const object, not a numeric enum."},
+        {"id": "TS-06", "details": "Every promise is awaited or returned; no floating promise."},
+        {"id": "TS-07", "details": "Data crossing a boundary (network, storage, message) is validated at runtime, not just typed."},
+        {"id": "TS-08", "details": "Use satisfies to check a literal against a type without widening it.", "since": "ts5"}
+      ]
+    },
+    "bash": {
+      "label": "Shell",
+      "schema": 1,
+      "rules": [
+        {"id": "SH-01", "details": "The script sets a failure mode at the top: set -euo pipefail, or an explicit check after every command that can fail."},
+        {"id": "SH-02", "details": "Every expansion is quoted: \"$var\", \"$@\", \"${array[@]}\"."},
+        {"id": "SH-03", "details": "Command substitution uses $(...) rather than backticks."},
+        {"id": "SH-04", "details": "A path built from input is not passed to rm, mv or a redirect without being checked for emptiness."},
+        {"id": "SH-05", "details": "Use [[ ]] rather than [ ] for tests.", "since": "bash4"},
+        {"id": "SH-06", "details": "A temporary file is made with mktemp and removed on exit through a trap."},
+        {"id": "SH-07", "details": "No parsing of ls output; use a glob or find -print0 with read -d ''."}
+      ]
+    },
+    "powershell": {
+      "label": "PowerShell",
+      "schema": 1,
+      "rules": [
+        {"id": "PS-01", "details": "Cmdlets and functions are named Verb-Noun with an approved verb."},
+        {"id": "PS-02", "details": "A function that changes state declares [CmdletBinding(SupportsShouldProcess)] and honours -WhatIf."},
+        {"id": "PS-03", "details": "$ErrorActionPreference is set, or every call that can fail is checked: a non-terminating error otherwise passes silently."},
+        {"id": "PS-04", "details": "Output is returned as objects; Write-Host is used only for text meant for a human."},
+        {"id": "PS-05", "details": "Parameters are typed and validated with attributes rather than checked in the body."},
+        {"id": "PS-06", "details": "No Invoke-Expression on anything derived from input."},
+        {"id": "PS-07", "details": "Paths are joined with Join-Path rather than by string concatenation."},
+        {"id": "PS-08", "details": "Use the ternary and null-coalescing operators rather than a full if for a simple choice.", "since": "ps7"}
+      ]
+    }
+  }
+}

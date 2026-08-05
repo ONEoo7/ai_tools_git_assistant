@@ -124,3 +124,12 @@ def test_the_console_companion_refuses_to_open_a_tray_icon(tmp_path):
     from git_assistant.__main__ import _entry
 
     assert _entry(["GitAssistantMcp.exe"], "GitAssistantMcp.exe") == 2
+
+
+@pytest.mark.parametrize("spec", (*ONEDIR_SPECS, "git-assistant.spec"))
+def test_every_build_ships_the_review_rules(spec):
+    """Read at runtime, so a build without them reviews against nothing."""
+    text = _read(spec)
+    app = text[: text.index("mcp_a = Analysis")] if "mcp_a = Analysis" in text else text
+    assert "review_rules.json" in app
+    assert '"git_assistant/resources"' in app

@@ -26,12 +26,18 @@ REVIEW_SYSTEM = (
     "lines you are asked for."
 )
 
+#: Said when the file's language and version are known. The second sentence is
+#: load-bearing: told "this is C++17" without it, a model reports "auto return
+#: types need C++14" under an invented rule id, turning a rules review into a
+#: free-form one.
+LANGUAGE_LINE = "Language: {language}{version}. Judge only against the rules listed above.\n"
+
 REVIEW_TEMPLATE = """\
 Rules to check, one per line as <ruleID>: <ruleDetails>
 {rules}
 
 File: {path}
-{notes}
+{language}{notes}
 What changed in this file (unified diff):
 {diff}
 

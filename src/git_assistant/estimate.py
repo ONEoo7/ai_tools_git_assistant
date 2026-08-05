@@ -161,8 +161,13 @@ def for_commit(settings: Settings) -> Estimate:
 
 
 # ---- reviewing files ----------------------------------------------------------------
-def for_review(settings: Settings, repo: str, paths: list[str], table) -> Estimate:
-    """One call per marked file, sized with the reviewer's own prompt builder."""
+def for_review(settings: Settings, plan) -> Estimate:
+    """One call per reviewable file in ``plan``, priced with its own rules.
+
+    Takes the plan rather than a list of paths and a table: the window that asks
+    for confirmation shows that plan, and pricing anything else would mean the
+    two could disagree about what is going to happen.
+    """
     from git_assistant.review import prompts as review_prompts
     from git_assistant.review import reviewer
 
@@ -171,79 +176,86 @@ def for_review(settings: Settings, repo: str, paths: list[str], table) -> Estima
         model=settings.active_model(),
         provider=settings.provider,
     )
-    if not repo:
+    if plan is None or not plan.repo:
         out.problem = "No repository is selected."
         return out
-    if table is None or not table.rules:
-        out.problem = "The selected rule table has no rules."
-        return out
-    if not paths:
-        out.problem = "No files are marked for review."
+
+    chosen = plan.reviewable()
+    if not chosen:
+        out.problem = _nothing_to_review(plan)
         return out
 
     context = _context(settings)
-    workers = max(1, min(effective_parallel(settings, context), len(paths)))
+    workers = max(1, min(effective_parallel(settings, context), len(chosen)))
     share = context // workers
-    # Sized from the marked count, as the run does before it knows which of them
-    # survive; a file dropped after that only leaves more room, never less.
     scaffold = review_prompts.REVIEW_SYSTEM + review_prompts.render(
-        review_prompts.REVIEW_TEMPLATE, rules="", path="", notes="", diff="", content=""
+        review_prompts.REVIEW_TEMPLATE,
+        rules="",
+        path="",
+        language="",
+        notes="",
+        diff="",
+        content="",
     )
     budget = input_budget(share, reviewer.REVIEW_OUTPUT_TOKENS, estimate_tokens(scaffold))
 
-    try:
-        candidates = {
-            c.path: c
-            for c in reviewer.staged_files(repo, settings.diff_mode, settings.ignore_globs)
-        }
-    except git_ops.GitError as exc:
-        out.problem = str(exc)
-        return out
-
-    # The same set the run itself will take: a marked path that is no longer in
-    # the diff, or is filtered as noise, is not a call.
-    chosen = [candidates[p] for p in paths if p in candidates and candidates[p].reviewable]
-    if not chosen:
-        out.problem = (
-            "None of the marked files are in the current diff. Refresh, and "
-            "check they are staged."
-        )
-        return out
-
     total_in = 0
     partial = 0
-    for candidate in chosen:
-        path = candidate.path
+    for file in chosen:
         built = reviewer.build_prompt(
-            path=path,
-            diff=candidate.diff,
-            content=git_ops.file_content(repo, path, settings.diff_mode),
-            table=table,
+            path=file.path,
+            diff=file.candidate.diff,
+            content=git_ops.file_content(plan.repo, file.path, settings.diff_mode),
+            table=file.table,
             budget=budget,
+            language=file.language_label(),
+            version=file.version_label(),
         )
         total_in += estimate_tokens(review_prompts.REVIEW_SYSTEM) + estimate_tokens(built.user)
         if built.diff_truncated or not built.content_sent or built.content_truncated:
             partial += 1
 
+    rules = sum(len(f.table.rules) for f in chosen if f.table)
     out.calls = len(chosen)
     out.input_tokens = total_in
     out.output_tokens = len(chosen) * reviewer.REVIEW_OUTPUT_TOKENS
     out.lines = [
         f"One call per marked file: {len(chosen)} file(s), {workers} at a time.",
-        f"Each carries the {len(table.rules)} rule(s), the file's diff and the "
-        "file itself.",
+        f"Each carries its own rules ({rules} in total across the files), the "
+        "file's diff and the file itself.",
         f"Room reserved for the findings: up to "
         f"{reviewer.REVIEW_OUTPUT_TOKENS:,} tokens per file.",
     ]
+    if len(plan.tables()) > 1:
+        out.lines.append(f"Rule sets in use: {', '.join(plan.tables())}.")
     if partial:
         out.lines.append(
             f"{partial} file(s) will not fit whole and are cut to the budget."
+        )
+    skipped = plan.skipped()
+    if skipped:
+        out.lines.append(
+            f"{len(skipped)} marked file(s) will not be reviewed and cost nothing."
         )
     out.lines.append(
         "A file whose answer cannot be read is asked once more, which is one "
         "extra call each."
     )
     return out
+
+
+def _nothing_to_review(plan) -> str:
+    """Why a plan has no calls in it, in the words of the plan itself."""
+    if not plan.files:
+        return (
+            "None of the marked files are in the current diff. Refresh, and "
+            "check they are staged."
+        )
+    reasons = {f.skipped for f in plan.skipped() if f.skipped}
+    listed = "; ".join(sorted(reasons))
+    return f"Nothing here can be reviewed: {listed}." if listed else (
+        "No files are marked for review."
+    )
 
 
 # ---- auditing a repository ------------------------------------------------------------

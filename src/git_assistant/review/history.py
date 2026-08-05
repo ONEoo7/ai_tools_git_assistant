@@ -159,6 +159,12 @@ def _file(data: dict) -> FileReview:
         content_truncated=bool(data.get("content_truncated", False)),
         content_sent=bool(data.get("content_sent", True)),
         rules_sent=int(data.get("rules_sent", 0) or 0),
+        # Named here or dropped on load: this rebuild is field by field, and a
+        # missing one is silent until a restart.
+        rules_total=int(data.get("rules_total", 0) or 0),
+        table_name=str(data.get("table_name", "")),
+        language=str(data.get("language", "")),
+        version=str(data.get("version", "")),
         retried=bool(data.get("retried", False)),
         seconds=float(data.get("seconds", 0.0) or 0.0),
     )

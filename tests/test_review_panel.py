@@ -112,10 +112,15 @@ def test_warns_when_no_repositories(qapp, settings):
     assert not panel.review_btn.isEnabled()
 
 
-def test_review_is_refused_until_there_is_a_rule_table(qapp, with_repo, staged):
+def test_the_shipped_rules_are_offered_when_the_user_has_none_of_their_own(
+    qapp, with_repo, staged
+):
+    """A fresh install can review straight away, against what ships with it."""
     panel = ReviewPanel(with_repo)
+
     assert panel.files_list.count() == 3
-    assert not panel.review_btn.isEnabled()
+    assert panel.profile_combo.currentData() == "Built-in defaults"
+    assert panel.review_btn.isEnabled()
 
 
 def test_nothing_staged_says_so(qapp, with_repo, monkeypatch):
@@ -197,46 +202,60 @@ def test_review_is_refused_when_no_files_are_marked(qapp, with_repo, staged, mon
 
 
 # ---- rule tables --------------------------------------------------------------------
-def test_the_table_a_repository_is_assigned_is_the_one_selected(
+def test_a_repository_that_had_one_table_keeps_reviewing_with_it(
     qapp, with_repo, staged, monkeypatch
 ):
-    def two_tables():
-        store = RuleStore()
-        store.add(_table("Python"))
-        store.add(_table("Go"))
-        return store
-
-    monkeypatch.setattr(RuleStore, "load", staticmethod(two_tables))
-    with_repo.repos[0].review_rules = "Go"
+    """The migration: the same rules for every file, as before profiles."""
+    monkeypatch.setattr(RuleStore, "load", staticmethod(_with_table))
+    with_repo.repos[0].review_rules = "House rules"
 
     panel = ReviewPanel(with_repo)
 
-    assert panel.rules_combo.currentText() == "Go"
+    assert panel.profile_combo.currentData() == "House rules (imported)"
     assert panel.rules_table.rowCount() == 2
+    profile = panel._current_profile()
+    assert [e.language for e in profile.languages] == ["*"]
 
 
-def test_choosing_a_table_is_remembered_for_that_repository_only(
+def test_the_profile_a_repository_is_assigned_is_the_one_selected(
     qapp, with_repo, staged, monkeypatch
 ):
-    def two_tables():
-        store = RuleStore()
-        store.add(_table("Python"))
-        store.add(_table("Go"))
-        return store
+    from git_assistant.review.profiles import LanguageRules, Profile, Selection
 
-    monkeypatch.setattr(RuleStore, "load", staticmethod(two_tables))
+    monkeypatch.setattr(RuleStore, "load", staticmethod(_with_table))
+    with_repo.review_profiles = [
+        Profile("Mine", [LanguageRules("python", selections=[Selection("builtin:python")])]),
+        Profile("Theirs", [LanguageRules("rust", selections=[Selection("builtin:rust")])]),
+    ]
+    with_repo.repos[0].review_profile = "Theirs"
+
     panel = ReviewPanel(with_repo)
 
-    panel.rules_combo.setCurrentIndex(panel.rules_combo.findText("Go"))
+    assert panel.profile_combo.currentData() == "Theirs"
 
-    assert with_repo.review_table_for_repo("/x/demo") == "Go"
-    assert with_repo.review_table_for_repo("/x/other") == ""
+
+def test_choosing_a_profile_is_remembered_for_that_repository_only(
+    qapp, with_repo, staged, monkeypatch
+):
+    from git_assistant.review.profiles import LanguageRules, Profile, Selection
+
+    monkeypatch.setattr(RuleStore, "load", staticmethod(_with_table))
+    with_repo.review_profiles = [
+        Profile("Mine", [LanguageRules("python", selections=[Selection("builtin:python")])])
+    ]
+    panel = ReviewPanel(with_repo)
+
+    panel.profile_combo.setCurrentIndex(panel.profile_combo.findData("Mine"))
+
+    assert with_repo.review_profile_for_repo("/x/demo") == "Mine"
+    assert with_repo.review_profile_for_repo("/x/other") == ""
 
 
 def test_renaming_a_table_repoints_the_repositories_that_used_it(
     qapp, with_repo, staged, monkeypatch
 ):
     monkeypatch.setattr(RuleStore, "load", staticmethod(_with_table))
+    with_repo.repos[0].review_rules = "House rules"
     panel = ReviewPanel(with_repo)
     assert with_repo.review_table_for_repo("/x/demo") == "House rules"
 
@@ -246,8 +265,15 @@ def test_renaming_a_table_repoints_the_repositories_that_used_it(
     )
     panel._on_rename_table()
 
-    assert panel.rules_combo.currentText() == "Team rules"
     assert with_repo.review_table_for_repo("/x/demo") == "Team rules"
+    # And every profile that named it, or its next review runs against nothing.
+    refs = [
+        s.ref
+        for p in with_repo.review_profiles
+        for e in p.languages
+        for s in e.selections
+    ]
+    assert "table:Team rules" in refs
 
 
 def test_deleting_a_table_leaves_its_repositories_without_one(
@@ -259,9 +285,16 @@ def test_deleting_a_table_leaves_its_repositories_without_one(
     _confirm(monkeypatch)
     panel._on_delete_table()
 
-    assert panel.rules_combo.count() == 0
     assert with_repo.review_table_for_repo("/x/demo") == ""
-    assert not panel.review_btn.isEnabled()
+    # The profile that used it keeps its name and loses the pointer, so the
+    # tab says "no rules for python" rather than silently checking nothing.
+    refs = [
+        s.ref
+        for p in with_repo.review_profiles
+        for e in p.languages
+        for s in e.selections
+    ]
+    assert "table:House rules" not in refs
 
 
 def test_the_rules_grid_shows_what_will_be_sent(qapp, with_repo, staged, monkeypatch):
@@ -439,26 +472,27 @@ def test_previous_runs_is_the_default_half_of_the_right_hand_pane(qapp, with_rep
     assert panel.side_panel.tabs.currentIndex() == 0
 
 
-def test_the_middle_pane_is_findings_and_rules_only(qapp, with_repo, staged):
+def test_the_middle_pane_is_findings_the_profile_and_the_rules(qapp, with_repo, staged):
     """The reviews moved out to the right, where the other tabs keep theirs."""
     panel = ReviewPanel(with_repo)
     assert [panel.tabs.tabText(i) for i in range(panel.tabs.count())] == [
         "Findings",
+        "Profile",
         "Rules",
     ]
 
 
-# ---- asked before anything is sent ------------------------------------------------
+# ---- the window shown before anything is sent -------------------------------------
 def _decide(monkeypatch, answer, seen=None):
-    def confirm(parent, est):
+    def confirm(parent, plan, estimate, **kw):
         if seen is not None:
-            seen.append(est)
+            seen.append((plan, estimate))
         return answer
 
-    monkeypatch.setattr("git_assistant.ui.review_panel.confirm", confirm)
+    monkeypatch.setattr("git_assistant.ui.review_panel.confirm_plan", confirm)
 
 
-def test_reviewing_asks_what_it_will_send_first(qapp, with_repo, staged, monkeypatch):
+def test_reviewing_shows_the_files_and_the_rules_first(qapp, with_repo, staged, monkeypatch):
     monkeypatch.setattr(RuleStore, "load", staticmethod(_with_table))
     seen = []
     _decide(monkeypatch, True, seen)
@@ -470,8 +504,11 @@ def test_reviewing_asks_what_it_will_send_first(qapp, with_repo, staged, monkeyp
 
     panel._on_review()
 
-    assert seen and seen[0].feature == "Code review"
-    assert seen[0].calls == 2, "one per marked file"
+    assert seen, "the window is shown before the first call"
+    plan, estimate = seen[0]
+    assert [f.path for f in plan.reviewable()] == ["app.py", "util.py"]
+    assert estimate.feature == "Code review"
+    assert estimate.calls == 2, "one per marked file"
     assert started
 
 
@@ -488,3 +525,19 @@ def test_declining_a_review_sends_nothing(qapp, with_repo, staged, monkeypatch):
 
     assert started == []
     assert panel.review_btn.isEnabled()
+
+
+def test_the_run_is_given_exactly_the_plan_that_was_shown(qapp, with_repo, staged, monkeypatch):
+    """The window must not be able to list a file the run then skips."""
+    monkeypatch.setattr(RuleStore, "load", staticmethod(_with_table))
+    seen = []
+    _decide(monkeypatch, True, seen)
+    started = []
+    monkeypatch.setattr(
+        "git_assistant.ui.review_panel.run_worker", lambda w: started.append(w)
+    )
+    panel = ReviewPanel(with_repo)
+
+    panel._on_review()
+
+    assert started[0]._plan is seen[0][0]

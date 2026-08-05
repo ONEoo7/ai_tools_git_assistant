@@ -21,6 +21,7 @@ import httpx
 from platformdirs import user_config_dir
 
 from git_assistant.config import APP_NAME
+from git_assistant.packaged import data_file
 
 #: Where the trusted root shipped with this build lives. Embedded rather than
 #: fetched: fetching it would open a trust-on-first-use window in which a
@@ -457,17 +458,11 @@ def install_id() -> str:
 def _packaged_file(name: str) -> Path | None:
     """A data file shipped beside this module, wherever it ended up.
 
-    PyInstaller puts `--add-data` under `sys._MEIPASS`, so the frozen location
-    is checked first and the source tree second. One place, because getting it
-    right for the root and wrong for anything else is how a build ends up
-    behaving differently from the checkout it was made from.
+    The lookup itself lives in ``git_assistant.packaged``: getting it right for
+    the trust root and wrong for anything else is how a build ends up behaving
+    differently from the checkout it was made from.
     """
-    candidates = [Path(__file__).resolve().parent / name]
-    frozen = getattr(sys, "_MEIPASS", None)
-    if frozen:
-        candidates.insert(0, Path(frozen) / "git_assistant" / "updating" / name)
-
-    return next((c for c in candidates if c.is_file()), None)
+    return data_file("updating", name)
 
 
 def packaged_update_url() -> str:

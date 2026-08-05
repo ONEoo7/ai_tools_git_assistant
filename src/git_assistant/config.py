@@ -83,7 +83,13 @@ class RepoEntry:
     #: has been chosen. The tables themselves live in code_review_rules.json --
     #: see git_assistant.review.rules -- because a rule set is far too large to
     #: rewrite on every debounced settings save.
+    #:
+    #: Superseded by `review_profile`, and kept: it is what a downgrade reads,
+    #: and what the profile a repository is migrated to is built from.
     review_rules: str = ""
+    #: Named review profile: which rules apply to which language at which
+    #: version. See git_assistant.review.profiles.
+    review_profile: str = ""
 
     def display(self) -> str:
         if self.label:
@@ -163,6 +169,18 @@ def build_repo_tree(entries: Iterable[RepoEntry]) -> list[RepoNode]:
     return roots
 
 
+def _profiles_from(raw: object) -> list:
+    """Review profiles, rebuilt by the module that owns their shape.
+
+    Imported here rather than at module scope: `review.profiles` reads the
+    shipped rules, and loading settings must not pay for that.
+    """
+    from git_assistant.review.profiles import Profile
+
+    found = [Profile.from_dict(entry) for entry in raw] if isinstance(raw, list) else []
+    return [p for p in found if p is not None]
+
+
 @dataclass
 class Settings:
     """All persisted user configuration."""
@@ -212,6 +230,10 @@ class Settings:
     #: Recorded reviews kept per repository (0 keeps everything). Like the agent
     #: runs, the reviews live beside this file; see git_assistant.review.history.
     review_history_limit: int = 20
+    #: Review profiles, as prompt templates are: a few hundred bytes of
+    #: pointers, so they belong in this file rather than in a store of their
+    #: own. The rules they point at do not; see git_assistant.review.rules.
+    review_profiles: list = field(default_factory=list)
     # ---- MCP server --------------------------------------------------------
     #: Whether the command registered with a client offers the write tools.
     #: The flag lives in that command line, not here -- this only remembers
@@ -314,6 +336,23 @@ class Settings:
     # ---- code-review rule tables -------------------------------------------
     # Only the *assignment* lives here. The tables are in their own file, so
     # these four methods keep the pointers honest when one is renamed or gone.
+    def review_profile_for_repo(self, repo_path: str) -> str:
+        """Name of the profile this repository is reviewed with."""
+        for r in self.repos:
+            if r.path == repo_path:
+                return r.review_profile
+        return ""
+
+    def set_repo_review_profile(self, repo_path: str, name: str) -> None:
+        for r in self.repos:
+            if r.path == repo_path:
+                r.review_profile = name or ""
+                return
+
+    def review_profile(self, name: str):
+        """A profile by name, or ``None``."""
+        return next((p for p in self.review_profiles if p.name == name), None)
+
     def review_table_for_repo(self, repo_path: str) -> str:
         """Name of the rule table this repository is reviewed against."""
         for r in self.repos:
@@ -367,6 +406,9 @@ class Settings:
         data = asdict(self)
         data["repos"] = [asdict(r) for r in self.repos]
         data["templates"] = [asdict(t) for t in self.templates]
+        # Written by the profile itself: its shape is nested, and config.py
+        # should not have to know it.
+        data["review_profiles"] = [p.to_dict() for p in self.review_profiles]
         return data
 
     @classmethod
@@ -396,6 +438,7 @@ class Settings:
                 # Built field by field, so a new one is dropped on load unless
                 # it is named here -- silent, and only visible after a restart.
                 review_rules=r.get("review_rules", ""),
+                review_profile=r.get("review_profile", ""),
             )
             for r in repos
             if isinstance(r, dict) and r.get("path")
@@ -405,6 +448,7 @@ class Settings:
             for t in (clean.get("templates") or [])
             if isinstance(t, dict) and t.get("name")
         ]
+        clean["review_profiles"] = _profiles_from(clean.get("review_profiles"))
         return cls(**clean)
 
     # ---- load / save -------------------------------------------------------

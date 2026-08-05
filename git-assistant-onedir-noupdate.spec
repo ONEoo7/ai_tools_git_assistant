@@ -19,6 +19,9 @@ from pathlib import Path
 
 ROOT = Path(SPECPATH)
 ICON = ROOT / "src" / "git_assistant" / "resources" / "icon.ico"
+# The rules the Code Review tab ships with. Read at runtime through
+# git_assistant.packaged.data_file, so it has to land beside the icon.
+REVIEW_RULES = ROOT / "src" / "git_assistant" / "resources" / "review_rules.json"
 
 sys.path.insert(0, str(ROOT / "tools"))
 from win_version_info import read_version, version_resource  # noqa: E402
@@ -50,7 +53,10 @@ a = Analysis(
     # No root.json and no update_url.txt: the trust root and the address only
     # mean anything to the updater, and shipping them in a build that cannot
     # update would suggest it can.
-    datas=[(str(ICON), "git_assistant/resources")],
+    datas=[
+        (str(ICON), "git_assistant/resources"),
+        (str(REVIEW_RULES), "git_assistant/resources"),
+    ],
     # `anthropic` is imported inside a function (git_assistant.claude_client)
     # so a build without it still runs the other providers. Declared here
     # anyway: a lazily-imported optional dependency is exactly the shape

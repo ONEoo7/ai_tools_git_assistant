@@ -6,7 +6,21 @@ from git_assistant import estimate, git_ops, usage
 from git_assistant.commit_generator import CommitGenerator
 from git_assistant.config import RepoEntry, Settings
 from git_assistant.llm import ModelInfo
+from git_assistant.review.plan import ReviewPlan
+from git_assistant.review.reviewer import staged_files
 from git_assistant.review.rules import Rule, RuleTable
+
+
+def _plan(settings, paths, table=None):
+    """What a review of these files against this table would do."""
+    repo = settings.active_repo
+    wanted = set(paths)
+    found = [
+        c
+        for c in staged_files(repo, settings.diff_mode, settings.ignore_globs)
+        if c.path in wanted
+    ]
+    return ReviewPlan.of_table(repo, found, table if table is not None else TABLE)
 
 TABLE = RuleTable(
     name="House rules",
@@ -127,7 +141,7 @@ def test_a_repository_git_cannot_read_is_reported_rather_than_raised(
 
 # ---- a code review ---------------------------------------------------------------
 def test_a_review_is_one_call_per_marked_file(settings, small_diff):
-    out = estimate.for_review(settings, settings.active_repo, ["app.py", "util.py"], TABLE)
+    out = estimate.for_review(settings, _plan(settings, ["app.py", "util.py"]))
 
     assert out.calls == 2
     assert out.feature == usage.REVIEW
@@ -135,39 +149,41 @@ def test_a_review_is_one_call_per_marked_file(settings, small_diff):
 
 
 def test_a_file_that_was_not_marked_is_not_counted(settings, small_diff):
-    both = estimate.for_review(settings, settings.active_repo, ["app.py", "util.py"], TABLE)
-    one = estimate.for_review(settings, settings.active_repo, ["app.py"], TABLE)
+    both = estimate.for_review(settings, _plan(settings, ["app.py", "util.py"]))
+    one = estimate.for_review(settings, _plan(settings, ["app.py"]))
 
     assert one.calls == 1
     assert one.input_tokens < both.input_tokens
 
 
 def test_the_rules_the_diff_and_the_file_are_all_counted(settings, small_diff):
-    small = estimate.for_review(settings, settings.active_repo, ["app.py"], TABLE)
+    small = estimate.for_review(settings, _plan(settings, ["app.py"]))
     big = estimate.for_review(
         settings,
-        settings.active_repo,
-        ["app.py"],
-        RuleTable("many", [Rule(f"R-{i}", "x" * 100) for i in range(10)]),
+        _plan(
+            settings,
+            ["app.py"],
+            RuleTable("many", [Rule(f"R-{i}", "x" * 100) for i in range(10)]),
+        ),
     )
     assert big.input_tokens > small.input_tokens
 
 
 def test_a_review_says_which_files_will_not_fit_whole(settings, huge_diff):
     settings.context_window = 4096
-    out = estimate.for_review(settings, settings.active_repo, ["f0.py", "f1.py"], TABLE)
+    out = estimate.for_review(settings, _plan(settings, ["f0.py", "f1.py"]))
     assert "cut to the budget" in " ".join(out.lines)
 
 
 def test_reviewing_nothing_is_a_problem_not_a_number(settings, small_diff):
-    assert "No files are marked" in estimate.for_review(
-        settings, settings.active_repo, [], TABLE
-    ).problem
+    assert estimate.for_review(settings, _plan(settings, [])).problem
 
 
 def test_a_table_with_no_rules_is_a_problem(settings, small_diff):
-    out = estimate.for_review(settings, settings.active_repo, ["app.py"], RuleTable("empty"))
-    assert "no rules" in out.problem
+    out = estimate.for_review(
+        settings, _plan(settings, ["app.py"], RuleTable("empty"))
+    )
+    assert out.calls == 0 and out.problem
 
 
 # ---- an audit ---------------------------------------------------------------------
@@ -221,20 +237,18 @@ def test_the_total_is_both_halves(settings, small_diff):
 
 def test_marked_files_that_are_not_in_the_diff_are_not_calls(settings, small_diff):
     """A path staged a moment ago and unstaged since is not a call, and not a cost."""
-    out = estimate.for_review(
-        settings, settings.active_repo, ["app.py", "gone.py"], TABLE
-    )
+    out = estimate.for_review(settings, _plan(settings, ["app.py", "gone.py"]))
     assert out.calls == 1
 
 
 def test_a_review_of_only_missing_files_says_so_instead_of_a_number(settings, small_diff):
-    out = estimate.for_review(settings, settings.active_repo, ["gone.py"], TABLE)
+    out = estimate.for_review(settings, _plan(settings, ["gone.py"]))
     assert out.calls == 0
     assert "None of the marked files" in out.problem
 
 
 def test_a_review_never_promises_calls_it_cannot_price(settings, small_diff):
-    out = estimate.for_review(settings, settings.active_repo, ["app.py", "util.py"], TABLE)
+    out = estimate.for_review(settings, _plan(settings, ["app.py", "util.py"]))
     assert out.calls == 2
     assert out.input_tokens > 0, "a call with no content is a number nobody can trust"
 

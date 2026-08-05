@@ -11,6 +11,9 @@ from PyInstaller.utils.hooks import collect_all
 
 ROOT = Path(SPECPATH)
 ICON = ROOT / "src" / "git_assistant" / "resources" / "icon.ico"
+# The rules the Code Review tab ships with. Read at runtime through
+# git_assistant.packaged.data_file, so it has to land beside the icon.
+REVIEW_RULES = ROOT / "src" / "git_assistant" / "resources" / "review_rules.json"
 
 # Shared with the onedir spec so both builds describe themselves identically.
 sys.path.insert(0, str(ROOT / "tools"))
@@ -29,6 +32,7 @@ a = Analysis(
     datas=[
         # Ship the .ico so the tray/window icon resolves at runtime.
         (str(ICON), "git_assistant/resources"),
+        (str(REVIEW_RULES), "git_assistant/resources"),
         # TUF trust root: the updater refuses to run without it.
         (str(ROOT / "src" / "git_assistant" / "updating" / "root.json"),
          "git_assistant/updating"),

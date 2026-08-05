@@ -87,12 +87,12 @@ class ReviewWorker(QObject):
     finished = pyqtSignal(object)  # review.reviewer.ReviewRun
     error = pyqtSignal(str)
 
-    def __init__(self, settings: Settings, repo: str, paths: list[str], table) -> None:
+    def __init__(self, settings: Settings, plan) -> None:
         super().__init__()
         self._settings = settings
-        self._repo = repo
-        self._paths = list(paths)
-        self._table = table
+        #: A review.plan.ReviewPlan: which files, in which language, against
+        #: which rules. Decided before the dialog that asked to run it.
+        self._plan = plan
         self._cancelled = False
 
     def cancel(self) -> None:
@@ -109,9 +109,7 @@ class ReviewWorker(QObject):
             run = reviewer.review(
                 self._settings,
                 recorder,
-                repo=self._repo,
-                paths=self._paths,
-                table=self._table,
+                plan=self._plan,
                 progress=self.progress.emit,
                 is_cancelled=lambda: self._cancelled,
             )

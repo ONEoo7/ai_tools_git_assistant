@@ -26,7 +26,7 @@ from git_assistant.config import Settings
 from git_assistant.diff_strategy import filter_files, split_diff, truncate_to_budget
 from git_assistant.model_runtime import ModelRuntime
 from git_assistant.parallel import CancelledError, effective_parallel, run_parallel
-from git_assistant.review import prompts
+from git_assistant.review import languages, prompts
 from git_assistant.review.parse import Finding, parse_findings, said_clean, salvage
 from git_assistant.review.rules import RuleTable
 from git_assistant.tokenizer import estimate_tokens, input_budget
@@ -101,6 +101,12 @@ class FileReview:
     content_truncated: bool = False
     content_sent: bool = True
     rules_sent: int = 0
+    #: What this file was checked against. Per file, because a run spans
+    #: several languages and each gets its own table at its own version.
+    rules_total: int = 0
+    table_name: str = ""
+    language: str = ""
+    version: str = ""
     retried: bool = False
     seconds: float = 0.0
 
@@ -112,6 +118,11 @@ class FileReview:
     @property
     def partial(self) -> bool:
         return self.diff_truncated or self.content_truncated or not self.content_sent
+
+    @property
+    def rules_cut(self) -> bool:
+        """Whether this file was judged against only part of its rules."""
+        return bool(self.rules_total) and self.rules_sent < self.rules_total
 
     def note(self) -> str:
         """How this file's row is annotated in the tab."""
@@ -128,7 +139,13 @@ class FileReview:
 
 @dataclass
 class ReviewRun:
-    """One review of one repository, against one rule table."""
+    """One review of one repository, against one profile.
+
+    ``table_name`` is the profile the run was made with and
+    ``table_fingerprint`` covers every table it used, so a stored review still
+    notices that the rules were rewritten under it. What each individual file
+    was checked against is on its own ``FileReview``.
+    """
 
     repo_path: str
     table_name: str = ""
@@ -154,8 +171,13 @@ class ReviewRun:
     def failed(self) -> list[FileReview]:
         return [r for r in self.files if r.error]
 
-    def rules_truncated(self) -> bool:
-        return bool(self.rules_total) and self.rules_sent < self.rules_total
+    def rules_truncated(self) -> list[FileReview]:
+        """Files judged against only part of their rules.
+
+        Per file: with one table per language, "8 of 40 rules sent" would be
+        true of neither the Python files nor the C++ ones.
+        """
+        return [r for r in self.files if r.rules_cut]
 
     def headline(self) -> dict:
         """The few numbers a list of runs needs, so drawing it opens no file."""
@@ -174,8 +196,9 @@ class ReviewRun:
         ]
         if counts["failed"]:
             parts.append(f"{counts['failed']} not reviewed")
-        if self.rules_truncated():
-            parts.append(f"only {self.rules_sent} of {self.rules_total} rules sent")
+        cut = self.rules_truncated()
+        if cut:
+            parts.append(f"{len(cut)} file(s) got only part of their rules")
         return " - ".join(parts)
 
 
@@ -203,6 +226,21 @@ def fit_rules(table: RuleTable, budget: int) -> tuple[str, int]:
             "context window]"
         )
     return "\n".join(lines), len(lines) - (1 if omitted else 0)
+
+
+def _language_line(language: str, version: str) -> str:
+    """What the file is, when that is known.
+
+    Nothing is said when it is not: "version: unknown" only invites the model
+    to speculate about which one it is looking at.
+    """
+    if not language or language == languages.label_of(languages.ANY):
+        return ""
+    return prompts.render(
+        prompts.LANGUAGE_LINE,
+        language=language,
+        version=f" ({version})" if version else "",
+    )
 
 
 def _notes(diff_truncated: bool, content_truncated: bool, content_sent: bool) -> str:
@@ -233,7 +271,14 @@ class _Prompt:
 
 
 def build_prompt(
-    *, path: str, diff: str, content: str, table: RuleTable, budget: int
+    *,
+    path: str,
+    diff: str,
+    content: str,
+    table: RuleTable,
+    budget: int,
+    language: str = "",
+    version: str = "",
 ) -> _Prompt:
     """One file's user prompt, cut to ``budget`` in order of importance."""
     rules_text, rules_sent = fit_rules(table, max(1, int(budget * RULES_SHARE)))
@@ -258,6 +303,7 @@ def build_prompt(
         prompts.REVIEW_TEMPLATE,
         rules=rules_text,
         path=path,
+        language=_language_line(language, version),
         notes=notes,
         diff=diff_sent,
         content=content_sent or "(not shown)",
@@ -276,29 +322,28 @@ def review(
     settings: Settings,
     client,
     *,
-    repo: str,
-    paths: list[str],
-    table: RuleTable,
+    plan,
     progress: ProgressFn = _noop,
     is_cancelled: CancelFn = _never,
 ) -> ReviewRun:
-    """Review ``paths`` in ``repo`` against ``table``, one call per file."""
+    """Carry out ``plan``: one call per reviewable file, with its own rules.
+
+    The plan decided which files, which language, which version and which rules
+    (see ``review.plan``). Nothing is decided again here -- what was shown in
+    the window before the run is what the run does.
+    """
+    repo = plan.repo
     if not repo:
         raise ValueError("No repository is selected.")
     if not settings.active_model():
         raise ValueError("No model is selected. Open Settings and pick one.")
-    if not table.rules:
-        raise ValueError(
-            "The selected rule table has no rules. Import a spreadsheet with "
-            "ruleID and ruleDetails columns."
-        )
 
-    progress("Reading git diff...")
-    candidates = staged_files(repo, settings.diff_mode, settings.ignore_globs)
-    wanted = {p for p in paths}
-    chosen = [c for c in candidates if c.reviewable and c.path in wanted]
+    chosen = plan.reviewable()
     if not chosen:
-        raise ValueError("No files are marked for review.")
+        raise ValueError(
+            "Nothing in this plan can be reviewed: no marked file has rules "
+            "that apply to it."
+        )
 
     runtime = ModelRuntime(settings, client)
     context = runtime.context_window()
@@ -315,10 +360,10 @@ def review(
     head = git_ops._run(repo, ["rev-parse", "HEAD"])
     run = ReviewRun(
         repo_path=repo,
-        table_name=table.name,
-        table_fingerprint=table.fingerprint(),
-        rules_total=len(table.rules),
-        rules_sent=len(table.rules),
+        table_name=plan.profile,
+        table_fingerprint=plan.fingerprint(),
+        rules_total=sum(len(f.table.rules) for f in chosen if f.table),
+        rules_sent=0,  # summed from the files once they come back
         provider=settings.provider,
         model=settings.active_model(),
         diff_mode=settings.diff_mode,
@@ -327,7 +372,7 @@ def review(
         head=head.stdout.strip() if head.ok else "",
         branch=git_ops.current_branch(repo),
         dirty=git_ops.has_uncommitted_changes(repo),
-        staged_total=len(candidates),
+        staged_total=len(plan.files),
     )
 
     # One phase for the whole fan-out: the calls run on several threads, and a
@@ -335,10 +380,8 @@ def review(
     if hasattr(client, "phase"):
         client.phase = llm_log.REVIEW
 
-    def review_one(candidate: Candidate) -> FileReview:
-        return _review_file(
-            settings, client, repo=repo, candidate=candidate, table=table, budget=budget
-        )
+    def review_one(file) -> FileReview:
+        return _review_file(settings, client, repo=repo, file=file, budget=budget)
 
     run.files = run_parallel(
         chosen,
@@ -349,9 +392,13 @@ def review(
         is_cancelled=is_cancelled,
         label="reviewing",
     )
-    # The run sent as many rules as its most cramped call did: saying "all of
-    # them" because one small file had room would be the wrong reassurance.
-    run.rules_sent = min((r.rules_sent for r in run.files), default=len(table.rules))
+    run.rules_sent = sum(r.rules_sent for r in run.files)
+    # Files the plan could not review are recorded too: one left out of the
+    # results entirely reads as a file with nothing wrong with it.
+    run.files += [
+        FileReview(path=f.path, error=f.skipped or "not reviewed")
+        for f in plan.skipped()
+    ]
     return run
 
 
@@ -360,19 +407,28 @@ def _review_file(
     client,
     *,
     repo: str,
-    candidate: Candidate,
-    table: RuleTable,
+    file,
     budget: int,
 ) -> FileReview:
     """One file, one call -- and one retry when the answer is unreadable.
 
+    ``file`` is a ``plan.FilePlan``: it already carries the language, the
+    version and the rules this file is checked against.
+
     Every failure is caught and recorded rather than raised: one file's broken
     call must not throw away what the other thirty found.
     """
-    path = candidate.path
+    path = file.path
+    table = file.table
     content = git_ops.file_content(repo, path, settings.diff_mode)
     built = build_prompt(
-        path=path, diff=candidate.diff, content=content, table=table, budget=budget
+        path=path,
+        diff=file.candidate.diff,
+        content=content,
+        table=table,
+        budget=budget,
+        language=file.language_label(),
+        version=file.version_label(),
     )
     outcome = FileReview(
         path=path,
@@ -380,6 +436,10 @@ def _review_file(
         content_truncated=built.content_truncated,
         content_sent=built.content_sent,
         rules_sent=built.rules_sent,
+        rules_total=len(table.rules),
+        table_name=table.name,
+        language=file.language,
+        version=file.version,
     )
 
     started = time.monotonic()

@@ -7,6 +7,7 @@ from git_assistant.config import Settings
 from git_assistant.llm import ModelInfo
 from git_assistant.parallel import CancelledError
 from git_assistant.review import reviewer
+from git_assistant.review.plan import ReviewPlan
 from git_assistant.review.rules import Rule, RuleTable
 
 TABLE = RuleTable(
@@ -65,14 +66,18 @@ def repo(monkeypatch):
     return {"files": files, "contents": contents}
 
 
-def _run(client, paths=("app.py", "util.py"), settings=None, **kw):
+def _plan(paths=("app.py", "util.py"), table=TABLE, repo="/x/demo"):
+    """What a run of these files against this table would do."""
+    wanted = set(paths)
+    found = [
+        c for c in reviewer.staged_files(repo, "cached", []) if c.path in wanted
+    ]
+    return ReviewPlan.of_table(repo, found, table)
+
+
+def _run(client, paths=("app.py", "util.py"), settings=None, table=TABLE, **kw):
     return reviewer.review(
-        settings or _settings(),
-        client,
-        repo="/x/demo",
-        paths=list(paths),
-        table=TABLE,
-        **kw,
+        settings or _settings(), client, plan=_plan(paths, table), **kw
     )
 
 
@@ -108,17 +113,16 @@ def test_a_file_that_was_not_marked_is_never_sent(repo):
 
 def test_reviewing_nothing_says_so_rather_than_calling_the_model(repo):
     client = _Client()
-    with pytest.raises(ValueError, match="marked for review"):
+    with pytest.raises(ValueError, match="can be reviewed"):
         _run(client, paths=[])
     assert client.seen == []
 
 
 def test_a_table_with_no_rules_is_refused_before_any_call(repo):
+    """An empty rules block reads to a model as "nothing to check": clean, always."""
     client = _Client()
-    with pytest.raises(ValueError, match="no rules"):
-        reviewer.review(
-            _settings(), client, repo="/x/demo", paths=["app.py"], table=RuleTable("Empty")
-        )
+    with pytest.raises(ValueError, match="can be reviewed"):
+        _run(client, paths=["app.py"], table=RuleTable("Empty"))
     assert client.seen == []
 
 
@@ -210,23 +214,38 @@ def test_a_review_of_two_files_does_not_split_the_context_four_ways(repo):
     assert "Note:" not in client.seen[0]["user"]
 
 
-def test_the_run_reports_the_rules_of_its_most_cramped_call(repo):
+def test_a_file_that_got_only_part_of_its_rules_says_so(repo):
+    """Per file: with a table per language, one run-level count is true of nobody."""
     table = RuleTable("big", [Rule(f"R-{i}", "x" * 400) for i in range(40)])
     run = reviewer.review(
-        _settings(context=4096), _Client(), repo="/x/demo", paths=["app.py"], table=table
+        _settings(context=4096), _Client(), plan=_plan(["app.py"], table)
     )
-    assert run.rules_truncated()
-    assert run.rules_sent < 40
-    assert f"only {run.rules_sent} of 40 rules sent" in run.summary()
+
+    cut = run.rules_truncated()
+    assert [f.path for f in cut] == ["app.py"]
+    assert cut[0].rules_sent < cut[0].rules_total == 40
+    assert "1 file(s) got only part of their rules" in run.summary()
 
 
 # ---- what came back --------------------------------------------------------------------
 def test_findings_are_attributed_to_the_file_that_was_being_reviewed(repo):
-    client = _Client("FINDING | R-1 | 12 | swallows the error", "NO FINDINGS")
-    run = _run(client)
+    class _ByFile(_Client):
+        """Answers about whichever file it was asked about.
+
+        The files are reviewed on several threads, so answering in order would
+        attribute a finding to whichever call happened to be served first.
+        """
+
+        def chat(self, model, system, user, max_tokens, temperature=0.2):
+            super().chat(model, system, user, max_tokens, temperature)
+            if "app.py" in user:
+                return "FINDING | R-1 | 12 | swallows the error"
+            return "NO FINDINGS"
+
+    run = _run(_ByFile())
 
     assert [f.path for f in run.findings()] == ["app.py"]
-    assert run.files[1].clean
+    assert [r.path for r in run.files if r.clean] == ["util.py"]
 
 
 def test_an_empty_reply_is_reported_rather_than_treated_as_a_clean_file(repo):
@@ -271,8 +290,10 @@ def test_a_file_whose_call_fails_does_not_lose_the_other_files_findings(repo):
 def test_the_run_records_what_it_was_run_with(repo):
     run = _run(_Client(), settings=_settings(provider="lmstudio"))
 
-    assert run.table_name == "House rules"
-    assert run.table_fingerprint == TABLE.fingerprint()
+    assert run.table_name == "House rules"  # the profile the plan was built with
+    # Covers every table the plan used, so a rewrite under a stored review is
+    # still noticed once a run spans more than one of them.
+    assert run.table_fingerprint == _plan().fingerprint()
     assert (run.model, run.provider) == ("m", "lmstudio")
     assert run.branch == "main" and run.head == "abc123"
     assert run.staged_total == 2
@@ -289,3 +310,79 @@ def test_cancelling_stops_before_the_next_call(repo):
     with pytest.raises(CancelledError):
         _run(client, is_cancelled=lambda: True)
     assert client.seen == []
+# ---- a run that spans languages ------------------------------------------------------
+def test_each_file_is_sent_the_rules_that_apply_to_it(repo):
+    """One table for a polyglot repository is the thing profiles exist to end."""
+    from git_assistant.review.plan import build
+
+    python = RuleTable("Python", [Rule("PY-1", "no bare except")])
+    other = RuleTable("Anything else", [Rule("X-1", "a different rule entirely")])
+
+    plan = build(_settings(), "/x/demo", ["app.py", "util.py"], lambda lang, v: python)
+    # Both files are Python here, so the second table is put on directly: what
+    # is being pinned is that each file's own table is what gets sent.
+    plan.files[1].table = other
+
+    client = _Client()
+    reviewer.review(_settings(), client, plan=plan)
+
+    sent = {call["user"] for call in client.seen}
+    assert any("PY-1" in u and "X-1" not in u for u in sent)
+    assert any("X-1" in u and "PY-1" not in u for u in sent)
+
+
+def test_a_file_records_what_it_in_particular_was_checked_against(repo):
+    run = _run(_Client(), paths=["app.py"])
+
+    file = run.files[0]
+    assert file.table_name == "House rules"
+    assert file.rules_total == 2
+    assert file.rules_sent == 2
+    assert file.rules_cut is False
+
+
+def test_a_file_the_plan_could_not_review_is_still_in_the_results(repo):
+    """One left out entirely reads as a file with nothing wrong with it."""
+    from git_assistant.review.plan import build
+
+    run = reviewer.review(
+        _settings(),
+        _Client(),
+        plan=build(
+            _settings(),
+            "/x/demo",
+            ["app.py", "util.py"],
+            lambda language, version: TABLE if language else None,
+        ),
+    )
+    assert len(run.files) == 2
+
+
+def test_the_language_and_version_reach_the_prompt_as_a_closed_world(repo):
+    from git_assistant.review.plan import build
+
+    client = _Client()
+    reviewer.review(
+        _settings(),
+        client,
+        plan=build(
+            _settings(),
+            "/x/demo",
+            ["app.py"],
+            lambda language, version: TABLE,
+            versions={"python": "py312"},
+        ),
+    )
+
+    sent = client.seen[0]["user"]
+    assert "Language: Python (Python 3.12+)." in sent
+    # Without this, a model told the version reports "f-strings need 3.6" under
+    # an invented rule id, and a rules review becomes a free-form one.
+    assert "Judge only against the rules listed above." in sent
+
+
+def test_nothing_is_said_about_a_language_nobody_established(repo):
+    """"Version: unknown" only invites the model to speculate."""
+    client = _Client()
+    _run(client, paths=["app.py"])  # of_table, so the language is "any"
+    assert "Language:" not in client.seen[0]["user"]

@@ -8,19 +8,22 @@ keeps the app working from a plain source checkout with no build step.
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 from PyQt6.QtCore import QRectF, Qt
 from PyQt6.QtGui import QBrush, QColor, QIcon, QPainter, QPixmap
 
+from git_assistant.packaged import data_file
+
 
 def icon_file() -> Path:
-    """Path to the bundled .ico, working both from source and PyInstaller."""
-    base = getattr(sys, "_MEIPASS", None)  # set inside a PyInstaller bundle
-    if base:
-        return Path(base) / "git_assistant" / "resources" / "icon.ico"
-    return Path(__file__).resolve().parent.parent / "resources" / "icon.ico"
+    """Path to the bundled .ico, working both from source and PyInstaller.
+
+    Returns the source-tree path when nothing is there, so the caller's
+    ``is_file()`` check answers "no icon" rather than this raising.
+    """
+    found = data_file("resources", "icon.ico")
+    return found or Path(__file__).resolve().parent.parent / "resources" / "icon.ico"
 
 
 def app_icon(size: int = 64) -> QIcon:

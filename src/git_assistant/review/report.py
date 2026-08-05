@@ -25,6 +25,27 @@ def _where(finding: Finding) -> str:
     return f"line {finding.line}" if finding.line else "no line given"
 
 
+def _checked_against(review: FileReview) -> str:
+    """What this file in particular was judged by.
+
+    Per file, because a run spans languages: the header can only name the
+    profile, and "40 rules" would be true of no single file in it.
+    """
+    from git_assistant.review import languages
+
+    if not review.rules_total:
+        return ""
+    what = languages.label_of(review.language) if review.language else ""
+    lang = languages.get(review.language)
+    version = lang.label_for(review.version) if lang else ""
+    if version:
+        what = f"{what} {version}"
+    rules = f"{review.rules_sent} of {review.rules_total} rule(s)" if review.rules_cut else (
+        f"{review.rules_total} rule(s)"
+    )
+    return f"{what}, {rules}".strip(", ") if what else rules
+
+
 def _header_lines(run: ReviewRun) -> list[str]:
     where = f"{run.branch} @ {run.head[:7]}" if run.head else ""
     if run.dirty and where:
@@ -32,16 +53,17 @@ def _header_lines(run: ReviewRun) -> list[str]:
     out = [
         f"Reviewed {run.started_at} — `{run.repo_path}`" + (f" — {where}" if where else ""),
         "",
-        f"Rules: **{run.table_name or 'none'}** ({run.rules_total} rule(s)) — "
+        f"Profile: **{run.table_name or 'none'}** — "
         f"model: {run.model or 'unknown'} ({run.provider})",
         "",
         run.summary(),
         "",
     ]
-    if run.rules_truncated():
+    cut = run.rules_truncated()
+    if cut:
         out += [
-            f"> Only {run.rules_sent} of {run.rules_total} rules were sent to the "
-            "model. This review does not cover the rest.",
+            f"> {len(cut)} file(s) were judged against only part of their rules, "
+            "which did not fit the model's context window.",
             "",
         ]
     return out
@@ -57,7 +79,7 @@ def to_markdown(run: ReviewRun) -> str:
 
 
 def _file_md(review: FileReview) -> list[str]:
-    note = review.note()
+    note = ", ".join(p for p in (_checked_against(review), review.note()) if p)
     heading = f"## {review.path}" + (f" — *{note}*" if note else "")
     out = [heading, ""]
     if review.error:
@@ -82,17 +104,18 @@ def to_html(run: ReviewRun) -> str:
     out = ["<html><body>", "<h2>Code review</h2>"]
     out.append(f"<p><b>{e(run.summary())}</b><br>")
     out.append(
-        f"Rules: {e(run.table_name or 'none')} ({run.rules_total}) — "
+        f"Profile: {e(run.table_name or 'none')} — "
         f"model: {e(run.model or 'unknown')} ({e(run.provider)})<br>"
         f"{e(run.started_at)} — {e(run.repo_path)}</p>"
     )
-    if run.rules_truncated():
+    cut = run.rules_truncated()
+    if cut:
         out.append(
-            f"<p><b>Only {run.rules_sent} of {run.rules_total} rules were sent to "
-            "the model. This review does not cover the rest.</b></p>"
+            f"<p><b>{len(cut)} file(s) were judged against only part of their "
+            "rules, which did not fit the model's context window.</b></p>"
         )
     for review in run.files:
-        note = review.note()
+        note = ", ".join(p for p in (_checked_against(review), review.note()) if p)
         out.append(f"<h3>{e(review.path)}{' — ' + e(note) if note else ''}</h3>")
         if review.error:
             out.append(f"<p>Not reviewed: {e(review.error)}</p>")

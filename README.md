@@ -188,6 +188,24 @@ The **Code Review** tab checks staged files against a table of rules - the
 spreadsheet a team already keeps its standard in, with a `ruleID` column and a
 `ruleDetails` column.
 
+- **Languages are detected per file** - C, C++, C#, CSS, HTML, Java, JavaScript,
+  Python, Rust, TypeScript, shell and PowerShell - so one review can span a
+  polyglot repository and each file is judged by the rules that apply to it. A
+  file no language claims is listed as unreviewable rather than checked against
+  somebody else's rules.
+- **Rules ship with the app**, six to ten per language, each carrying the
+  language versions it is true for: `nullptr` is not a C++98 rule and f-strings
+  are not a Python 2 one. The version is read from what the repository already
+  declares (`pyproject.toml`, `Cargo.toml`, `tsconfig.json`, a `.csproj`,
+  `pom.xml`, `CMakeLists.txt`, a doctype, a shebang) and can be set by hand
+  where nothing declares one.
+- **A profile** ties it together: which rules apply to which language at which
+  version, per repository. The *Profile* tab has a row per language, a version
+  dropdown, and a checkbox per rule. **Share with the repository** writes it to
+  `.git-assistant/code-review-profile.json` - your own tables in full, the
+  shipped ones by name - so whoever clones the repository is reviewed against
+  the same standard. That is the only file this application ever writes into a
+  working tree, and it takes an explicit press.
 - **Import** a `.xlsx` under *Rules*. The header is looked for rather than
   assumed, so a title row above it and columns nobody here cares about are both
   fine; `Rule ID`, `rule_id` and `RULEID` all read the same. Tables can be
@@ -198,6 +216,10 @@ spreadsheet a team already keeps its standard in, with a `ruleID` column and a
 - **Mark the files to review.** Everything staged starts marked; unmark what you
   do not want checked. Files dropped by the noise filter are listed as
   unreviewable rather than silently left out.
+- **A window before it runs** lists every marked file with its language, its
+  version and the rules that will be checked, beside the token estimate. The
+  language column is editable - `.h` is C or C++ and only your repository knows
+  which - and the answer is remembered so it is asked once.
 - **One call per file**, run `parallel_calls` at a time, each carrying the rules,
   that file's diff and the file as it will be after the change. When they do not
   all fit, the content is dropped before the diff, and the diff before the rules

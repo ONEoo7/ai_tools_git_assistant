@@ -71,6 +71,35 @@ def test_refresh_keeps_a_generation_result(qapp, settings):
     assert panel.status.text() == "Strategy: single-shot - ~500 input tokens"
 
 
+# ---- which provider and model a generation will use --------------------------
+def test_the_model_is_named_beside_the_provider(qapp, settings):
+    """The provider is half the answer; a generation uses a model too."""
+    settings.selected_model = "qwen3.5-4b"
+    panel = CommitPanel(settings, auto_start=False)
+
+    panel.refresh_provider()
+
+    assert "qwen3.5-4b" in panel.provider_label.text()
+
+
+def test_switching_provider_here_renames_the_model_too(qapp, settings):
+    """The model is per provider: leaving the old one named would be a lie."""
+    settings.provider = "lmstudio"
+    settings.selected_model = "qwen3.5-4b"
+    settings.provider_models = {"ollama": "llama3.2"}
+    panel = CommitPanel(settings, auto_start=False)
+
+    panel.provider_combo.setCurrentIndex(panel.provider_combo.findData("ollama"))
+
+    assert "llama3.2" in panel.provider_label.text()
+
+
+def test_a_provider_with_no_model_chosen_says_so(qapp, settings):
+    panel = CommitPanel(settings, auto_start=False)
+    panel.refresh_provider()
+    assert "no model selected" in panel.provider_label.text()
+
+
 # ---- the Refresh button -----------------------------------------------------
 # Staging happens outside this window, and nothing here notices it. Refresh
 # re-reads it and drops the message written for the previous set of changes.
