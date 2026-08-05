@@ -200,8 +200,13 @@ spreadsheet a team already keeps its standard in, with a `ruleID` column and a
   `pom.xml`, `CMakeLists.txt`, a doctype, a shebang) and can be set by hand
   where nothing declares one.
 - **A profile** ties it together: which rules apply to which language at which
-  version, per repository. The *Profile* tab has a row per language, a version
-  dropdown, and a checkbox per rule. **Share with the repository** writes it to
+  version. The *Profiles* tab lists every profile you have; open one and it has
+  a row per language, a version dropdown, and a checkbox per rule. Which profile
+  a review actually runs against is the *Rules profile* dropdown beside the
+  repository - remembered per repository, and marked in bold in the list, so
+  reading one profile is never mistaken for selecting it. The shipped defaults
+  are read-only: editing them keeps the change in a copy of your own.
+  **Share with the repository** writes it to
   `.git-assistant/code-review-profile.json` - your own tables in full, the
   shipped ones by name - so whoever clones the repository is reviewed against
   the same standard. That is the only file this application ever writes into a

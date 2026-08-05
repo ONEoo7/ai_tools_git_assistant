@@ -1,9 +1,15 @@
-"""The Profile tab: which rules apply to which language, at which version.
+"""The Profiles tab: which rules apply to which language, at which version.
 
-One row per language the profile covers, each carrying the version it is
-written in and the rules that will be checked. The version matters twice over:
-it decides which shipped rules apply, and it is told to the model, so getting it
-wrong is not cosmetic.
+Every profile there is on the left; the one picked there is opened on the right.
+One row per language it covers, each carrying the version it is written in and
+the rules that will be checked. The version matters twice over: it decides which
+shipped rules apply, and it is told to the model, so getting it wrong is not
+cosmetic.
+
+Which profile is *looked at* here and which one a review *runs against* are two
+different choices. The second belongs to the Rules profile dropdown beside the
+repository, and is said again under the list so that reading one profile is
+never mistaken for selecting it.
 
 What the repository declares about itself is filled in and labelled with where
 it came from. Everything it does not declare is a dropdown, because the honest
@@ -19,7 +25,10 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QListWidget,
+    QListWidgetItem,
     QPushButton,
+    QSplitter,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -35,12 +44,18 @@ _DETECTED = QColor("#8ab0cc")
 
 NOT_SET = "not set - every rule applies"
 
+#: Gap either side of the handle between the list and the profile it opens.
+LIST_GAP = 8
+
 
 class ProfileTab(QWidget):
-    """Edit one profile: its languages, their versions, and their rules."""
+    """Pick a profile from the list, then edit its languages, versions and rules."""
 
     #: The profile changed and should be saved.
     changed = pyqtSignal()
+    #: Another profile was picked from the list, by name. Which profile is read
+    #: here says nothing about which one a review uses.
+    selected = pyqtSignal(str)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -49,7 +64,40 @@ class ProfileTab(QWidget):
         self._detected: dict[str, str] = {}
         self._sources: dict[str, str] = {}
 
-        box = QVBoxLayout(self)
+        outer = QVBoxLayout(self)
+        split = QSplitter(Qt.Orientation.Horizontal)
+        split.addWidget(self._build_list_pane())
+        split.addWidget(self._build_editor_pane())
+        split.setStretchFactor(0, 1)
+        split.setStretchFactor(1, 3)
+        split.setSizes([180, 540])
+        outer.addWidget(split, 1)
+
+    def _build_list_pane(self) -> QWidget:
+        pane = QWidget()
+        box = QVBoxLayout(pane)
+        # A handle on the right only, so a margin on the right only.
+        box.setContentsMargins(0, 0, LIST_GAP, 0)
+        box.addWidget(QLabel("Profiles"))
+
+        self.profiles_list = QListWidget()
+        self.profiles_list.setToolTip(
+            "Pick a profile to read or edit. Which one a review runs against is "
+            "chosen under Rules profile, beside the repository."
+        )
+        self.profiles_list.currentItemChanged.connect(self._on_picked)
+        box.addWidget(self.profiles_list, 1)
+
+        self.in_use = QLabel("")
+        self.in_use.setWordWrap(True)
+        self.in_use.setStyleSheet(MUTED)
+        box.addWidget(self.in_use)
+        return pane
+
+    def _build_editor_pane(self) -> QWidget:
+        pane = QWidget()
+        box = QVBoxLayout(pane)
+        box.setContentsMargins(LIST_GAP, 0, 0, 0)
         self.header = QLabel("")
         self.header.setWordWrap(True)
         box.addWidget(self.header)
@@ -94,6 +142,36 @@ class ProfileTab(QWidget):
             row.addWidget(button)
         row.addStretch(1)
         box.addLayout(row)
+        return pane
+
+    # ---- the list of profiles ---------------------------------------------------
+    def show_profiles(self, profiles: list, current: str, in_use: str = "") -> None:
+        """List every profile, marking the one open and the one under review."""
+        self.profiles_list.blockSignals(True)
+        self.profiles_list.clear()
+        for profile in profiles:
+            item = QListWidgetItem(profile.display())
+            item.setData(Qt.ItemDataRole.UserRole, profile.name)
+            if profile.name == in_use:
+                font = item.font()
+                font.setBold(True)
+                item.setFont(font)
+                item.setToolTip("A review of this repository runs against this one.")
+            elif profile.from_repository():
+                item.setToolTip("Shipped by this repository. Read-only here.")
+            self.profiles_list.addItem(item)
+            if profile.name == current:
+                self.profiles_list.setCurrentItem(item)
+        self.profiles_list.blockSignals(False)
+        self.in_use.setText(_in_use_note(in_use))
+
+    def _on_picked(self, current: QListWidgetItem, _previous=None) -> None:
+        if current is not None:
+            self.selected.emit(current.data(Qt.ItemDataRole.UserRole))
+
+    def profile(self) -> Profile | None:
+        """The profile on screen -- the object edits were made to, not a copy."""
+        return self._profile
 
     # ---- what it is showing ---------------------------------------------------
     def show_profile(
@@ -270,6 +348,18 @@ def _not_set_label(language, detected: str) -> str:
         return NOT_SET
     label = language.label_for(detected) if language else detected
     return f"{label} (detected)"
+
+
+def _in_use_note(in_use: str) -> str:
+    """Which profile a review uses, said where a profile is chosen to read.
+
+    Reading one and reviewing against another is the point of the split, and it
+    is also exactly the mistake it invites, so the answer is on screen rather
+    than a tab away.
+    """
+    if not in_use:
+        return "No profile is set for this repository yet."
+    return f"Reviews of this repository run against '{in_use}' (in bold)."
 
 
 def _header(profile: Profile) -> str:

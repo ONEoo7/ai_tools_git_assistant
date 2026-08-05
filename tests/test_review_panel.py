@@ -251,6 +251,121 @@ def test_choosing_a_profile_is_remembered_for_that_repository_only(
     assert with_repo.review_profile_for_repo("/x/other") == ""
 
 
+# ---- reading a profile is not choosing one ---------------------------------------
+def _two_profiles(settings):
+    from git_assistant.review.profiles import LanguageRules, Profile, Selection
+
+    settings.review_profiles = [
+        Profile("Mine", [LanguageRules("python", selections=[Selection("builtin:python")])]),
+        Profile("Theirs", [LanguageRules("rust", selections=[Selection("builtin:rust")])]),
+    ]
+    settings.repos[0].review_profile = "Mine"
+
+
+def test_the_tab_lists_every_profile_there_is(qapp, with_repo, staged):
+    _two_profiles(with_repo)
+    panel = ReviewPanel(with_repo)
+
+    listed = [
+        panel.profile_tab.profiles_list.item(i).text()
+        for i in range(panel.profile_tab.profiles_list.count())
+    ]
+    assert listed == ["Mine", "Theirs", "Built-in defaults"]
+
+
+def test_the_tab_opens_the_one_under_review_to_begin_with(qapp, with_repo, staged):
+    _two_profiles(with_repo)
+    panel = ReviewPanel(with_repo)
+    assert panel.profile_tab.profile().name == "Mine"
+
+
+def test_reading_another_profile_does_not_change_what_a_review_uses(
+    qapp, with_repo, staged
+):
+    """The dropdown decides that, and only when Review is pressed."""
+    _two_profiles(with_repo)
+    panel = ReviewPanel(with_repo)
+
+    panel.profile_tab.profiles_list.setCurrentRow(1)
+
+    assert panel.profile_tab.profile().name == "Theirs"
+    assert panel.profile_combo.currentData() == "Mine"
+    assert with_repo.review_profile_for_repo("/x/demo") == "Mine"
+    assert panel.build_plan().profile == "Mine"
+
+
+def test_choosing_in_the_dropdown_does_not_change_what_the_tab_has_open(
+    qapp, with_repo, staged
+):
+    _two_profiles(with_repo)
+    panel = ReviewPanel(with_repo)
+    panel.profile_tab.profiles_list.setCurrentRow(1)
+
+    panel.profile_combo.setCurrentIndex(panel.profile_combo.findData("Built-in defaults"))
+
+    assert panel.profile_tab.profile().name == "Theirs"
+    assert "Built-in defaults" in panel.profile_tab.in_use.text()
+
+
+def test_editing_a_profile_that_is_not_under_review_leaves_the_review_alone(
+    qapp, with_repo, staged
+):
+    _two_profiles(with_repo)
+    panel = ReviewPanel(with_repo)
+    panel.profile_tab.profiles_list.setCurrentRow(1)
+
+    entry = panel.profile_tab.profile().languages[0]
+    panel.profile_tab._on_version_changed(entry, "rust2018")
+
+    assert with_repo.review_profiles[1].languages[0].version == "rust2018"
+    assert panel.profile_combo.currentData() == "Mine"
+
+
+def test_editing_the_shipped_rules_keeps_the_edit_in_the_copy(qapp, with_repo, staged):
+    """The defaults are rebuilt on every lookup; the edit must not be looked up again."""
+    panel = ReviewPanel(with_repo)
+    assert panel.profile_combo.currentData() == "Built-in defaults"
+
+    entry = [e for e in panel.profile_tab.profile().languages if e.language == "python"][0]
+    panel.profile_tab._on_version_changed(entry, "py38")
+
+    copies = [p for p in with_repo.review_profiles if p.name == "Built-in defaults (edited)"]
+    assert len(copies) == 1
+    assert copies[0].version_for("python") == "py38"
+
+
+def test_the_copy_is_not_put_under_review_behind_the_user_s_back(
+    qapp, with_repo, staged
+):
+    panel = ReviewPanel(with_repo)
+    entry = [e for e in panel.profile_tab.profile().languages if e.language == "python"][0]
+
+    panel.profile_tab._on_version_changed(entry, "py38")
+
+    assert panel.profile_combo.currentData() == "Built-in defaults"
+    assert with_repo.review_profile_for_repo("/x/demo") == "Built-in defaults"
+    assert "read-only" in panel.status.text()
+    # ...but it is what the tab now has open, or the next edit would copy again.
+    assert panel.profile_tab.profile().name == "Built-in defaults (edited)"
+
+
+def test_editing_the_shipped_rules_twice_does_not_make_two_of_one_name(
+    qapp, with_repo, staged
+):
+    panel = ReviewPanel(with_repo)
+
+    for _ in range(2):
+        index = panel.profile_combo.findData("Built-in defaults")
+        panel.profile_tab.profiles_list.setCurrentRow(index)
+        entry = [
+            e for e in panel.profile_tab.profile().languages if e.language == "python"
+        ][0]
+        panel.profile_tab._on_version_changed(entry, "py38")
+
+    names = [p.name for p in with_repo.review_profiles]
+    assert names == ["Built-in defaults (edited)", "Built-in defaults (edited) 2"]
+
+
 def test_renaming_a_table_repoints_the_repositories_that_used_it(
     qapp, with_repo, staged, monkeypatch
 ):
@@ -472,12 +587,12 @@ def test_previous_runs_is_the_default_half_of_the_right_hand_pane(qapp, with_rep
     assert panel.side_panel.tabs.currentIndex() == 0
 
 
-def test_the_middle_pane_is_findings_the_profile_and_the_rules(qapp, with_repo, staged):
+def test_the_middle_pane_is_findings_the_profiles_and_the_rules(qapp, with_repo, staged):
     """The reviews moved out to the right, where the other tabs keep theirs."""
     panel = ReviewPanel(with_repo)
     assert [panel.tabs.tabText(i) for i in range(panel.tabs.count())] == [
         "Findings",
-        "Profile",
+        "Profiles",
         "Rules",
     ]
 

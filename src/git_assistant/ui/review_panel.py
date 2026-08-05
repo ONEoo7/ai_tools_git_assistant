@@ -90,9 +90,18 @@ class ReviewPanel(QWidget):
         self._worker: ReviewWorker | None = None
         self._store = RuleStore.load()
         self._candidates: list[Candidate] = []
+        #: Every profile that can be chosen, held rather than rebuilt per call:
+        #: the Profiles tab edits the object it was handed, and handing out a
+        #: fresh one next time would quietly drop the edit.
+        self._all_profiles: list = []
+        #: The profile the Profiles tab has open. Not the one a review runs
+        #: against -- that is the dropdown's, and only the dropdown's.
+        self._viewed: str = ""
         #: What each language's version is here, read from what the repository
         #: declares. Free -- a handful of file reads -- so it is done on every
         #: repository change rather than behind a button.
+        self._detected: dict[str, str] = {}
+        #: The above, overruled by what the profile under review pins.
         self._versions: dict[str, str] = {}
         #: Where each detected version was read from, for the tooltip.
         self._version_sources: dict[str, str] = {}
@@ -214,7 +223,7 @@ class ReviewPanel(QWidget):
 
         self.tabs = QTabWidget()
         self.tabs.addTab(self._build_findings_tab(), "Findings")
-        self.tabs.addTab(self._build_profile_tab(), "Profile")
+        self.tabs.addTab(self._build_profile_tab(), "Profiles")
         self.tabs.addTab(self._build_rules_tab(), "Rules")
         box.addWidget(self.tabs, 1)
         return pane
@@ -250,6 +259,7 @@ class ReviewPanel(QWidget):
         """Which rules apply to which language, and at which version."""
         self.profile_tab = ProfileTab()
         self.profile_tab.changed.connect(self._on_profile_edited)
+        self.profile_tab.selected.connect(self._on_profile_viewed)
         self.profile_tab.add_language_btn.clicked.connect(self._on_add_language)
         self.profile_tab.remove_language_btn.clicked.connect(
             self.profile_tab.remove_language
@@ -258,20 +268,38 @@ class ReviewPanel(QWidget):
         self.profile_tab.copy_btn.clicked.connect(self._on_copy_repo_tables)
         return self.profile_tab
 
+    def _on_profile_viewed(self, name: str) -> None:
+        """Open another profile. What a review uses is the dropdown's decision."""
+        if name == self._viewed:
+            return
+        self._viewed = name
+        self._show_profile()
+
     def _on_profile_edited(self) -> None:
-        """A version or a rule was changed: keep it, and re-read the versions."""
-        profile = self._current_profile()
+        """A version or a rule was changed: keep it, and re-read the versions.
+
+        The profile is taken from the tab, not looked up again: the tab edits
+        the object it was handed, and the shipped defaults are rebuilt on every
+        lookup, so a second lookup would copy the unedited one.
+        """
+        profile = self.profile_tab.profile()
         if profile is not None and profile not in self.settings.review_profiles:
-            # The built-in defaults are read-only; editing them makes a copy,
-            # so a change is never silently lost and never edits what ships.
+            # The shipped rules and a repository's own are read-only; editing
+            # one makes a copy, so a change is never silently lost and never
+            # rewrites what ships. The copy is *not* put under review: which
+            # profile a review uses is chosen in the dropdown, and deciding it
+            # here is how a review runs against rules nobody selected.
             copy = profiles_mod.Profile.from_dict(profile.to_dict())
-            copy.name = f"{profile.name} (edited)"
+            copy.name = _free_profile_name(f"{profile.name} (edited)", self.settings)
             self.settings.review_profiles.append(copy)
-            repo = self._repo_path()
-            if repo:
-                self.settings.set_repo_review_profile(repo, copy.name)
             self.settings.save()
+            self._viewed = copy.name
             self._refresh_tables()
+            self.status.setText(
+                f"'{profile.name}' is read-only, so the change was kept in "
+                f"'{copy.name}'. Choose that under Rules profile to review "
+                "against it."
+            )
             return
         self.settings.save()
         self._refresh_versions()
@@ -292,7 +320,7 @@ class ReviewPanel(QWidget):
 
     def _on_share_profile(self) -> None:
         repo = self._repo_path()
-        profile = self._current_profile()
+        profile = self.profile_tab.profile()  # the one open, not the one under review
         if not repo or profile is None:
             return
         path = shared_profile.profile_path(repo)
@@ -315,6 +343,9 @@ class ReviewPanel(QWidget):
         except OSError as exc:
             QMessageBox.critical(self, "Could not write", str(exc))
             return
+        # The repository now ships a profile, so it belongs in the list; without
+        # this it appears only after the next tab switch.
+        self._refresh_tables()
         self.status.setText(f"Shared: {written}. Commit it to pass it on.")
 
     def _on_copy_repo_tables(self) -> None:
@@ -485,26 +516,37 @@ class ReviewPanel(QWidget):
             self._worker.cancel()
 
     # ---- profiles ---------------------------------------------------------------
-    def _profiles(self) -> list:
-        """Every profile that can be chosen.
+    def _reload_profiles(self) -> None:
+        """Rebuild the list of profiles that can be chosen.
 
         The repository's own comes first when it has one: a clone should be
         reviewed against the standard the project holds to, and having to go
         and find it in a dropdown is how that does not happen.
+
+        Done once per refresh and kept, not rebuilt per call: the shipped
+        defaults and a repository's profile are built fresh each time they are
+        read, so two calls hand out two objects and an edit made to one of them
+        is lost the moment anything asks again.
         """
         repo_profile, self._repo_tables = shared_profile.read(self._repo_path())
         offered = [*self.settings.review_profiles, profiles_mod.defaults()]
-        return [repo_profile, *offered] if repo_profile is not None else offered
+        self._all_profiles = (
+            [repo_profile, *offered] if repo_profile is not None else offered
+        )
+
+    def _profiles(self) -> list:
+        return self._all_profiles
 
     def _refresh_tables(self) -> None:
         """Show the profiles, selecting the one this repository is assigned."""
         repo = self._repo_path()
         self._migrate(repo)
+        self._reload_profiles()
         assigned = self.settings.review_profile_for_repo(repo) if repo else ""
 
         self.profile_combo.blockSignals(True)
         self.profile_combo.clear()
-        for profile in self._profiles():
+        for profile in self._all_profiles:
             self.profile_combo.addItem(profile.display(), profile.name)
         index = self.profile_combo.findData(assigned) if assigned else -1
         if index < 0 and self.profile_combo.count():
@@ -540,24 +582,38 @@ class ReviewPanel(QWidget):
         self.settings.save()
 
     def _current_profile(self):
+        """The profile a review would run against: the one in the dropdown."""
         wanted = self.profile_combo.currentData()
-        return next((p for p in self._profiles() if p.name == wanted), None)
+        return next((p for p in self._all_profiles if p.name == wanted), None)
+
+    def _viewed_profile(self):
+        """The profile the Profiles tab has open, which need not be that one."""
+        found = next((p for p in self._all_profiles if p.name == self._viewed), None)
+        # Falls back to the one under review, so opening the tab shows something
+        # rather than nothing, and so a profile that has just been deleted or
+        # renamed does not leave the tab blank.
+        return found if found is not None else self._current_profile()
 
     def _refresh_versions(self) -> None:
         """What the repository declares about its own languages."""
         repo = self._repo_path()
+        self._detected = {}
+        self._version_sources = {}
         self._versions = {}
         if not repo:
             return
         found = version_detection.detect(repo)
-        self._versions = {language: d.version for language, d in found.items()}
+        self._detected = {language: d.version for language, d in found.items()}
         self._version_sources = {
             language: d.describe() for language, d in found.items()
         }
+        # What a review would use. A version the profile pins is a decision; a
+        # detected one is only the best reading of what the repository says
+        # about itself. The tab is shown the detection alone, so a version the
+        # profile on screen does not pin is never labelled as one it does.
+        self._versions = dict(self._detected)
         profile = self._current_profile()
         if profile is not None:
-            # A version the profile pins is a decision; a detected one is only
-            # the best reading of what the repository says about itself.
             self._versions.update(profiles_mod.versions_of(profile))
 
     def _current_table(self) -> RuleTable | None:
@@ -593,18 +649,29 @@ class ReviewPanel(QWidget):
         self.rules_note.setText(f"{len(table.rules)} rule(s){source}")
 
     def _show_profile(self) -> None:
-        """Draw the profile, with what the repository declares filled in."""
-        profile = self._current_profile()
+        """Draw the profile on screen, with what the repository declares filled in."""
+        profile = self._viewed_profile()
+        self._viewed = profile.name if profile is not None else ""
+        self.profile_tab.show_profiles(
+            self._all_profiles,
+            self._viewed,
+            in_use=self.profile_combo.currentData() or "",
+        )
         inlined = dict(self._repo_tables) if profile and profile.from_repository() else {}
         self.profile_tab.show_profile(
             profile,
             _StoreView(self._store, inlined),
-            self._versions,
+            self._detected,
             self._version_sources,
         )
         self.profile_tab.attach_version_pickers()
 
     def _on_profile_changed(self, _index: int) -> None:
+        """Choose the profile the next review runs against.
+
+        This says nothing about which profile the Profiles tab has open; it only
+        moves the mark that says which one is in use.
+        """
         repo = self._repo_path()
         chosen = self.profile_combo.currentData()
         if repo and chosen:
@@ -1173,6 +1240,18 @@ def _inset(widget: QWidget, margins: tuple[int, int, int, int]) -> QWidget:
     box.setContentsMargins(*margins)
     box.addWidget(widget)
     return host
+
+
+def _free_profile_name(wanted: str, settings) -> str:
+    """``wanted``, or the first numbered variant nobody is using.
+
+    Two profiles with one name is one profile as far as lookup by name is
+    concerned, and which of them a repository gets would be an accident.
+    """
+    taken = {p.name for p in settings.review_profiles}
+    if wanted not in taken:
+        return wanted
+    return next(f"{wanted} {n}" for n in range(2, 1000) if f"{wanted} {n}" not in taken)
 
 
 def _coverage_note(run, stored=None) -> str:

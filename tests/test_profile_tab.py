@@ -59,6 +59,66 @@ def _row(tab, label):
     raise AssertionError(label)
 
 
+# ---- the list of profiles ------------------------------------------------------
+def _named(*names):
+    return [Profile(name, [LanguageRules("python", selections=[Selection("builtin:python")])])
+            for name in names]
+
+
+def test_every_profile_is_listed(qapp, store):
+    tab = _tab(qapp, store=store)
+    tab.show_profiles(_named("Mine", "Theirs", "Built-in defaults"), "Mine")
+
+    listed = [tab.profiles_list.item(i).text() for i in range(tab.profiles_list.count())]
+    assert listed == ["Mine", "Theirs", "Built-in defaults"]
+    assert tab.profiles_list.currentItem().text() == "Mine"
+
+
+def test_picking_one_says_which(qapp, store):
+    tab = _tab(qapp, store=store)
+    tab.show_profiles(_named("Mine", "Theirs"), "Mine")
+    picked = []
+    tab.selected.connect(picked.append)
+
+    tab.profiles_list.setCurrentRow(1)
+
+    assert picked == ["Theirs"]
+
+
+def test_filling_the_list_is_not_a_choice(qapp, store):
+    """Otherwise every refresh would read as the user picking something."""
+    tab = _tab(qapp, store=store)
+    picked = []
+    tab.selected.connect(picked.append)
+
+    tab.show_profiles(_named("Mine", "Theirs"), "Theirs")
+
+    assert picked == []
+
+
+def test_the_profile_a_review_uses_is_marked_and_named(qapp, store):
+    """Reading one and reviewing against another is the mistake the split invites."""
+    tab = _tab(qapp, store=store)
+    tab.show_profiles(_named("Mine", "Theirs"), "Mine", in_use="Theirs")
+
+    assert tab.profiles_list.item(1).font().bold()
+    assert not tab.profiles_list.item(0).font().bold()
+    assert "Theirs" in tab.in_use.text()
+
+
+def test_a_repository_with_no_profile_yet_says_so(qapp, store):
+    tab = _tab(qapp, store=store)
+    tab.show_profiles(_named("Mine"), "Mine", in_use="")
+    assert "No profile is set" in tab.in_use.text()
+
+
+def test_the_profile_on_screen_is_the_one_that_was_edited(qapp, store):
+    """Not a copy: the panel saves what the tab mutated, or the edit is lost."""
+    profile = _profile()
+    tab = _tab(qapp, profile=profile, store=store)
+    assert tab.profile() is profile
+
+
 # ---- what it shows -----------------------------------------------------------
 def test_a_row_per_language_the_profile_covers(qapp, store):
     tab = _tab(qapp, store=store)
