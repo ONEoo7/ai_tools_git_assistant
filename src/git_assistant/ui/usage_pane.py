@@ -3,10 +3,11 @@
 Sits beside the connection settings because that is where the question comes
 up: having chosen a provider and a model, how much has this been using them.
 
-Two views of one file. The tree is the lifetime answer, provider by provider
-and model by model, and it is never pruned. The list below it is the last few
-hundred calls in the shape they happened -- provider, model, when, in, out,
-total -- which is what tells you *which run* was expensive.
+Two views of one file. The tree is the lifetime answer -- provider, then model,
+then what it was used for -- and it is never pruned; a model every tab shares
+answers "how much has this cost" with one figure otherwise, which is not the
+question anyone is asking. The list below it is the last few hundred calls as
+they happened, which is what tells you *which run* was expensive.
 """
 
 from __future__ import annotations
@@ -59,7 +60,7 @@ class UsagePane(QWidget):
 
         self.totals_tree = QTreeWidget()
         self.totals_tree.setHeaderLabels(
-            ["Provider / model", "Last used", "Calls", "Input", "Output", "Total"]
+            ["Provider / model / feature", "Last used", "Calls", "Input", "Output", "Total"]
         )
         _size_columns(self.totals_tree, stretch=0)
         # Wrapped so it can be inset from the handle below it. A tree added to
@@ -76,10 +77,10 @@ class UsagePane(QWidget):
         recent_box.addWidget(QLabel("Recent calls"))
         self.calls_tree = QTreeWidget()
         self.calls_tree.setHeaderLabels(
-            ["Provider", "Model", "When", "Input", "Output", "Total"]
+            ["Provider", "Model", "For", "When", "Input", "Output", "Total"]
         )
         self.calls_tree.setRootIsDecorated(False)
-        _size_columns(self.calls_tree, stretch=1)
+        _size_columns(self.calls_tree, stretch=1, first_number=4)
         recent_box.addWidget(self.calls_tree, 1)
         split.addWidget(recent)
 
@@ -134,8 +135,8 @@ class UsagePane(QWidget):
                 item.setText(1, _label(last))
                 for column, value in ((2, calls), (3, inp), (4, out), (5, inp + out)):
                     item.setText(column, _n(value))
-                for total in sorted(totals, key=lambda t: t.last, reverse=True):
-                    item.addChild(_model_row(total))
+                for model in _by_model(totals):
+                    item.addChild(model)
             else:
                 item.setText(1, "not used yet")
                 item.setForeground(0, _MUTED)
@@ -155,6 +156,7 @@ class UsagePane(QWidget):
                 [
                     labels.get(event.provider, event.provider),
                     event.model,
+                    event.feature,
                     event.when_label(),
                     f"{mark}{_n(event.input_tokens)}",
                     f"{mark}{_n(event.output_tokens)}",
@@ -162,12 +164,12 @@ class UsagePane(QWidget):
                 ]
             )
             if event.estimated:
-                row.setToolTip(3, "counted by this application, not by the provider")
-            self._align(row)
+                row.setToolTip(4, "counted by this application, not by the provider")
+            self._align(row, first_number=4)
             self.calls_tree.addTopLevelItem(row)
 
-    def _align(self, item: QTreeWidgetItem) -> None:
-        for column in range(3, 6):
+    def _align(self, item: QTreeWidgetItem, first_number: int = 3) -> None:
+        for column in range(first_number, first_number + 3):
             item.setTextAlignment(column, Qt.AlignmentFlag.AlignRight)
 
     def _fill_note(self) -> None:
@@ -188,14 +190,17 @@ class UsagePane(QWidget):
 
     # ---- what the user can do with it ----------------------------------------
     def to_markdown(self) -> str:
-        rows = ["| Provider | Model | Last used | Calls | Input | Output | Total |",
-                "| --- | --- | --- | ---: | ---: | ---: | ---: |"]
+        rows = [
+            "| Provider | Model | For | Last used | Calls | Input | Output | Total |",
+            "| --- | --- | --- | --- | ---: | ---: | ---: | ---: |",
+        ]
         labels = {p.key: p.label for p in PROVIDERS}
         for total in sorted(self._usage.totals, key=lambda t: t.last, reverse=True):
             rows.append(
                 f"| {labels.get(total.provider, total.provider)} | {total.model} | "
-                f"{total.last_label()} | {_n(total.calls)} | {_n(total.input_tokens)} | "
-                f"{_n(total.output_tokens)} | {_n(total.total)} |"
+                f"{total.feature} | {total.last_label()} | {_n(total.calls)} | "
+                f"{_n(total.input_tokens)} | {_n(total.output_tokens)} | "
+                f"{_n(total.total)} |"
             )
         return "\n".join(rows) + "\n"
 
@@ -222,7 +227,7 @@ class UsagePane(QWidget):
             self.refresh()
 
 
-def _size_columns(tree: QTreeWidget, *, stretch: int) -> None:
+def _size_columns(tree: QTreeWidget, *, stretch: int, first_number: int = 3) -> None:
     """Numbers take what they need; one text column absorbs the rest.
 
     This pane is the narrow half of a splitter, and fixed widths put a
@@ -239,30 +244,67 @@ def _size_columns(tree: QTreeWidget, *, stretch: int) -> None:
         tree.headerItem().setTextAlignment(
             column,
             Qt.AlignmentFlag.AlignRight
-            if column >= 3
+            if column >= first_number
             else Qt.AlignmentFlag.AlignLeft,
         )
 
 
-def _model_row(total) -> QTreeWidgetItem:
-    mark = "~" if total.estimated_calls else ""
+def _by_model(totals: list) -> list[QTreeWidgetItem]:
+    """A row per model, each carrying a row per feature it was used for.
+
+    Three levels rather than two because "which of these was the code review"
+    is the question the numbers raise, and a model used by every tab answers it
+    with one figure otherwise.
+    """
+    grouped: dict[str, list] = {}
+    for total in totals:
+        grouped.setdefault(total.model, []).append(total)
+
+    rows = []
+    for model, per_feature in sorted(
+        grouped.items(), key=lambda kv: max(t.last for t in kv[1]), reverse=True
+    ):
+        item = _row(
+            model,
+            per_feature,
+            calls=sum(t.calls for t in per_feature),
+            inp=sum(t.input_tokens for t in per_feature),
+            out=sum(t.output_tokens for t in per_feature),
+        )
+        for total in sorted(per_feature, key=lambda t: t.last, reverse=True):
+            item.addChild(
+                _row(
+                    total.feature,
+                    [total],
+                    calls=total.calls,
+                    inp=total.input_tokens,
+                    out=total.output_tokens,
+                )
+            )
+        rows.append(item)
+    return rows
+
+
+def _row(label: str, totals: list, *, calls: int, inp: int, out: int) -> QTreeWidgetItem:
+    estimated = sum(t.estimated_calls for t in totals)
+    mark = "~" if estimated else ""
     item = QTreeWidgetItem(
         [
-            total.model,
-            total.last_label(),
-            _n(total.calls),
-            f"{mark}{_n(total.input_tokens)}",
-            f"{mark}{_n(total.output_tokens)}",
-            f"{mark}{_n(total.total)}",
+            label,
+            _label(max(t.last for t in totals)),
+            _n(calls),
+            f"{mark}{_n(inp)}",
+            f"{mark}{_n(out)}",
+            f"{mark}{_n(inp + out)}",
         ]
     )
     for column in range(3, 6):
         item.setTextAlignment(column, Qt.AlignmentFlag.AlignRight)
-    if total.estimated_calls:
+    if estimated:
         item.setToolTip(
             0,
-            f"{total.estimated_calls} of {total.calls} call(s) were counted by "
-            "this application because the provider reported no usage.",
+            f"{estimated} of {calls} call(s) were counted by this application "
+            "because the provider reported no usage.",
         )
     return item
 

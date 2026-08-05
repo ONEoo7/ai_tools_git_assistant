@@ -40,11 +40,14 @@ class OpenAICompatibleClient:
         chat_timeout: float = CHAT_TIMEOUT,
         list_timeout: float = LIST_TIMEOUT,
         provider_key: str = "openai",
+        feature: str = "",
     ) -> None:
         self.base_url = base_url.rstrip("/")
         # This client serves several providers, so it has to be told which one
-        # its usage is filed under; see git_assistant.usage.
+        # its usage is filed under -- and what it is being spent on; see
+        # git_assistant.usage.
         self.provider_key = provider_key
+        self.feature = feature
         self._api_key = api_key
         self._auth_header = auth_header
         # Azure rejects an empty api-version rather than defaulting, so an
@@ -126,7 +129,13 @@ class OpenAICompatibleClient:
         except (KeyError, IndexError, TypeError, AttributeError) as exc:
             raise LLMError(f"unexpected response shape: {payload}") from exc
         usage.record_openai_response(
-            self.provider_key, model, payload, system=system, user=user, reply=text
+            self.provider_key,
+            model,
+            payload,
+            system=system,
+            user=user,
+            reply=text,
+            feature=self.feature,
         )
         return text
 

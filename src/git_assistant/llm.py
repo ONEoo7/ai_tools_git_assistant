@@ -55,12 +55,17 @@ class ChatClient(Protocol):
     def ping(self) -> list[ModelInfo]: ...
 
 
-def build_client(settings) -> ChatClient:
+def build_client(settings, feature: str = "") -> ChatClient:
     """The client for the provider the user selected.
 
     Imports inside the branches: the Claude client needs the `anthropic`
     package, and a build or a checkout without it must still run LM Studio
     rather than failing at import time for a provider nobody selected.
+
+    ``feature`` is what the completions will be spent on -- a commit message, a
+    code review, an audit. It is recorded with the usage, and here is the last
+    place it is known: by the time an answer comes back there is only a provider
+    and a model. See git_assistant.usage.
     """
     from git_assistant import providers
 
@@ -74,12 +79,18 @@ def build_client(settings) -> ChatClient:
     if provider.key == "lmstudio":
         from git_assistant.lmstudio_client import LMStudioClient
 
-        return LMStudioClient(settings.base_url, provider_key=provider.key)
+        return LMStudioClient(
+            settings.base_url, provider_key=provider.key, feature=feature
+        )
 
     if provider.key == "claude":
         from git_assistant.claude_client import ClaudeClient
 
-        return ClaudeClient(api_key=_require_key(provider), provider_key=provider.key)
+        return ClaudeClient(
+            api_key=_require_key(provider),
+            provider_key=provider.key,
+            feature=feature,
+        )
 
     if provider.openai_compatible:
         from git_assistant.openai_client import OpenAICompatibleClient
@@ -92,6 +103,7 @@ def build_client(settings) -> ChatClient:
             # One client, several providers: usage has to be filed under the
             # one that was actually asked, not under "openai" for all of them.
             provider_key=provider.key,
+            feature=feature,
         )
 
     raise LLMError(f"no client is wired up for {provider.label}")

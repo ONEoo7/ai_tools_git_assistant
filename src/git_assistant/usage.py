@@ -8,8 +8,9 @@ or from the MCP server all count the same.
 
     <config dir>/llm_usage.json
 
-Two halves. ``totals`` is per provider and model and is never pruned, because
-"how much has this cost me" must not change when the detail is trimmed.
+Two halves. ``totals`` is per provider, model and feature -- a commit message,
+a code review, a repository audit -- and is never pruned, because "how much has
+this cost me, and on what" must not change when the detail is trimmed.
 ``events`` is the newest few hundred calls, which is what a table of recent
 activity needs and no more.
 
@@ -35,6 +36,17 @@ from git_assistant.config import APP_NAME
 USAGE_FILE = "llm_usage.json"
 SCHEMA_VERSION = 1
 
+#: What the tokens were spent on. Set when the client is built, because that is
+#: the last point where the answer is known: by the time a completion comes back
+#: there is only a provider and a model, and "which of these was the code
+#: review" is exactly the question a bill raises.
+COMMIT = "Commit message"
+REVIEW = "Code review"
+AUDIT = "Repository audit"
+#: Calls recorded before features were attributed, and any path that forgets to
+#: say. Named rather than blank so it reads as a gap, not as a category.
+UNATTRIBUTED = "(unattributed)"
+
 #: Calls kept in the detail table. Twenty reviews of forty files each is 800
 #: rows; past that the table is a log nobody reads, and the totals are the
 #: answer anyway.
@@ -57,6 +69,7 @@ class Event:
     when: str  # ISO-8601 UTC, sortable
     provider: str
     model: str
+    feature: str = UNATTRIBUTED  # what it was spent on; see the constants above
     input_tokens: int = 0
     output_tokens: int = 0
     #: True when the provider did not report usage and this build counted the
@@ -82,6 +95,7 @@ class Total:
 
     provider: str
     model: str
+    feature: str = UNATTRIBUTED
     calls: int = 0
     input_tokens: int = 0
     output_tokens: int = 0
@@ -94,7 +108,7 @@ class Total:
         return self.input_tokens + self.output_tokens
 
     def key(self) -> str:
-        return f"{self.provider}\x1f{self.model}"
+        return "\x1f".join((self.provider, self.model, self.feature))
 
     def last_label(self) -> str:
         return Event(self.last, self.provider, self.model).when_label() if self.last else ""
@@ -135,6 +149,8 @@ def parse(data: object) -> Usage:
         Total(
             provider=str(t.get("provider", "")),
             model=str(t.get("model", "")),
+            # Absent from files written before features were attributed.
+            feature=str(t.get("feature", "")) or UNATTRIBUTED,
             calls=int(t.get("calls", 0) or 0),
             input_tokens=int(t.get("input_tokens", 0) or 0),
             output_tokens=int(t.get("output_tokens", 0) or 0),
@@ -150,6 +166,7 @@ def parse(data: object) -> Usage:
             when=str(e.get("when", "")),
             provider=str(e.get("provider", "")),
             model=str(e.get("model", "")),
+            feature=str(e.get("feature", "")) or UNATTRIBUTED,
             input_tokens=int(e.get("input_tokens", 0) or 0),
             output_tokens=int(e.get("output_tokens", 0) or 0),
             estimated=bool(e.get("estimated", False)),
@@ -190,6 +207,7 @@ def record(
     input_tokens: int,
     output_tokens: int,
     *,
+    feature: str = "",
     estimated: bool = False,
     limit: int = DEFAULT_LIMIT,
 ) -> Event | None:
@@ -208,6 +226,7 @@ def record(
         when=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z",
         provider=provider,
         model=model or "(unnamed)",
+        feature=feature or UNATTRIBUTED,
         input_tokens=max(0, int(input_tokens or 0)),
         output_tokens=max(0, int(output_tokens or 0)),
         estimated=estimated,
@@ -227,10 +246,19 @@ def record(
 
 def _add(usage: Usage, event: Event) -> None:
     for total in usage.totals:
-        if total.provider == event.provider and total.model == event.model:
+        if (
+            total.provider == event.provider
+            and total.model == event.model
+            and total.feature == event.feature
+        ):
             break
     else:
-        total = Total(provider=event.provider, model=event.model, first=event.when)
+        total = Total(
+            provider=event.provider,
+            model=event.model,
+            feature=event.feature,
+            first=event.when,
+        )
         usage.totals.append(total)
     total.calls += 1
     total.input_tokens += event.input_tokens
@@ -280,7 +308,14 @@ def estimate(*, system: str, user: str, reply: str) -> tuple[int, int]:
 
 
 def record_openai_response(
-    provider: str, model: str, payload: object, *, system: str, user: str, reply: str
+    provider: str,
+    model: str,
+    payload: object,
+    *,
+    system: str,
+    user: str,
+    reply: str,
+    feature: str = "",
 ) -> Event | None:
     """Record a completion from an OpenAI-shaped answer, however it counted.
 
@@ -294,4 +329,6 @@ def record_openai_response(
         estimated = True
     else:
         estimated = False
-    return record(provider, model, counted[0], counted[1], estimated=estimated)
+    return record(
+        provider, model, counted[0], counted[1], feature=feature, estimated=estimated
+    )

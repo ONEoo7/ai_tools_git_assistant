@@ -84,16 +84,17 @@ def test_one_provider_s_usage_is_not_counted_under_another(qapp):
     assert _find(pane.totals_tree, "Claude").text(5) == "9"
 
 
-def test_a_recent_call_is_one_row_of_provider_model_when_and_tokens(qapp):
-    usage.record("lmstudio", "qwen3.5-4b", 1200, 340)
+def test_a_recent_call_says_provider_model_what_for_when_and_tokens(qapp):
+    usage.record("lmstudio", "qwen3.5-4b", 1200, 340, feature=usage.REVIEW)
 
     pane = UsagePane()
     row = _rows(pane.calls_tree)[0]
 
     assert row[0] == "LM Studio"
     assert row[1] == "qwen3.5-4b"
-    assert row[2]  # a readable local timestamp
-    assert row[3:] == ["1,200", "340", "1,540"]
+    assert row[2] == "Code review"
+    assert row[3]  # a readable local timestamp
+    assert row[4:] == ["1,200", "340", "1,540"]
 
 
 def test_the_newest_call_is_at_the_top(qapp):
@@ -108,7 +109,7 @@ def test_a_counted_here_call_is_marked_rather_than_presented_as_measured(qapp):
 
     pane = UsagePane()
 
-    assert _rows(pane.calls_tree)[0][3].startswith("~")
+    assert _rows(pane.calls_tree)[0][4].startswith("~")
     assert "did not report usage" in pane.note.text()
 
 
@@ -156,3 +157,34 @@ def test_clearing_forgets_everything_shown(qapp, monkeypatch):
 
     assert pane.calls_tree.topLevelItemCount() == 0
     assert _find(pane.totals_tree, "LM Studio").text(1) == "not used yet"
+
+
+# ---- which run the tokens went on -------------------------------------------------
+def test_a_model_used_by_two_tabs_is_broken_down_by_what_it_was_used_for(qapp):
+    """One figure for a model every tab shares does not answer the question."""
+    usage.record("lmstudio", "qwen3.5-4b", 1000, 100, feature=usage.COMMIT)
+    usage.record("lmstudio", "qwen3.5-4b", 4000, 200, feature=usage.REVIEW)
+    usage.record("lmstudio", "qwen3.5-4b", 500, 50, feature=usage.REVIEW)
+
+    pane = UsagePane()
+    model = _find(pane.totals_tree, "LM Studio").child(0)
+
+    assert model.text(0) == "qwen3.5-4b"
+    assert model.text(2) == "3"  # every call, whatever it was for
+    features = {model.child(i).text(0): model.child(i).text(5) for i in range(model.childCount())}
+    assert features == {"Commit message": "1,100", "Code review": "4,750"}
+
+
+def test_a_call_from_before_features_were_recorded_is_shown_as_a_gap(qapp):
+    usage.record("lmstudio", "qwen3.5-4b", 10, 1)
+
+    pane = UsagePane()
+
+    assert _rows(pane.calls_tree)[0][2] == "(unattributed)"
+
+
+def test_the_copied_table_says_what_each_row_was_for(qapp):
+    usage.record("lmstudio", "qwen3.5-4b", 1200, 340, feature=usage.AUDIT)
+    pane = UsagePane()
+    assert "| Repository audit |" in pane.to_markdown()
+

@@ -47,11 +47,17 @@ class ClaudeClient:
     """Talks to the Messages API. Same four methods as every other provider."""
 
     def __init__(
-        self, api_key: str, timeout: float = CHAT_TIMEOUT, provider_key: str = "claude"
+        self,
+        api_key: str,
+        timeout: float = CHAT_TIMEOUT,
+        provider_key: str = "claude",
+        feature: str = "",
     ) -> None:
         self._api_key = api_key
-        #: Which provider the recorded usage is filed under.
+        #: Which provider the recorded usage is filed under, and what it is
+        #: being spent on; see git_assistant.usage.
         self.provider_key = provider_key
+        self.feature = feature
         self._timeout = timeout
 
     def _client(self, timeout: float):
@@ -135,11 +141,16 @@ class ClaudeClient:
                 model or DEFAULT_MODEL,
                 getattr(counted, "input_tokens", 0),
                 getattr(counted, "output_tokens", 0),
+                feature=self.feature,
             )
         else:
             estimated = usage.estimate(system=system, user=user, reply=text)
             usage.record(
-                self.provider_key, model or DEFAULT_MODEL, *estimated, estimated=True
+                self.provider_key,
+                model or DEFAULT_MODEL,
+                *estimated,
+                feature=self.feature,
+                estimated=True,
             )
         return text
 

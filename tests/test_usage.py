@@ -200,3 +200,66 @@ def test_a_time_is_shown_in_local_time_not_utc():
     usage.record("lmstudio", "m", 1, 1)
     label = usage.load().events[0].when_label()
     assert ":" in label and "T" not in label
+
+
+# ---- what the tokens were spent on ------------------------------------------------
+def test_a_call_records_what_it_was_for():
+    usage.record("lmstudio", "qwen3.5-4b", 100, 10, feature=usage.REVIEW)
+    assert usage.load().events[0].feature == "Code review"
+
+
+def test_one_model_used_for_two_things_is_two_totals():
+    usage.record("lmstudio", "m", 100, 10, feature=usage.COMMIT)
+    usage.record("lmstudio", "m", 400, 20, feature=usage.REVIEW)
+
+    totals = {t.feature: t.input_tokens for t in usage.load().totals}
+
+    assert totals == {"Commit message": 100, "Code review": 400}
+
+
+def test_a_call_that_says_nothing_is_marked_as_a_gap_not_as_a_category():
+    usage.record("lmstudio", "m", 1, 1)
+    assert usage.load().totals[0].feature == usage.UNATTRIBUTED
+
+
+def test_a_file_written_before_features_existed_still_loads(store):
+    """Its rows read as unattributed rather than disappearing."""
+    (store / usage.USAGE_FILE).write_text(
+        json.dumps(
+            {
+                "totals": [{"provider": "lmstudio", "model": "m", "calls": 4}],
+                "events": [{"provider": "lmstudio", "model": "m", "when": "2026-01-01T00:00:00Z"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    loaded = usage.load()
+    assert loaded.totals[0].feature == usage.UNATTRIBUTED
+    assert loaded.events[0].feature == usage.UNATTRIBUTED
+
+
+def test_the_client_a_run_builds_carries_what_the_run_is_for():
+    """Set where it is known: a completion knows only a provider and a model."""
+    from git_assistant.config import Settings
+    from git_assistant.llm import build_client
+
+    settings = Settings(provider="lmstudio")
+    assert build_client(settings, feature=usage.AUDIT).feature == "Repository audit"
+    assert build_client(settings).feature == ""
+
+
+def test_a_completion_is_filed_under_the_feature_its_client_was_built_with():
+    from git_assistant.lmstudio_client import LMStudioClient
+
+    client = LMStudioClient("http://x", feature=usage.COMMIT)
+    usage.record_openai_response(
+        client.provider_key,
+        "m",
+        {"usage": {"prompt_tokens": 10, "completion_tokens": 2}},
+        system="s",
+        user="u",
+        reply="r",
+        feature=client.feature,
+    )
+
+    assert usage.load().events[0].feature == "Commit message"

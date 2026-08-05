@@ -192,6 +192,7 @@ def _describe_push_auth(ctx: ToolContext, args: dict, **_kw) -> dict:
 # ---- the things that need the model ----------------------------------------
 def _generate_commit_message(ctx: ToolContext, args: dict, *, progress, is_cancelled) -> dict:
     from git_assistant.commit_generator import CommitGenerator
+    from git_assistant import usage
     from git_assistant.llm import build_client
 
     settings = ctx.settings()  # a private copy: the generator reads these
@@ -201,7 +202,8 @@ def _generate_commit_message(ctx: ToolContext, args: dict, *, progress, is_cance
     if args.get("template"):
         settings.set_repo_template(settings.active_repo, args["template"])
 
-    result = CommitGenerator(settings, build_client(settings)).generate(
+    client = build_client(settings, feature=usage.COMMIT)
+    result = CommitGenerator(settings, client).generate(
         progress=progress, is_cancelled=is_cancelled
     )
     # The message alone, so it can be used verbatim. Everything about how it was

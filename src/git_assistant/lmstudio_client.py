@@ -32,11 +32,13 @@ class LMStudioClient:
         chat_timeout: float = 600.0,
         connect_timeout: float = 3.0,
         provider_key: str = "lmstudio",
+        feature: str = "",
     ) -> None:
         self.base_url = base_url.rstrip("/")
-        # Which provider the recorded usage is filed under; see
-        # git_assistant.usage.
+        # Which provider the recorded usage is filed under, and what it is
+        # being spent on; see git_assistant.usage.
         self.provider_key = provider_key
+        self.feature = feature
         # Listing models must fail fast so the UI never appears to hang.
         # Chat completions may legitimately take a long time to generate.
         self.list_timeout = list_timeout
@@ -164,7 +166,13 @@ class LMStudioClient:
         # Recorded here rather than in the UI, so a run started from the tray,
         # a tab or the MCP server all count the same.
         usage.record_openai_response(
-            self.provider_key, model, payload, system=system, user=user, reply=text
+            self.provider_key,
+            model,
+            payload,
+            system=system,
+            user=user,
+            reply=text,
+            feature=self.feature,
         )
         return text
 

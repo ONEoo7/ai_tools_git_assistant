@@ -212,8 +212,11 @@ spreadsheet a team already keeps its standard in, with a `ruleID` column and a
 ## What each provider has been asked to do
 
 The **Connection & Model** tab carries a usage pane on the right: lifetime
-totals per provider and per model, and the last few hundred calls behind them --
-provider, model, when, input tokens, output tokens, total.
+totals per provider, per model and per *feature* -- a commit message, a code
+review, a repository audit -- and the last few hundred calls behind them:
+provider, model, what for, when, input tokens, output tokens, total. A model
+every tab shares would otherwise answer "how much has this cost" with a single
+figure, which is not the question anyone is asking.
 
 The count is taken where the answer comes back, inside the provider clients, so
 a run started from the tray, from a tab or through the MCP server all count the

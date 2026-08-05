@@ -249,7 +249,10 @@ def test_a_listener_is_handed_every_call_the_narration_makes(monkeypatch):
     """The Agents tab shows them, so a poor paragraph traces to one exchange."""
     import git_assistant.agents as agents_pkg
 
-    monkeypatch.setattr(agents_pkg, "build_client", lambda s: _Client())
+    # Same signature as the real one: a run says what it is spending on.
+    monkeypatch.setattr(
+        agents_pkg, "build_client", lambda s, feature="": _Client()
+    )
     seen = []
 
     report = _stub_run(monkeypatch, on_call=seen.append)
@@ -264,7 +267,10 @@ def test_nothing_pays_for_a_recorder_it_will_not_read(monkeypatch):
     from git_assistant.llm_log import RecordingClient
 
     given = []
-    monkeypatch.setattr(agents_pkg, "build_client", lambda s: _Client())
+    # Same signature as the real one: a run says what it is spending on.
+    monkeypatch.setattr(
+        agents_pkg, "build_client", lambda s, feature="": _Client()
+    )
     real = agents_pkg.ModelRuntime
 
     class Spy(real):

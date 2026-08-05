@@ -26,7 +26,7 @@ from git_assistant.agents.base import (
 from git_assistant.agents.config_audit import ConfigAuditAgent
 from git_assistant.model_runtime import ModelRuntime
 from git_assistant.agents.size_audit import SizeAuditAgent
-from git_assistant import llm_log
+from git_assistant import llm_log, usage
 from git_assistant.llm import build_client
 from git_assistant.llm_log import RecordingClient
 
@@ -102,7 +102,7 @@ def run(
         return report
 
     try:
-        client = build_client(settings)
+        client = build_client(settings, feature=usage.AUDIT)
         if on_call is not None:
             client = RecordingClient(client, on_call=on_call)
             client.phase = llm_log.NARRATE

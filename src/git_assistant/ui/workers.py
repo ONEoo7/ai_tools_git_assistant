@@ -23,6 +23,7 @@ from git_assistant.commit_generator import (
     GenerationResult,
 )
 from git_assistant.config import Settings
+from git_assistant import usage
 from git_assistant.llm import build_client
 from git_assistant.llm_log import RecordingClient
 
@@ -54,7 +55,7 @@ class GeneratorWorker(QObject):
             # than falling back: generating through LM Studio while the window
             # says "Claude" would put that model's output under the wrong name,
             # and the user would have no way to tell.
-            client = build_client(self._settings)
+            client = build_client(self._settings, feature=usage.COMMIT)
             # Wrapped so every exchange can be inspected afterwards. The
             # recorder forwards each call unchanged, so what it shows is what
             # was sent -- see git_assistant.llm_log.
@@ -103,7 +104,7 @@ class ReviewWorker(QObject):
         from git_assistant.review import reviewer
 
         try:
-            client = build_client(self._settings)
+            client = build_client(self._settings, feature=usage.REVIEW)
             recorder = RecordingClient(client, on_call=self.call.emit)
             run = reviewer.review(
                 self._settings,
