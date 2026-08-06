@@ -364,6 +364,49 @@ default stores nothing, so the default can change later and reach you.
 Anthropic's current models reject the parameter outright, and the field says so
 rather than pretending to set it.
 
+## Repository consistency audit
+
+A third agent, answering two questions that only get asked once a project has
+been running a while.
+
+**What can I delete?** Branches accumulate, and `git branch` shows no difference
+between a branch merged a year ago and one holding work somebody put down. The
+audit separates them:
+
+- **Stale and merged** — their commits are already on the default branch, so
+  deleting the branch loses nothing. These get a `git branch -d` block to read
+  and run. `-d`, never `-D`: that is git's own refusal to lose work, and it is
+  why the block can be offered at all.
+- **Stale and unmerged** — listed with their age and upstream, and **no command
+  is offered**, because the branch is the only copy. A branch whose upstream
+  shows `(gone)` was probably squash-merged; git cannot tell that from abandoned
+  work, and neither can this.
+- **Protected** — what the rules spared, so the rules can be seen working. The
+  default branch is protected whether or not it is listed.
+
+The rules live in the Agents tab: how many months counts as stale (6 by
+default), whether unmerged branches may ever be proposed (no), whether unpushed
+work is kept (yes), and a comma-separated list of names and globs to spare
+(`main, master, develop, trunk, release/*, hotfix/*`).
+
+**Is the fleet consistent?** The submodule half sweeps **every repository in
+your Repositories list**, not just the selected one — that is the only way "how
+many repositories use this" can be a number. It reports which repositories use
+which submodule, at which version, and which are pinned at different versions of
+the same dependency.
+
+Two things make those numbers mean something:
+
+- **A submodule is identified by its remote URL, not its path.** One dependency
+  vendored at `vendor/lib` and `third_party/lib` is one row.
+  `git@host:owner/repo.git` and `https://host/owner/repo` are the same place.
+- **The version is the commit the parent pins**, read from its `HEAD` tree and
+  described by tags — not whatever is checked out locally. A working tree that
+  has drifted off its pin is reported as *drift*, which is a finding: it is
+  invisible until somebody else clones and gets something else.
+
+Nothing is deleted, moved or checked out by the application.
+
 ## Keeping the prompts (Langfuse)
 
 Two records of every model call already exist and neither survives the day:

@@ -22,12 +22,14 @@ from PyQt6.QtWidgets import (
     QFileDialog,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QListWidget,
     QListWidgetItem,
     QMenu,
     QMessageBox,
     QPushButton,
     QSizePolicy,
+    QSpinBox,
     QSplitter,
     QTabWidget,
     QTextBrowser,
@@ -166,6 +168,40 @@ class AgentsPanel(QWidget):
         self.fast_check.setChecked(settings.agent_fast_mode)
         self.fast_check.toggled.connect(self._on_options_changed)
 
+        # The consistency audit's rules. Here rather than in Advanced because
+        # they are read only by an agent, and this is where an agent is run.
+        self.stale_months_spin = QSpinBox()
+        self.stale_months_spin.setRange(0, 120)
+        self.stale_months_spin.setSuffix(" months")
+        self.stale_months_spin.setToolTip(
+            "A branch untouched for longer than this counts as stale in the "
+            "repository consistency audit. Nothing is deleted either way."
+        )
+        self.stale_months_spin.valueChanged.connect(self._on_rules_changed)
+
+        self.merged_only_check = QCheckBox("Only propose merged branches")
+        self.merged_only_check.setToolTip(
+            "On, deletion is proposed only for branches whose commits are "
+            "already on the default branch. Off, an unmerged branch can be "
+            "proposed -- and its commits exist nowhere else."
+        )
+        self.merged_only_check.toggled.connect(self._on_rules_changed)
+
+        self.keep_unpushed_check = QCheckBox("Keep unpushed work")
+        self.keep_unpushed_check.setToolTip(
+            "Never propose a branch holding commits its upstream has not got."
+        )
+        self.keep_unpushed_check.toggled.connect(self._on_rules_changed)
+
+        self.protect_edit = QLineEdit()
+        self.protect_edit.setToolTip(
+            "Branch names never proposed for deletion, comma separated. "
+            "Globs work: release/* spares every release branch. The default "
+            "branch is protected whether or not it is listed."
+        )
+        self.protect_edit.editingFinished.connect(self._on_rules_changed)
+        self._show_rules(settings.stale_rules())
+
         # The same application-wide setting the Generate tab exposes, offered
         # here too so the provider can be switched where the run is started.
         # Every copy re-reads it on refresh, so they cannot disagree.
@@ -256,6 +292,13 @@ class AgentsPanel(QWidget):
         picker_box.addSpacing(SECTION_GAP)
         picker_box.addWidget(self.narrate_check)
         picker_box.addWidget(self.fast_check)
+        picker_box.addSpacing(SECTION_GAP)
+        picker_box.addWidget(QLabel("Stale branches after:"))
+        picker_box.addWidget(self.stale_months_spin)
+        picker_box.addWidget(self.merged_only_check)
+        picker_box.addWidget(self.keep_unpushed_check)
+        picker_box.addWidget(QLabel("Never delete:"))
+        picker_box.addWidget(self.protect_edit)
         picker_box.addWidget(QLabel("Inference Providers:"))
         picker_box.addWidget(self.provider_combo)
         picker_box.addWidget(self.provider_label)
@@ -457,6 +500,40 @@ class AgentsPanel(QWidget):
     def _on_options_changed(self, _checked: bool = False) -> None:
         self.settings.agents_narrate = self.narrate_check.isChecked()
         self.settings.agent_fast_mode = self.fast_check.isChecked()
+        self.settings.save()
+
+    def _show_rules(self, rules) -> None:
+        for widget, value in (
+            (self.stale_months_spin, rules.months),
+            (self.merged_only_check, rules.merged_only),
+            (self.keep_unpushed_check, rules.keep_unpushed),
+        ):
+            widget.blockSignals(True)
+            widget.setValue(value) if hasattr(widget, "setValue") else widget.setChecked(value)
+            widget.blockSignals(False)
+        self.protect_edit.setText(", ".join(rules.protect))
+
+    def _on_rules_changed(self, *_args) -> None:
+        """Keep the stale-branch rules. Read back, never held as widgets.
+
+        The audit asks `settings.stale_rules()` for an object, so what is stored
+        has to survive a round trip through the settings file -- storing the
+        widgets' values directly would work until someone hand-edited it.
+        """
+        from git_assistant.agents.branches import StaleRules
+
+        self.settings.set_stale_rules(
+            StaleRules(
+                months=self.stale_months_spin.value(),
+                protect=[
+                    part.strip()
+                    for part in self.protect_edit.text().split(",")
+                    if part.strip()
+                ],
+                merged_only=self.merged_only_check.isChecked(),
+                keep_unpushed=self.keep_unpushed_check.isChecked(),
+            )
+        )
         self.settings.save()
 
     # ---- running ------------------------------------------------------------

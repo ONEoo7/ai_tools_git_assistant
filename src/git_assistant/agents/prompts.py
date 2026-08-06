@@ -159,4 +159,29 @@ OUTLINES: dict[str, dict[str, Outline]] = {
             ),
         ),
     },
+    "consistency-audit": {
+        "consistency_summary": Outline(
+            "Executive summary of a repository consistency audit",
+            "130-180 words, 2 paragraphs",
+            (
+                "how many local branches there are and how many are stale",
+                "that stale and merged branches are safe to delete because "
+                "their commits are already on the default branch, and stale "
+                "unmerged ones are not, because the branch is the only copy",
+                "how many repositories were swept and whether any submodule is "
+                "pinned at more than one version",
+            ),
+        ),
+        "submodule_disagreements": Outline(
+            "Submodules pinned at different versions across repositories",
+            "70-110 words, one paragraph",
+            (
+                "how many submodules are used at more than one version",
+                "that the version is the commit each parent repository pins, "
+                "not whatever happens to be checked out locally",
+                "if the facts give none, say the fleet agrees and say nothing "
+                "further",
+            ),
+        ),
+    },
 }

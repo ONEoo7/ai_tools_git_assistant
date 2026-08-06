@@ -270,6 +270,11 @@ class Settings:
     agent_last_id: str = ""  # agent selected last time
     agent_fast_mode: bool = False  # skip the per-file history breakdown
     agent_large_file_mb: int = 5  # a binary this size is worth flagging
+    #: When a branch counts as stale, and when the consistency audit may
+    #: propose deleting one. A handful of values, so they live here rather than
+    #: in a store of their own. See git_assistant.agents.branches.StaleRules --
+    #: which owns the shape, because config.py should not have to know it.
+    stale_branch_rules: dict = field(default_factory=dict)
     #: Recorded runs kept per repository and agent (0 keeps everything). The
     #: runs themselves live beside this file; see git_assistant.agents.history.
     agent_history_limit: int = 20
@@ -376,6 +381,21 @@ class Settings:
 
     def active_temperature(self) -> float:
         return self.temperature_for(self.provider, self.active_model())
+
+    # ---- stale branches ----------------------------------------------------
+    def stale_rules(self):
+        """The stale-branch rules, as an object rather than a dict.
+
+        Rebuilt on each read rather than held: it is asked for once per audit,
+        and a hand-edited settings file must not be able to put something
+        unusable into a long-lived attribute.
+        """
+        from git_assistant.agents.branches import StaleRules
+
+        return StaleRules.from_dict(self.stale_branch_rules)
+
+    def set_stale_rules(self, rules) -> None:
+        self.stale_branch_rules = rules.to_dict()
 
     def active_repo_entry(self) -> RepoEntry | None:
         for r in self.repos:

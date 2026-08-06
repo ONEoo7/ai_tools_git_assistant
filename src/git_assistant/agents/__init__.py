@@ -24,13 +24,18 @@ from git_assistant.agents.base import (
     _noop_pct,
 )
 from git_assistant.agents.config_audit import ConfigAuditAgent
+from git_assistant.agents.consistency_audit import ConsistencyAuditAgent
 from git_assistant.model_runtime import ModelRuntime
 from git_assistant.agents.size_audit import SizeAuditAgent
 from git_assistant import llm_log, tracing, usage
 from git_assistant.llm import build_client
 from git_assistant.llm_log import RecordingClient
 
-AGENTS: tuple[Agent, ...] = (SizeAuditAgent(), ConfigAuditAgent())
+AGENTS: tuple[Agent, ...] = (
+    SizeAuditAgent(),
+    ConfigAuditAgent(),
+    ConsistencyAuditAgent(),
+)
 
 __all__ = ["AGENTS", "Agent", "AgentInfo", "CancelledError", "Report", "get", "infos", "run"]
 

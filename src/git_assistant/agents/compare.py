@@ -89,6 +89,21 @@ METRICS: dict[str, dict[str, Metric]] = {
         "checks_passed": Metric(Polarity.HIGHER, headline=True),
         "to_fix": Metric(Polarity.LOWER),
     },
+    # None of these need `needs_same_head`. Unlike repository size, tidiness is
+    # not confounded by the work having moved on: a branch merged and deleted
+    # since the last run is an improvement whatever else happened.
+    "consistency-audit": {
+        "stale_merged": Metric(Polarity.LOWER, headline=True),
+        "stale_unmerged": Metric(Polarity.LOWER, headline=True),
+        "stale_total": Metric(Polarity.LOWER),
+        "submodule_disagreements": Metric(Polarity.LOWER, headline=True),
+        "submodule_drift": Metric(Polarity.LOWER),
+        # Deliberately unscored: more repositories in the list is not progress
+        # in either direction, and more submodules is a fact about the projects.
+        # (`Metric()` rather than `_NEUTRAL`, which is defined below this.)
+        "repos_scanned": Metric(),
+        "submodules_used": Metric(),
+    },
 }
 
 #: Everything else -- commits, branches, tags, tracked files, submodules -- is
