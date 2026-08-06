@@ -265,7 +265,7 @@ class Settings:
     # Committer identities live in committer_identities.json, not here -- see
     # git_assistant.identities. An older build wrote them into this file; that
     # key is migrated and removed on first run.
-    # ---- Agents tab --------------------------------------------------------
+    # ---- Audit tab ---------------------------------------------------------
     agents_narrate: bool = True  # let the provider write the report's prose
     agent_last_id: str = ""  # agent selected last time
     agent_fast_mode: bool = False  # skip the per-file history breakdown

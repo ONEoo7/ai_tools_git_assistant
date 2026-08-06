@@ -384,26 +384,27 @@ audit separates them:
 - **Protected** — what the rules spared, so the rules can be seen working. The
   default branch is protected whether or not it is listed.
 
-The rules live in the Agents tab: how many months counts as stale (6 by
+The rules live in the Audit tab: how many months counts as stale (6 by
 default), whether unmerged branches may ever be proposed (no), whether unpushed
 work is kept (yes), and a comma-separated list of names and globs to spare
 (`main, master, develop, trunk, release/*, hotfix/*`).
 
-**Is the fleet consistent?** The submodule half sweeps **every repository in
-your Repositories list**, not just the selected one — that is the only way "how
-many repositories use this" can be a number. It reports which repositories use
-which submodule, at which version, and which are pinned at different versions of
-the same dependency.
+**What is it pinned to?** The submodule half reads **the selected repository
+only** — the Repositories list is not swept, so the report's numbers are about
+the repository named at the top of it and selecting a different one changes the
+answer. It lists every submodule the repository declares, the commit each is
+pinned to, and where the working tree has wandered off that commit.
 
 Two things make those numbers mean something:
 
-- **A submodule is identified by its remote URL, not its path.** One dependency
-  vendored at `vendor/lib` and `third_party/lib` is one row.
-  `git@host:owner/repo.git` and `https://host/owner/repo` are the same place.
 - **The version is the commit the parent pins**, read from its `HEAD` tree and
   described by tags — not whatever is checked out locally. A working tree that
   has drifted off its pin is reported as *drift*, which is a finding: it is
   invisible until somebody else clones and gets something else.
+- **A submodule is identified by its remote URL, not its path.** One dependency
+  vendored at both `vendor/lib` and `third_party/lib` is one dependency, and if
+  the two paths are pinned to different commits the audit says so.
+  `git@host:owner/repo.git` and `https://host/owner/repo` are the same place.
 
 Nothing is deleted, moved or checked out by the application.
 
@@ -486,7 +487,7 @@ uv run git-assistant
      and picks up their submodules too, listing each one nested under the
      repository it belongs to — the same nesting the repository selector in the
      *Generate Commit Message* and *Tags* tabs shows.
-   - **Agents:** audits of the selected repository, read-only. *Repository size
+   - **Audit:** audits of the selected repository, read-only. *Repository size
      audit* reports where the `.git` bytes went, what is reclaimable without a
      history rewrite, and which paths dominate every version ever committed;
      *Repository configuration audit* checks Git LFS coverage, whether line

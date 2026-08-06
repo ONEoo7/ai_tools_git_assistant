@@ -1,4 +1,4 @@
-"""Agents tab: run a repository audit and read what it found.
+"""Audit tab: run a repository audit and read what it found.
 
 Same shape as the Tags tab -- repository on the left, the work on the right --
 because both answer a question about one repository and the tabs should not

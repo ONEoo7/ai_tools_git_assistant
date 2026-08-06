@@ -174,7 +174,7 @@ class CommitPanel(QWidget):
         self.provider_combo.currentIndexChanged.connect(self._on_provider_changed)
 
         # The provider is half of what a generation uses; the model is the
-        # other half, and it is chosen a tab away. Named here as the Agents and
+        # other half, and it is chosen a tab away. Named here as the Audit and
         # Code Review tabs name it, so the three read alike.
         self.provider_label = QLabel("")
         self.provider_label.setWordWrap(True)

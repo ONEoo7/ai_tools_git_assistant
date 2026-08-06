@@ -1,4 +1,4 @@
-"""The Agents tab, and the tab wiring it depends on."""
+"""The Audit tab, and the tab wiring it depends on."""
 
 import pytest
 
@@ -195,10 +195,10 @@ def test_cancelling_says_so_without_a_dialog(qapp, with_repo):
 
 
 # ---- the tab wiring -----------------------------------------------------------
-def test_the_window_has_an_agents_tab(qapp, with_repo):
+def test_the_window_has_an_audit_tab(qapp, with_repo):
     dlg = SettingsDialog(with_repo)
     labels = [dlg.tabs.tabText(i) for i in range(dlg.tabs.count())]
-    assert "Agents" in labels
+    assert "Audit" in labels
 
 
 def test_switching_to_a_repo_driven_tab_refreshes_it(qapp, with_repo):
@@ -207,7 +207,7 @@ def test_switching_to_a_repo_driven_tab_refreshes_it(qapp, with_repo):
     called: list[str] = []
     dlg.agents_panel.refresh_repos = lambda: called.append("agents")
 
-    index = [dlg.tabs.tabText(i) for i in range(dlg.tabs.count())].index("Agents")
+    index = [dlg.tabs.tabText(i) for i in range(dlg.tabs.count())].index("Audit")
     dlg.tabs.setCurrentIndex(index)
 
     assert called == ["agents"]

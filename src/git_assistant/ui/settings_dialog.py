@@ -169,7 +169,7 @@ class SettingsDialog(QDialog):
         tabs.currentChanged.connect(self._on_tab_changed)
         tabs.addTab(self._build_commit_tab(), "Generate Commit Message")
         tabs.addTab(self._build_tags_tab(), "Tags")
-        tabs.addTab(self._build_agents_tab(), "Agents")
+        tabs.addTab(self._build_agents_tab(), "Audit")
         tabs.addTab(self._build_review_tab(), "Code Review")
         tabs.addTab(self._build_connection_tab(), "Connection && Model")
         tabs.addTab(self._build_repos_tab(), "Repositories")

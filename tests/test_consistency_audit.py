@@ -81,9 +81,9 @@ def test_the_agent_is_in_the_list():
 
 
 def test_its_cost_is_described_honestly():
-    """It sweeps every configured repository; "seconds" alone would mislead."""
+    """A repository with submodules costs more than one without; say so."""
     info = agents.get(AGENT_ID).info
-    assert "per configured repository" in info.cost_hint
+    assert "per submodule" in info.cost_hint
     assert "changes nothing" in info.cost_hint
 
 
@@ -141,89 +141,126 @@ def test_the_branch_sections_name_the_repository_they_are_about(settings, repo):
     assert "widget" in _section(_run(settings, repo), "2").title
 
 
-def test_the_submodule_section_names_the_fleet_it_swept(settings, repo):
-    assert "configured repositories" in _section(_run(settings, repo), "3").title
+def test_the_submodule_section_names_the_repository_it_read(settings, repo):
+    assert "widget" in _section(_run(settings, repo), "3").title
 
 
-# ---- submodules across repositories --------------------------------------------------
+# ---- submodules, of the selected repository and nothing else -------------------------
 @pytest.fixture
-def two_repos(tmp_path, repo):
-    """Two repositories vendoring one dependency at different versions."""
-    dep = tmp_path / "dep"
-    dep.mkdir()
-    git(dep, "init", "-b", "main")
-    git(dep, "config", "user.email", "t@example.com")
-    git(dep, "config", "user.name", "T")
+def dep(tmp_path):
+    """A dependency with two tagged versions, to be vendored."""
+    where = tmp_path / "dep"
+    where.mkdir()
+    git(where, "init", "-b", "main")
+    git(where, "config", "user.email", "t@example.com")
+    git(where, "config", "user.name", "T")
     for tag in ("v1.0.0", "v2.0.0"):
-        (dep / "lib.txt").write_text(tag, encoding="utf-8")
-        git(dep, "add", "-A")
-        git(dep, "commit", "-m", tag, when=NOW - timedelta(days=50))
-        git(dep, "tag", tag)
+        (where / "lib.txt").write_text(tag, encoding="utf-8")
+        git(where, "add", "-A")
+        git(where, "commit", "-m", tag, when=NOW - timedelta(days=50))
+        git(where, "tag", tag)
+    return where
 
-    other = tmp_path / "gadget"
-    other.mkdir()
-    git(other, "init", "-b", "main")
-    git(other, "config", "user.email", "t@example.com")
-    git(other, "config", "user.name", "T")
-    (other / "b.txt").write_text("one", encoding="utf-8")
-    git(other, "add", "-A")
-    git(other, "commit", "-m", "first", when=NOW - timedelta(days=50))
 
-    allow = ["-c", "protocol.file.allow=always"]
-    for parent, where in ((repo, "vendor/dep"), (other, "third_party/dep")):
-        git(parent, *allow, "submodule", "add", str(dep), where)
-        git(parent, "commit", "-m", "add dep")
-    # Move `repo` back a version, so the two disagree.
+def _vendor(parent, dep, where):
+    git(parent, "-c", "protocol.file.allow=always", "submodule", "add", str(dep), where)
+    git(parent, "commit", "-m", f"add {where}")
+
+
+@pytest.fixture
+def other_repo(tmp_path, dep):
+    """A second configured repository, vendoring the same dependency."""
+    where = tmp_path / "gadget"
+    where.mkdir()
+    git(where, "init", "-b", "main")
+    git(where, "config", "user.email", "t@example.com")
+    git(where, "config", "user.name", "T")
+    (where / "b.txt").write_text("one", encoding="utf-8")
+    git(where, "add", "-A")
+    git(where, "commit", "-m", "first", when=NOW - timedelta(days=50))
+    _vendor(where, dep, "third_party/dep")
+    return where
+
+
+def test_only_the_selected_repository_is_read(settings, repo, dep, other_repo):
+    """The Repositories list is not swept. A report headed with one repository
+    that quietly measured another is a report whose numbers cannot be read."""
+    settings.repos = [RepoEntry(str(repo)), RepoEntry(str(other_repo))]
+    _vendor(repo, dep, "vendor/dep")
+
+    report = _run(settings, repo)
+    rows = _section(report, "3.1").tables[0].rows
+
+    assert [row[0] for row in rows] == ["vendor/dep"]
+    assert "third_party" not in str(rows)
+    assert report.facts_by_key()["submodules_used"].raw == 1
+
+
+def test_selecting_the_other_repository_changes_the_answer(settings, repo, dep, other_repo):
+    settings.repos = [RepoEntry(str(repo)), RepoEntry(str(other_repo))]
+    _vendor(repo, dep, "vendor/dep")
+
+    rows = _section(_run(settings, other_repo), "3.1").tables[0].rows
+
+    assert [row[0] for row in rows] == ["third_party/dep"]
+
+
+def test_the_version_is_the_pinned_commit(settings, repo, dep):
+    _vendor(repo, dep, "vendor/dep")
+    row = _section(_run(settings, repo), "3.1").tables[0].rows[0]
+
+    assert row[2] == "v2.0.0"
+    assert "not whatever the working tree" in _section(_run(settings, repo), "3.1").tables[0].note
+
+
+def test_one_remote_vendored_twice_at_two_versions_is_the_finding(settings, repo, dep):
+    """Nothing in `git status` says the two copies are not the same copy."""
+    _vendor(repo, dep, "vendor/dep")
+    _vendor(repo, dep, "third_party/dep")
     git(repo / "vendor" / "dep", "checkout", "v1.0.0")
     git(repo, "add", "vendor/dep")
     git(repo, "commit", "-m", "pin v1")
-    return other
 
-
-def test_one_dependency_at_two_paths_is_one_row(settings, repo, two_repos):
-    """By path they are two things; by remote they are one, and that is the
-    only reading that makes "how many repositories use this" a real number."""
-    settings.repos = [RepoEntry(str(repo)), RepoEntry(str(two_repos))]
-    rows = _section(_run(settings, repo), "3.1").tables[0].rows
-
-    assert len(rows) == 1
-    assert rows[0][1] == "2", "used by two repositories"
-
-
-def test_a_disagreement_is_reported(settings, repo, two_repos):
-    settings.repos = [RepoEntry(str(repo)), RepoEntry(str(two_repos))]
     report = _run(settings, repo)
 
     assert report.facts_by_key()["submodule_disagreements"].raw == 1
-    versions = {row[2] for row in _section(report, "3.2").tables[0].rows}
-    assert versions == {"v1.0.0", "v2.0.0"}
+    rows = _section(report, "3.2").tables[0].rows
+    assert {row[2] for row in rows} == {"v1.0.0", "v2.0.0"}
+    assert {row[1] for row in rows} == {"vendor/dep", "third_party/dep"}
 
 
-def test_agreement_says_so_rather_than_showing_an_empty_table(settings, two_repos):
-    settings.repos = [RepoEntry(str(two_repos))]
-    section = _section(_run(settings, two_repos), "3.2")
+def test_the_same_remote_at_one_version_is_not_a_finding(settings, repo, dep):
+    _vendor(repo, dep, "vendor/dep")
+    _vendor(repo, dep, "third_party/dep")
+
+    assert _run(settings, repo).facts_by_key()["submodule_disagreements"].raw == 0
+
+
+def test_agreement_says_so_rather_than_showing_an_empty_table(settings, repo, dep):
+    _vendor(repo, dep, "vendor/dep")
+    section = _section(_run(settings, repo), "3.2")
 
     assert section.tables == []
     assert any(f.value == "yes" for f in section.facts)
 
 
-def test_the_repository_you_are_looking_at_is_always_swept(settings, repo, two_repos):
-    """Selecting one and being told about every repository except it would be
-    a surprising way to read a report about it."""
-    settings.repos = [RepoEntry(str(two_repos))]
-    report = _run(settings, repo)
+def test_no_submodules_says_so_rather_than_showing_an_empty_table(settings, repo):
+    section = _section(_run(settings, repo), "3.1")
 
-    assert report.facts_by_key()["repos_scanned"].raw == 2
+    assert section.tables == []
+    assert any(f.value == "none" for f in section.facts)
 
 
-def test_a_working_tree_off_its_pin_is_drift(settings, repo, two_repos):
-    settings.repos = [RepoEntry(str(repo))]
-    git(repo / "vendor" / "dep", "checkout", "v2.0.0")
+def test_a_working_tree_off_its_pin_is_drift(settings, repo, dep):
+    _vendor(repo, dep, "vendor/dep")
+    git(repo / "vendor" / "dep", "checkout", "v1.0.0")
 
     report = _run(settings, repo)
 
     assert report.facts_by_key()["submodule_drift"].raw == 1
-    assert "not what you would clone" in _section(report, "3.3").tables[0].title
+    table = _section(report, "3.3").tables[0]
+    assert "not what you would clone" in table.title
+    assert table.rows[0][0] == "vendor/dep"
 
 
 # ---- what could not be read ----------------------------------------------------------
@@ -248,24 +285,18 @@ def test_the_run_round_trips_through_history(settings, repo, monkeypatch, tmp_pa
     assert back.find("2.1").commands == report.find("2.1").commands
 
 
-def test_progress_is_reported_per_repository(settings, repo):
+def test_both_halves_are_narrated_as_they_run(settings, repo):
     said = []
     _run(settings, repo, progress=said.append)
-    assert any("Submodules:" in line for line in said)
+    assert any("branches" in line.lower() for line in said)
+    assert any("submodules" in line.lower() for line in said)
 
 
-def test_cancelling_stops_the_sweep(settings, repo):
+def test_cancelling_stops_the_run(settings, repo):
     from git_assistant.agents.base import CancelledError
 
-    settings.repos = [RepoEntry(str(repo))] * 5
-    seen = []
-
-    def cancel_after_two():
-        seen.append(True)
-        return len(seen) > 3
-
     with pytest.raises(CancelledError):
-        _run(settings, repo, is_cancelled=cancel_after_two)
+        _run(settings, repo, is_cancelled=lambda: True)
 
 
 # ---- the rules, stored and read back --------------------------------------------------
@@ -319,11 +350,11 @@ def test_two_runs_can_be_compared(settings, repo):
     assert compare.metric_for(AGENT_ID, "stale_merged").polarity is compare.Polarity.LOWER
 
 
-def test_more_repositories_in_the_list_is_not_progress():
-    """It is a fact about what you configured, not about tidiness."""
+def test_vendoring_one_more_dependency_is_not_progress():
+    """It is a fact about the project, not about tidiness."""
     from git_assistant.agents import compare
 
-    assert compare.metric_for(AGENT_ID, "repos_scanned").polarity is compare.Polarity.NEUTRAL
+    assert compare.metric_for(AGENT_ID, "submodules_used").polarity is compare.Polarity.NEUTRAL
 
 
 def test_nothing_in_the_repository_is_changed(settings, repo):

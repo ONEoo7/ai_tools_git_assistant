@@ -246,7 +246,7 @@ def _stub_run(monkeypatch, **kw):
 
 
 def test_a_listener_is_handed_every_call_the_narration_makes(monkeypatch):
-    """The Agents tab shows them, so a poor paragraph traces to one exchange."""
+    """The Audit tab shows them, so a poor paragraph traces to one exchange."""
     import git_assistant.agents as agents_pkg
 
     # Same signature as the real one: a run says what it is spending on.

@@ -1,4 +1,4 @@
-"""Is this repository tidy, and does the fleet agree with itself?
+"""Is this repository tidy, and does it agree with itself?
 
 Two questions that get asked once a project has been running a while, and that
 nothing here could answer before:
@@ -6,15 +6,14 @@ nothing here could answer before:
 - **What can I delete?** Branches accumulate. Merged ones are litter; unmerged
   ones are somebody's abandoned work. They look identical in ``git branch``,
   which is why nobody prunes. See ``branches``.
-- **Is the fleet consistent?** Several repositories vendoring one submodule
-  drift apart, and nothing says so until a build breaks. See ``submodules``.
+- **What is it pinned to?** A submodule's version is the commit its parent
+  records, and a working tree left somewhere else is invisible until somebody
+  clones and gets something different. See ``submodules``.
 
-**This agent has two scopes, and every section says which one it is in.** The
-branch sections are about the selected repository. The submodule sections sweep
-every repository in the Repositories list -- the only way "how many repositories
-use this" can be a number. A stored run must never be mistaken for a fleet-wide
-statement about branches, so the section titles carry the scope rather than
-leaving it to be inferred.
+**Everything here is about the selected repository, and nothing else.** The
+Repositories list is not swept: a report headed with one repository's name that
+silently measured fourteen others is a report whose numbers cannot be read, and
+selecting a different repository has to change the answer.
 
 Nothing here changes a repository. The delete commands are printed to be read
 and run, for the reason the configuration audit gives about its own: that is a
@@ -41,9 +40,9 @@ from git_assistant.agents.facts import count_fact, fact
 DESCRIPTION = (
     "Finds branches nobody has touched for months and says which of them are "
     "safe to delete -- merged ones are litter, unmerged ones are somebody's "
-    "abandoned work, and only the first kind is ever proposed. Then sweeps "
-    "every repository you have configured for submodules, and reports which "
-    "ones are pinned to different versions of the same dependency."
+    "abandoned work, and only the first kind is ever proposed. Then reads the "
+    "selected repository's submodules: what each one is pinned to, and where a "
+    "working tree has drifted off the commit that would be cloned."
 )
 
 AGENT_ID = "consistency-audit"
@@ -63,8 +62,8 @@ class ConsistencyAuditAgent:
         label="Repository consistency audit",
         description=DESCRIPTION,
         cost_hint=(
-            "Seconds for the branches; a few seconds per configured repository "
-            "for the submodule sweep. Reads only; changes nothing."
+            "Seconds for the branches; a second or two per submodule of the "
+            "selected repository. Reads only; changes nothing."
         ),
     )
 
@@ -76,9 +75,10 @@ class ConsistencyAuditAgent:
         survey = branches_mod.survey(ctx.repo)
         ctx.check_cancel()
 
-        repos = _fleet_repos(ctx)
-        fleet = _sweep(ctx, repos)
-        return _build(ctx, survey, rules, fleet, now)
+        ctx.say("Reading submodules...", 55)
+        found = submodules_mod.across([ctx.repo], check_cancel=ctx.check_cancel)
+        ctx.say("Writing the report...", 95)
+        return _build(ctx, survey, rules, found, now)
 
 
 def _rules(settings) -> StaleRules:
@@ -94,43 +94,13 @@ def _rules(settings) -> StaleRules:
     return reader() if callable(reader) else StaleRules.from_dict(raw)
 
 
-def _fleet_repos(ctx: AgentContext) -> list[str]:
-    """Every repository to sweep, the selected one included.
-
-    From the configured list rather than from a disk scan: it is the set the
-    user has said they care about, and scanning for more would make the
-    denominator of "3 of 14" depend on what else is on the drive.
-    """
-    configured = [r.path for r in getattr(ctx.settings, "repos", []) if r.path]
-    if ctx.repo and ctx.repo not in configured:
-        configured.insert(0, ctx.repo)
-    return configured
-
-
-def _sweep(ctx: AgentContext, repos: list[str]) -> submodules_mod.Fleet:
-    total = max(1, len(repos))
-    done = 0
-
-    def on_repo(path: str) -> None:
-        nonlocal done
-        done += 1
-        # 10..95: the branch survey is already behind us, and finishing the
-        # sweep is not finishing the report.
-        ctx.say(
-            f"Submodules: {Path(path).name} ({done}/{total})...",
-            10 + int(85 * done / total),
-        )
-
-    return submodules_mod.across(repos, on_repo=on_repo, check_cancel=ctx.check_cancel)
-
-
 # ---- the report -------------------------------------------------------------------
-def _build(ctx, survey, rules: StaleRules, fleet, now: datetime) -> Report:
+def _build(ctx, survey, rules: StaleRules, found, now: datetime) -> Report:
     proposed = survey.proposed(rules, now)
     stale = survey.stale(rules, now)
     kept = survey.kept(rules, now)
-    disagreements = fleet.disagreements()
-    drifted = fleet.drifted()
+    disagreements = found.disagreements()
+    drifted = found.drifted()
     here = Path(ctx.repo).name or ctx.repo
 
     summary = Section(
@@ -142,9 +112,8 @@ def _build(ctx, survey, rules: StaleRules, fleet, now: datetime) -> Report:
             count_fact("stale_total", f"Untouched for over {rules.months} months", len(stale)),
             count_fact("stale_merged", "Stale and merged (safe to delete)", len(proposed)),
             count_fact("stale_unmerged", "Stale and unmerged (work would be lost)", len(kept)),
-            count_fact("repos_scanned", "Repositories swept for submodules", len(fleet.scanned)),
-            count_fact("submodules_used", "Distinct submodules in use", len(fleet.by_key())),
-            count_fact("submodule_disagreements", "Submodules at more than one version", len(disagreements)),
+            count_fact("submodules_used", "Submodules declared", len(found.uses)),
+            count_fact("submodule_disagreements", "Dependencies at more than one version", len(disagreements)),
             count_fact("submodule_drift", "Submodules off their pinned commit", len(drifted)),
         ],
     )
@@ -163,19 +132,19 @@ def _build(ctx, survey, rules: StaleRules, fleet, now: datetime) -> Report:
         ],
     )
 
-    fleet_section = Section(
+    submodule_section = Section(
         number="3",
-        title=f"Submodules across {len(fleet.scanned)} configured repositories",
+        title=f"Submodules in {here}",
         # No slot: this is a heading over 3.1-3.3, and 3.2 already narrates the
         # finding. A second paragraph here would restate it a line earlier.
         facts=[
-            count_fact("repos_scanned", "Repositories swept", len(fleet.scanned)),
-            count_fact("submodules_used", "Distinct submodules", len(fleet.by_key())),
-            count_fact("submodule_disagreements", "Used at more than one version", len(disagreements)),
+            count_fact("submodules_used", "Submodules declared", len(found.uses)),
+            count_fact("submodule_disagreements", "Pinned at more than one version", len(disagreements)),
+            count_fact("submodule_drift", "Off their pinned commit", len(drifted)),
         ],
         sections=[
-            _usage_section(fleet),
-            _disagreement_section(fleet, disagreements),
+            _usage_section(found),
+            _disagreement_section(disagreements),
             _drift_section(drifted),
         ],
     )
@@ -183,14 +152,14 @@ def _build(ctx, survey, rules: StaleRules, fleet, now: datetime) -> Report:
     report = Report(
         agent_id=AGENT_ID,
         title="Repository consistency audit",
-        subtitle=f"{here} — stale branches, and submodule versions across the fleet",
+        subtitle=f"{here} — stale branches, and what its submodules are pinned to",
         generated_at=datetime.now().strftime("%d %B %Y %H:%M"),
         repo_path=ctx.repo,
-        sections=[summary, branch_section, fleet_section],
+        sections=[summary, branch_section, submodule_section],
     )
     if survey.problem:
         report.warnings.append(f"Branches could not be read: {survey.problem}")
-    report.warnings.extend(fleet.problems)
+    report.warnings.extend(found.problems)
     return report
 
 
@@ -271,62 +240,66 @@ def _protected_section(survey, rules: StaleRules, now) -> Section:
     )
 
 
-def _usage_section(fleet) -> Section:
-    by_key = fleet.by_key()
-    rows = []
-    for key, uses in sorted(by_key.items(), key=lambda kv: -len(kv[1])):
-        versions = fleet.versions_of(key)
-        rows.append(
-            [
-                key,
-                str(len(uses)),
-                ", ".join(versions),
-                ", ".join(sorted({u.repo_name for u in uses})),
-            ]
-        )
-    return Section(
+def _usage_section(found) -> Section:
+    section = Section(
         number="3.1",
-        title="Which repositories use what",
-        facts=[count_fact("submodules_used", "Distinct submodules", len(by_key))],
-        tables=[
-            Table(
-                title="Submodules by remote",
-                columns=["Submodule", "Used by", "Version(s)", "Repositories"],
-                rows=rows,
-                # Said here because the column would otherwise be read as "the
-                # version you have", which is a different and less useful fact.
-                note=(
-                    "Identified by remote URL, not by path, so one dependency "
-                    "vendored at two paths is one row. The version is the commit "
-                    "the parent repository pins, described by tags."
-                ),
-            )
-        ]
-        if rows
-        else [],
+        title="What this repository vendors",
+        facts=[count_fact("submodules_used", "Submodules declared", len(found.uses))],
     )
+    if not found.uses:
+        section.facts.append(fact("submodules_none", "No submodules declared", "none"))
+        return section
+    section.tables.append(
+        Table(
+            title="Submodules, and the commit each one is pinned to",
+            columns=["Path", "Remote", "Version", "Pinned commit"],
+            rows=[
+                [u.path, u.key, u.version, u.short_pin()]
+                for u in sorted(found.uses, key=lambda u: u.path)
+            ],
+            # Said here because the column would otherwise be read as "the
+            # version you have", which is a different and less useful fact.
+            note=(
+                "The version is the commit this repository pins, read from its "
+                "HEAD tree and described by tags -- not whatever the working "
+                "tree happens to be checked out at."
+            ),
+        )
+    )
+    return section
 
 
-def _disagreement_section(fleet, disagreements) -> Section:
+def _disagreement_section(disagreements) -> Section:
+    """One remote vendored at two paths, pinned to different commits.
+
+    Rare, and worth a section anyway: nothing in ``git status`` says the two
+    copies of one dependency are not the same copy, and a build that links both
+    is the first thing that does. Paths are compared by remote URL, so the same
+    dependency at ``vendor/lib`` and ``third_party/lib`` is one dependency.
+    """
     section = Section(
         number="3.2",
-        title="Pinned at different versions",
+        title="The same dependency at more than one version",
         slot="submodule_disagreements",
-        facts=[count_fact("submodule_disagreements", "Submodules", len(disagreements))],
+        facts=[count_fact("submodule_disagreements", "Dependencies", len(disagreements))],
     )
     if not disagreements:
         section.facts.append(fact("agreement", "Every submodule agrees", "yes"))
         return section
     rows = [
-        [use.repo_name, key, use.version, use.short_pin()]
+        [key, use.path, use.version, use.short_pin()]
         for key, uses in disagreements.items()
         for use in sorted(uses, key=lambda u: u.version)
     ]
     section.tables.append(
         Table(
-            title="One dependency, more than one version",
-            columns=["Repository", "Submodule", "Version", "Pinned commit"],
+            title="One remote, vendored twice, pinned differently",
+            columns=["Remote", "Path", "Version", "Pinned commit"],
             rows=rows,
+            note=(
+                "Identified by remote URL, not by path, so one dependency "
+                "vendored at two paths is one dependency."
+            ),
         )
     )
     return section
@@ -343,10 +316,8 @@ def _drift_section(drifted) -> Section:
     section.tables.append(
         Table(
             title="What you have is not what you would clone",
-            columns=["Repository", "Submodule", "Pinned", "Checked out"],
-            rows=[
-                [u.repo_name, u.path, u.short_pin(), u.checked_out[:8]] for u in drifted
-            ],
+            columns=["Submodule", "Pinned", "Checked out"],
+            rows=[[u.path, u.short_pin(), u.checked_out[:8]] for u in drifted],
             note=(
                 "Invisible until somebody else clones and gets the pinned "
                 "commit instead. Commit the submodule pointer, or check the "

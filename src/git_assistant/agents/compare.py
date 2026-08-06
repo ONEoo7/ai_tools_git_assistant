@@ -98,10 +98,9 @@ METRICS: dict[str, dict[str, Metric]] = {
         "stale_total": Metric(Polarity.LOWER),
         "submodule_disagreements": Metric(Polarity.LOWER, headline=True),
         "submodule_drift": Metric(Polarity.LOWER),
-        # Deliberately unscored: more repositories in the list is not progress
-        # in either direction, and more submodules is a fact about the projects.
+        # Deliberately unscored: vendoring one more dependency is a fact about
+        # the project, not a step in either direction.
         # (`Metric()` rather than `_NEUTRAL`, which is defined below this.)
-        "repos_scanned": Metric(),
         "submodules_used": Metric(),
     },
 }
