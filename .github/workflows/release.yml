@@ -462,3 +462,103 @@ jobs:
             "${{ steps.pkg.outputs.name }}" `
             --title "${{ github.ref_name }}" `
             --notes $notes
+
+      # ---- winget ------------------------------------------------------------
+      # Everything below runs AFTER the release is published: the action reads
+      # the release's assets, and an unpublished or draft release has none.
+      #
+      # Deliberately steps in THIS job rather than a separate workflow on
+      # `release: published`. The release above is created with
+      # ${{ github.token }}, and GitHub does not start new workflow runs from
+      # events raised by that token -- so a `release: published` workflow would
+      # never fire, and would look from the outside like winget being broken
+      # rather than never invoked. That is the same failure UPDATE_URL produced
+      # twice; once is enough to design around.
+      #
+      # The token is a *classic* PAT with the `public_repo` scope. Fine-grained
+      # tokens are not supported by the action, and a fork of
+      # microsoft/winget-pkgs must exist under ${{ github.repository_owner }}
+      # for it to push a branch to.
+      - name: Check for the winget token
+        id: winget
+        env:
+          WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
+        run: |
+          if ($env:WINGET_TOKEN) {
+            "present=true" >> $env:GITHUB_OUTPUT
+          } else {
+            "present=false" >> $env:GITHUB_OUTPUT
+            $msg = ("No WINGET_TOKEN secret - this release was NOT submitted to " +
+                    "winget. The release itself is unaffected. Add a classic PAT " +
+                    "with the public_repo scope and fork microsoft/winget-pkgs " +
+                    "under ${{ github.repository_owner }} to enable it.")
+            Write-Warning $msg
+            "### winget: not submitted`n`n$msg" >> $env:GITHUB_STEP_SUMMARY
+          }
+
+      # Submits the -noupdate-USER installer and NOTHING else.
+      #
+      # winget owns upgrades for anything it installed. Publishing the
+      # self-updating build here would put two update mechanisms on one machine:
+      # the application replaces itself, the manifest goes on asserting the
+      # version it shipped, and `winget upgrade` then reinstalls over a newer
+      # build. A -machine install would also raise a UAC prompt per update, from
+      # a process the user did not start.
+      #
+      # Exactly ONE installer, deliberately. Two nullsoft installers of the same
+      # Architecture are duplicates to winget-pkgs validation unless each
+      # declares a `Scope`, and this action generates manifests from the release
+      # assets rather than inventing that field. The published 0.3.16 manifest
+      # carries the single per-user installer and no Scope, so matching both
+      # here would produce the first auto-submitted version that fails
+      # validation -- on a release that had already shipped.
+      #
+      # To offer both scopes later: hand-edit a version's installer manifest to
+      # add `Scope: user` and `Scope: machine`, get it merged, then widen this
+      # regex to `noupdate-(user|machine)-windows-x64-setup\.exe$` so the
+      # generated manifests have a base that already distinguishes them.
+      #
+      # The regex matches the whole suffix rather than just "noupdate", so the
+      # portable zip (`-noupdate-windows-x64.zip`), the per-machine build and
+      # both self-updating installers are excluded by construction -- not by the
+      # default regex happening not to reach them.
+      #
+      # Pinned by commit, like every other third-party action here, and more
+      # sharply than most: `v2` is a lightweight tag pointing at `main`, so it
+      # moves whenever that branch does.
+      - name: Submit to winget
+        id: submit
+        if: steps.winget.outputs.present == 'true'
+        # A winget PR that did not open is not a failed release. The artifacts
+        # above are published, attested and correct; this can be re-run or done
+        # by hand. Reported in the next step rather than reddening the build.
+        continue-on-error: true
+        uses: vedantmgoyal9/winget-releaser@4ffc7888bffd451b357355dc214d43bb9f23917e # v2
+        with:
+          # Must match the merged manifest EXACTLY -- it is the primary key in
+          # winget-pkgs and cannot be changed once published. A mismatch does
+          # not error: it opens a PR for a second, unrelated package.
+          identifier: StefanGhitescu.GitAssistant
+          version: ${{ steps.v.outputs.version }}
+          release-tag: ${{ github.ref_name }}
+          installers-regex: 'noupdate-user-windows-x64-setup\.exe$'
+          release-notes-url: https://github.com/${{ github.repository }}/releases/tag/${{ github.ref_name }}
+          token: ${{ secrets.WINGET_TOKEN }}
+
+      # `outcome` is the step's real result; `conclusion` is what
+      # continue-on-error rewrote it to, and would read "success" either way.
+      - name: Report the winget submission
+        if: always() && steps.winget.outputs.present == 'true'
+        run: |
+          $version = "${{ steps.v.outputs.version }}"
+          if ("${{ steps.submit.outcome }}" -eq "success") {
+            ("### winget: submitted`n`nPR opened against microsoft/winget-pkgs " +
+             "for ``StefanGhitescu.GitAssistant`` $version.") >> $env:GITHUB_STEP_SUMMARY
+          } else {
+            $msg = ("The winget submission FAILED (${{ steps.submit.outcome }}). " +
+                    "The release is published and correct; only the manifest PR " +
+                    "is missing. Re-run this job, or submit by hand with " +
+                    "``wingetcreate update StefanGhitescu.GitAssistant --version $version``.")
+            Write-Warning $msg
+            "### winget: submission failed`n`n$msg" >> $env:GITHUB_STEP_SUMMARY
+          }
