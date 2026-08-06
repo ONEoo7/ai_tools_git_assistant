@@ -161,6 +161,52 @@ def for_commit(settings: Settings) -> Estimate:
 
 
 # ---- reviewing files ----------------------------------------------------------------
+#: What a second attempt at the same message is called, on the button and in
+#: the usage table. Not "Commit message": one is the run the user asked for and
+#: the other is the run they were asked about, and a bill that merges them
+#: cannot answer "what did the retries cost me".
+SHORTEN = "Shorten the message"
+
+
+def for_retry(settings: Settings, retry, note: str = "") -> Estimate:
+    """One call: the last prompt of the run, plus what was wrong with the reply.
+
+    Exact rather than approximate, unusually for this module -- the prompt
+    already exists and is held verbatim, so there is nothing to predict about
+    it. For a map-reduce run this is the synthesis prompt alone: the chunks are
+    not read again and their summaries are not made again.
+    """
+    out = Estimate(
+        feature=SHORTEN,
+        model=settings.active_model(),
+        provider=settings.provider,
+    )
+    if retry is None:
+        out.problem = (
+            "This message was not generated in this window, so there is no "
+            "prompt to send again."
+        )
+        return out
+    out.calls = 1
+    out.input_tokens = retry.input_tokens(note)
+    out.output_tokens = retry.max_tokens
+    out.lines = [
+        "One call: the prompt that wrote this message, with the length it "
+        "overran quoted back to it.",
+    ]
+    if retry.calls_before > 1:
+        out.lines.append(
+            f"The diff was summarised in {retry.calls_before} call(s) the first "
+            "time. None of that is repeated: the summaries are already in this "
+            "prompt."
+        )
+    out.lines.append(
+        "The same prompt with a different instruction, not the same prompt "
+        "again -- so the answer changes even at a low temperature."
+    )
+    return out
+
+
 def for_review(settings: Settings, plan) -> Estimate:
     """One call per reviewable file in ``plan``, priced with its own rules.
 

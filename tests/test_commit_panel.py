@@ -71,6 +71,180 @@ def test_refresh_keeps_a_generation_result(qapp, settings):
     assert panel.status.text() == "Strategy: single-shot - ~500 input tokens"
 
 
+# ---- how long the message is -------------------------------------------------
+def test_the_length_is_shown_as_the_message_is_typed(qapp, settings):
+    """The message is editable; a rule that judged only the model would be silent
+    about the line the user typed over it."""
+    panel = CommitPanel(settings, auto_start=False)
+
+    panel.editor.setPlainText("feat: a short subject\n\nA short body.")
+
+    assert "Subject 21/72" in panel.length_label.text()
+    assert "body 13/1000" in panel.length_label.text()
+
+
+def test_a_subject_over_the_hard_cap_says_what_happens_to_it(qapp, settings):
+    panel = CommitPanel(settings, auto_start=False)
+
+    panel.editor.setPlainText("feat: " + "x" * 80)
+
+    assert "cut by tools" in panel.length_label.text()
+
+
+def test_a_message_within_the_limits_reads_as_counts_and_nothing_else(qapp, settings):
+    panel = CommitPanel(settings, auto_start=False)
+    panel.editor.setPlainText("feat: fine\n\nAlso fine.")
+    assert panel.length_label.text() == "Subject 10/72 - body 10/1000"
+
+
+def test_an_empty_editor_says_nothing(qapp, settings):
+    assert CommitPanel(settings, auto_start=False).length_label.text() == ""
+
+
+def test_turning_the_rules_off_removes_the_readout(qapp, settings):
+    settings.commit_subject_target = 0
+    settings.commit_subject_limit = 0
+    settings.commit_body_limit = 0
+    panel = CommitPanel(settings, auto_start=False)
+
+    panel.editor.setPlainText("feat: " + "x" * 200)
+
+    assert panel.length_label.text() == ""
+
+
+def test_a_message_is_never_shortened_to_fit(qapp, settings):
+    """Cutting at 72 would produce the mangled subject the limit prevents."""
+    panel = CommitPanel(settings, auto_start=False)
+    long_one = "feat: " + "x" * 200
+
+    panel.editor.setPlainText(long_one)
+
+    assert panel.editor.toPlainText() == long_one
+
+
+# ---- offering to ask again when it came back too long ------------------------
+def _generated(message, retry=True, calls_before=1):
+    from git_assistant.commit_generator import Retry
+
+    return GenerationResult(
+        message=message,
+        strategy="map-reduce" if calls_before > 1 else "single-shot",
+        context_window=8000,
+        input_budget=7000,
+        input_tokens=100,
+        retry=Retry("sys", "the prompt", 512, calls_before=calls_before)
+        if retry
+        else None,
+    )
+
+
+def _answer(monkeypatch, yes: bool, seen=None):
+    def confirm(parent, priced):
+        if seen is not None:
+            seen.append(priced)
+        return yes
+
+    monkeypatch.setattr("git_assistant.ui.preview_dialog.confirm", confirm)
+
+
+def test_a_message_within_the_limits_is_never_questioned(qapp, settings, monkeypatch):
+    seen = []
+    _answer(monkeypatch, False, seen)
+    panel = CommitPanel(settings, auto_start=False)
+
+    panel._on_finished(_generated("feat: short enough\n\nA body."))
+
+    assert seen == []
+
+
+def test_an_overlong_message_is_priced_before_anything_is_re_sent(
+    qapp, settings, monkeypatch
+):
+    seen = []
+    _answer(monkeypatch, False, seen)
+    panel = CommitPanel(settings, auto_start=False)
+
+    panel._on_finished(_generated("feat: " + "x" * 90))
+
+    assert len(seen) == 1
+    assert seen[0].calls == 1 and seen[0].input_tokens > 0
+
+
+def test_declining_keeps_the_message_that_was_generated(qapp, settings, monkeypatch):
+    """A run the user declines to redo still produced something."""
+    _answer(monkeypatch, False)
+    panel = CommitPanel(settings, auto_start=False)
+    long_one = "feat: " + "x" * 90
+
+    panel._on_finished(_generated(long_one))
+
+    assert panel.editor.toPlainText() == long_one
+    assert "cut by tools" in panel.status.text()
+
+
+def test_accepting_asks_again_with_the_reason_quoted_back(qapp, settings, monkeypatch):
+    _answer(monkeypatch, True)
+    started = []
+    panel = CommitPanel(settings, auto_start=False)
+    monkeypatch.setattr(
+        panel, "_start_retry", lambda retry, note: started.append((retry, note))
+    )
+
+    panel._on_finished(_generated("feat: " + "x" * 90))
+
+    assert len(started) == 1
+    retry, note = started[0]
+    assert "96 characters" in note and "72 allowed" in note
+    assert retry.user == "the prompt"
+
+
+def test_a_map_reduce_run_offers_one_call_not_fifteen(qapp, settings, monkeypatch):
+    seen = []
+    _answer(monkeypatch, False, seen)
+    panel = CommitPanel(settings, auto_start=False)
+
+    panel._on_finished(_generated("feat: " + "x" * 90, calls_before=15))
+
+    assert seen[0].calls == 1
+    assert any("15 call(s) the first time" in line for line in seen[0].lines)
+
+
+def test_a_result_with_no_prompt_behind_it_is_not_offered(qapp, settings, monkeypatch):
+    seen = []
+    _answer(monkeypatch, False, seen)
+    panel = CommitPanel(settings, auto_start=False)
+
+    panel._on_finished(_generated("feat: " + "x" * 90, retry=False))
+
+    assert seen == []
+
+
+def test_a_second_answer_is_shown_whether_or_not_it_is_shorter(qapp, settings):
+    panel = CommitPanel(settings, auto_start=False)
+
+    panel._on_retried("feat: " + "y" * 90)
+
+    assert panel.editor.toPlainText().startswith("feat: y")
+    assert "Still over the limit" in panel.progress.text()
+
+
+def test_a_second_answer_that_fits_says_so(qapp, settings):
+    panel = CommitPanel(settings, auto_start=False)
+    panel._on_retried("feat: now it fits")
+    assert panel.progress.text() == "Done."
+
+
+def test_it_is_not_offered_a_third_time(qapp, settings, monkeypatch):
+    """A model that ignored the instruction once will ignore it again."""
+    seen = []
+    _answer(monkeypatch, False, seen)
+    panel = CommitPanel(settings, auto_start=False)
+
+    panel._on_retried("feat: " + "y" * 90)
+
+    assert seen == []
+
+
 # ---- which provider and model a generation will use --------------------------
 def test_the_model_is_named_beside_the_provider(qapp, settings):
     """The provider is half the answer; a generation uses a model too."""

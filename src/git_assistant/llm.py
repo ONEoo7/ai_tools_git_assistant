@@ -49,7 +49,9 @@ class ChatClient(Protocol):
         system: str,
         user: str,
         max_tokens: int,
-        temperature: float = 0.2,
+        #: ``None`` means "whatever this client was configured with"; see
+        #: Settings.temperature_for. A caller that names one overrules it.
+        temperature: float | None = None,
     ) -> str: ...
 
     def ping(self) -> list[ModelInfo]: ...
@@ -66,6 +68,10 @@ def build_client(settings, feature: str = "") -> ChatClient:
     code review, an audit. It is recorded with the usage, and here is the last
     place it is known: by the time an answer comes back there is only a provider
     and a model. See git_assistant.usage.
+
+    One call to this function is one run, so it is also where a Langfuse trace
+    begins -- see git_assistant.tracing. With tracing off, the client returned
+    is exactly the provider's own.
     """
     from git_assistant import providers
 
@@ -76,11 +82,24 @@ def build_client(settings, feature: str = "") -> ChatClient:
             "in the Connection & Model tab."
         )
 
+    return _traced(_provider_client(settings, provider, feature), settings, feature)
+
+
+def _provider_client(settings, provider, feature: str) -> ChatClient:
+    # What this model was configured to run at. Given to the client rather than
+    # to each call, so every caller -- the generator, the reviewer, the audit --
+    # gets it without having to know it exists, and a caller that needs
+    # something else for one call can still say so.
+    warmth = settings.temperature_for(provider.key, settings.provider_model(provider.key))
+
     if provider.key == "lmstudio":
         from git_assistant.lmstudio_client import LMStudioClient
 
         return LMStudioClient(
-            settings.base_url, provider_key=provider.key, feature=feature
+            settings.base_url,
+            provider_key=provider.key,
+            feature=feature,
+            temperature=warmth,
         )
 
     if provider.key == "claude":
@@ -104,9 +123,24 @@ def build_client(settings, feature: str = "") -> ChatClient:
             # one that was actually asked, not under "openai" for all of them.
             provider_key=provider.key,
             feature=feature,
+            temperature=warmth,
         )
 
     raise LLMError(f"no client is wired up for {provider.label}")
+
+
+def _traced(client: ChatClient, settings, feature: str) -> ChatClient:
+    """The client, filing its completions with Langfuse if that is configured.
+
+    Imported here rather than at module level: the SDK is a heavy import for a
+    subsystem most installations never turn on, and a build without it must
+    still generate commit messages.
+    """
+    try:
+        from git_assistant import tracing
+    except Exception:
+        return client
+    return tracing.wrap(client, settings, feature)
 
 
 def _require_key(provider) -> str:

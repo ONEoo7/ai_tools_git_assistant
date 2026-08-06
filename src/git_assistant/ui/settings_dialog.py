@@ -10,11 +10,13 @@ from pathlib import Path
 from PyQt6.QtCore import Qt, QTimer, QUrl, pyqtSignal
 from PyQt6.QtGui import QDesktopServices
 from PyQt6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QDialog,
     QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
+    QGroupBox,
     QHBoxLayout,
     QInputDialog,
     QLabel,
@@ -33,10 +35,13 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from git_assistant import __version__, git_ops, lmstudio_setup
+from git_assistant import PROJECT_URL, __author__, __version__, git_ops, lmstudio_setup
 from git_assistant.commit_generator import MIN_PARALLEL_CONTEXT
 from git_assistant.config import (
+    DEFAULT_TEMPERATURE,
     DEFAULT_TEMPLATE_NAME,
+    MAX_TEMPERATURE,
+    MIN_TEMPERATURE,
     RepoEntry,
     RepoNode,
     Settings,
@@ -44,7 +49,7 @@ from git_assistant.config import (
     build_repo_tree,
     config_path,
 )
-from git_assistant import credentials, providers
+from git_assistant import credentials, providers, tracing
 from git_assistant.identities import IdentityStore
 from git_assistant.llm import LLMError, ModelInfo, build_client
 from git_assistant.prompts import DEFAULT_TEMPLATE
@@ -81,6 +86,19 @@ UNKNOWN_VERSION = "?"
 #: all, and a real-looking URL here would be opened in a browser by anything
 #: that handled the click differently.
 INSTALL_LINK = "action:install"
+
+
+def _temperature_note(settings, provider, model: str) -> str:
+    """What this setting is doing, or why it is doing nothing."""
+    if provider.key == "claude":
+        # Not a limitation of this application: current Anthropic models reject
+        # the parameter outright. See git_assistant.claude_client.
+        return "Anthropic's current models do not accept a temperature."
+    if not model:
+        return "Choose a model first; the temperature is remembered per model."
+    if not settings.has_temperature(provider.key, model):
+        return f"Using the default, {DEFAULT_TEMPERATURE}."
+    return f"Remembered for {model}."
 
 
 class SettingsDialog(QDialog):
@@ -174,13 +192,37 @@ class SettingsDialog(QDialog):
             | Qt.TextInteractionFlag.LinksAccessibleByKeyboard
         )
         self.version_online.linkActivated.connect(self._on_install_clicked)
-        for lbl in (self.version_current, self.version_arrow, self.version_online):
+        # Where this came from and who wrote it, beside the version it is.
+        # A real address, so unlike the install link above it is handed to the
+        # browser rather than intercepted: `setOpenExternalLinks` is Qt doing
+        # exactly that, and there is nothing for this window to do first.
+        self.project_link = QLabel(
+            f'<a href="{PROJECT_URL}">Project link</a>'
+        )
+        self.project_link.setToolTip(PROJECT_URL)
+        self.project_link.setOpenExternalLinks(True)
+        self.project_link.setTextInteractionFlags(
+            Qt.TextInteractionFlag.LinksAccessibleByMouse
+            | Qt.TextInteractionFlag.LinksAccessibleByKeyboard
+        )
+        self.author_label = QLabel(f"Author: {__author__}")
+
+        for lbl in (
+            self.version_current,
+            self.version_arrow,
+            self.version_online,
+            self.author_label,
+        ):
             lbl.setStyleSheet("color: #888;")
 
         bottom = QHBoxLayout()
         bottom.addWidget(self.version_current)
         bottom.addWidget(self.version_arrow)
         bottom.addWidget(self.version_online)
+        bottom.addSpacing(SECTION_GAP)
+        bottom.addWidget(self.project_link)
+        bottom.addSpacing(SECTION_GAP)
+        bottom.addWidget(self.author_label)
         bottom.addStretch(1)
         bottom.addWidget(self.saved_hint)
         bottom.addWidget(open_cfg_btn)
@@ -212,6 +254,9 @@ class SettingsDialog(QDialog):
         if self._save_timer.isActive():
             self._save_timer.stop()
             self._autosave()
+        # Push whatever the last run left buffered. Not a shutdown: the tray
+        # outlives this window and can start another run from its menu.
+        tracing.flush()
         super().closeEvent(event)
 
     def _on_tab_changed(self, index: int) -> None:
@@ -581,7 +626,25 @@ class SettingsDialog(QDialog):
         form.addRow("API key:", self.key_row_host)
         form.addRow("", self.key_status)
         form.addRow("", self.test_btn)
+        # Per provider *and* per model: what is careful for one set of weights
+        # is mute for another, so this follows the model combo above it.
+        self.temperature_spin = QDoubleSpinBox()
+        self.temperature_spin.setRange(MIN_TEMPERATURE, MAX_TEMPERATURE)
+        self.temperature_spin.setSingleStep(0.05)
+        self.temperature_spin.setDecimals(2)
+        self.temperature_spin.setToolTip(
+            "How adventurous this model may be. Low is right for a commit "
+            "message, which describes a diff rather than inventing anything. "
+            "Remembered for this provider and this model."
+        )
+        self.temperature_spin.valueChanged.connect(self._on_temperature_changed)
+        self.temperature_note = QLabel("")
+        self.temperature_note.setWordWrap(True)
+        self.temperature_note.setStyleSheet(INFO_COLOUR)
+
         form.addRow("Model:", self.model_combo)
+        form.addRow("Temperature:", self.temperature_spin)
+        form.addRow("", self.temperature_note)
         form.addRow("Context window size:", self.ctx_size_spin)
         form.addRow("Parallel requests:", self.parallel_spin)
         form.addRow("Status:", self.conn_status)
@@ -844,7 +907,38 @@ class SettingsDialog(QDialog):
             self.model_combo.addItem(stored, stored)
             self.model_combo.setCurrentIndex(0)
         self.model_combo.blockSignals(False)
+        self._show_temperature(provider)
         self._update_budget_label()
+
+    # ---- temperature -------------------------------------------------------
+    def _show_temperature(self, provider) -> None:
+        """The temperature stored for *this* provider and *this* model."""
+        model = self.settings.provider_model(provider.key)
+        self.temperature_spin.blockSignals(True)
+        self.temperature_spin.setValue(
+            self.settings.temperature_for(provider.key, model)
+        )
+        self.temperature_spin.blockSignals(False)
+        self.temperature_spin.setEnabled(bool(model) and provider.key != "claude")
+        self.temperature_note.setText(_temperature_note(self.settings, provider, model))
+
+    def _on_temperature_changed(self, value: float) -> None:
+        if not self._ready:
+            return
+        provider = providers.get(self.settings.provider)
+        model = self.settings.provider_model(provider.key)
+        if not model:
+            return
+        # The default is stored as "not chosen", so a model left alone keeps
+        # tracking the default if that ever changes, rather than pinning
+        # today's value into settings.json -- as the endpoint field does.
+        self.settings.set_temperature(
+            provider.key, model, None if value == DEFAULT_TEMPERATURE else value
+        )
+        self._schedule_save()
+        self.temperature_note.setText(
+            _temperature_note(self.settings, provider, model)
+        )
 
     def _build_repos_tab(self) -> QWidget:
         w = QWidget()
@@ -1022,8 +1116,36 @@ class SettingsDialog(QDialog):
             edit_update_btn.clicked.connect(self._on_edit_update_config)
             update_row.addWidget(edit_update_btn)
 
+        # How long a commit message may be. Asked of the model and checked
+        # afterwards; 0 turns a rule off. See git_assistant.commit_style.
+        self.subject_target_spin = QSpinBox()
+        self.subject_target_spin.setRange(0, 200)
+        self.subject_target_spin.setSuffix(" characters")
+        self.subject_target_spin.setToolTip(
+            "The traditional soft target for the first line. Exceeding it is "
+            "reported, not refused. 0 to say nothing about it."
+        )
+        self.subject_limit_spin = QSpinBox()
+        self.subject_limit_spin.setRange(0, 200)
+        self.subject_limit_spin.setSuffix(" characters")
+        self.subject_limit_spin.setToolTip(
+            "The hard cap for the first line. Past it, tools that show a "
+            "subject cut it without saying so. 0 for no cap."
+        )
+        self.body_limit_spin = QSpinBox()
+        self.body_limit_spin.setRange(0, 20000)
+        self.body_limit_spin.setSingleStep(100)
+        self.body_limit_spin.setSuffix(" characters")
+        self.body_limit_spin.setToolTip(
+            "Total length of the body. 500 to 1000 is the usual convention. "
+            "0 for no cap."
+        )
+
         form.addRow("Diff source:", self.diff_mode_combo)
         form.addRow("Output reserve (margin):", self.margin_spin)
+        form.addRow("Subject line target:", self.subject_target_spin)
+        form.addRow("Subject line limit:", self.subject_limit_spin)
+        form.addRow("Body limit:", self.body_limit_spin)
         form.addRow("Ignore globs:", self.ignore_edit)
         form.addRow("Update service:", update_row)
 
@@ -1032,8 +1154,220 @@ class SettingsDialog(QDialog):
 
         # Pin the form to the top; extra vertical space goes to the stretch below.
         outer.addWidget(form_container)
+        outer.addWidget(self._build_langfuse_group())
         outer.addStretch(1)
         return w
+
+    # ---- Langfuse ----------------------------------------------------------
+    def _build_langfuse_group(self) -> QWidget:
+        """Where every completion goes, if the user wants a record of them.
+
+        Its own box rather than four more rows in the form above: this is the
+        only setting on this tab that sends anything anywhere, and it should not
+        read as a sibling of "ignore globs".
+        """
+        box = QGroupBox("Langfuse (LLM tracing)")
+        form = QFormLayout(box)
+
+        self.langfuse_check = QCheckBox("Send traces to Langfuse")
+        self.langfuse_check.setToolTip(
+            "Record every call to the model -- prompt, reply, model, timing and "
+            "tokens -- in your own Langfuse instance."
+        )
+        self.langfuse_check.toggled.connect(self._on_langfuse_toggled)
+
+        self.langfuse_host_edit = QLineEdit()
+        self.langfuse_host_edit.setPlaceholderText("https://langfuse.example.internal")
+        self.langfuse_host_edit.setMinimumWidth(360)
+
+        # Shown, unlike the secret: this half is public -- Langfuse put it in
+        # browser code -- so there is no reason to make the user remember which
+        # key is configured. It is stored beside the secret all the same.
+        self.langfuse_public_edit = QLineEdit()
+        self.langfuse_public_edit.setPlaceholderText("pk-lf-...")
+        self.langfuse_public_edit.editingFinished.connect(self._on_langfuse_public)
+
+        # Write-only, exactly as the provider API key field is: the box is not
+        # a display of the stored key, only ever an input for a new one.
+        self.langfuse_secret_edit = QLineEdit()
+        self.langfuse_secret_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self.langfuse_secret_edit.setPlaceholderText("sk-lf-...")
+        self.langfuse_secret_edit.editingFinished.connect(self._on_langfuse_secret)
+        self.langfuse_clear_btn = QPushButton("Remove")
+        self.langfuse_clear_btn.setToolTip(
+            "Delete both Langfuse keys from the Windows Credential Manager."
+        )
+        self.langfuse_clear_btn.clicked.connect(self._on_clear_langfuse_secret)
+        secret_row = QHBoxLayout()
+        secret_row.addWidget(self.langfuse_secret_edit, 1)
+        secret_row.addWidget(self.langfuse_clear_btn)
+        secret_host = QWidget()
+        secret_host.setLayout(secret_row)
+
+        self.langfuse_env_edit = QLineEdit()
+        self.langfuse_env_edit.setPlaceholderText("development")
+        self.langfuse_env_edit.setToolTip(
+            "Separates these traces from another machine's in Langfuse."
+        )
+
+        self.langfuse_prompts_check = QCheckBox("Send prompts and responses")
+        self.langfuse_prompts_check.setToolTip(
+            "Off, a trace still carries the model, the timings, the tokens and "
+            "any error -- and no source code."
+        )
+        self.langfuse_prompts_check.toggled.connect(self._schedule_save)
+
+        self.langfuse_test_btn = QPushButton("Test connection")
+        self.langfuse_test_btn.clicked.connect(self._on_test_langfuse)
+
+        self.langfuse_status = QLabel("")
+        self.langfuse_status.setWordWrap(True)
+        self.langfuse_status.setStyleSheet(INFO_COLOUR)
+
+        form.addRow("", self.langfuse_check)
+        form.addRow("Host:", self.langfuse_host_edit)
+        form.addRow("Public key:", self.langfuse_public_edit)
+        form.addRow("Secret key:", secret_host)
+        form.addRow("Environment:", self.langfuse_env_edit)
+        form.addRow("", self.langfuse_prompts_check)
+        form.addRow("", self.langfuse_test_btn)
+        form.addRow("", self.langfuse_status)
+        return box
+
+    def _on_langfuse_toggled(self, on: bool) -> None:
+        """Say what this sends before it starts sending it, once.
+
+        Every prompt this application builds is made of the user's diff. That
+        it leaves the machine is the single most important thing about the
+        setting, so it is said at the moment it is turned on rather than in a
+        tooltip nobody hovers.
+        """
+        if not self._ready:
+            return
+        if not on:
+            # Stop the exporter now rather than at the next run: unticking the
+            # box should end the sending, not schedule the end of it.
+            tracing.shutdown()
+        else:
+            QMessageBox.information(
+                self,
+                "What gets sent",
+                "Every call to the model will be sent to your Langfuse "
+                "instance: the prompt, the reply, the model, the timing and "
+                "the token counts.\n\n"
+                "The prompts are built from your staged diffs and file "
+                "contents, so your source code goes with them. Untick 'Send "
+                "prompts and responses' to keep the text at home and send only "
+                "the measurements.\n\n"
+                f"Each trace is filed under the account running this "
+                f"application ('{tracing.who() or 'unknown'}') and names the "
+                "repository it was about.",
+            )
+        self._schedule_save()
+        self._refresh_langfuse()
+
+    def _on_langfuse_public(self) -> None:
+        """Store the public key, leaving it on screen.
+
+        On losing focus rather than per keystroke: a credential store is not a
+        place to write a dozen half-typed keys.
+        """
+        self._store_langfuse(
+            tracing.PUBLIC_CREDENTIAL_KEY,
+            self.langfuse_public_edit.text().strip(),
+            "public key",
+        )
+
+    def _on_langfuse_secret(self) -> None:
+        """Store what was typed, then clear the box."""
+        secret = self.langfuse_secret_edit.text().strip()
+        if not secret:
+            return
+        self.langfuse_secret_edit.clear()
+        self._store_langfuse(tracing.CREDENTIAL_KEY, secret, "secret key")
+
+    def _store_langfuse(self, key: str, value: str, what: str) -> None:
+        try:
+            credentials.set_secret(key, value)
+        except credentials.CredentialError as exc:
+            QMessageBox.warning(self, f"Could not save the {what}", str(exc))
+        self._refresh_langfuse()
+
+    def _on_clear_langfuse_secret(self) -> None:
+        """Remove both halves: half a credential pair is not a configuration."""
+        try:
+            credentials.delete_secret(tracing.CREDENTIAL_KEY)
+            credentials.delete_secret(tracing.PUBLIC_CREDENTIAL_KEY)
+        except credentials.CredentialError as exc:
+            QMessageBox.warning(self, "Could not remove the keys", str(exc))
+        self.langfuse_public_edit.clear()
+        self._refresh_langfuse()
+
+    def _on_test_langfuse(self) -> None:
+        # What is on screen, not what was last saved: the point of the button
+        # is to check what has just been typed.
+        self._apply_langfuse()
+        ok, message = tracing.check(self._langfuse_on_screen())
+        self.langfuse_status.setText(message)
+        self.langfuse_status.setStyleSheet(INFO_COLOUR if ok else WARN_COLOUR)
+
+    def _langfuse_on_screen(self) -> tracing.TraceSettings:
+        """The configuration as the form has it this instant.
+
+        The public key is taken from the box rather than the store: it is
+        written there only when the field is left, and both the status line and
+        the Test button have to answer for what is on screen now.
+        """
+        from dataclasses import replace
+
+        return replace(
+            tracing.from_settings(self.settings),
+            public_key=self.langfuse_public_edit.text().strip(),
+        )
+
+    def _refresh_langfuse(self) -> None:
+        """Say what is stored and what is still missing. Never show the key."""
+        if self._ready:
+            # What is on screen, not what was last saved: the save is debounced
+            # and the status would otherwise lag the field being filled in.
+            self._apply_langfuse()
+        stored = tracing.has_secret()
+        self.langfuse_clear_btn.setEnabled(stored)
+        self.langfuse_secret_edit.setPlaceholderText(
+            "A key is stored - type a new one to replace it" if stored else "sk-lf-..."
+        )
+        if not credentials.available():
+            self.langfuse_secret_edit.setEnabled(False)
+            self.langfuse_status.setText(
+                "No credential store on this platform, so the secret key cannot "
+                "be saved."
+            )
+            self.langfuse_status.setStyleSheet(WARN_COLOUR)
+            return
+
+        if not tracing.available():
+            self.langfuse_status.setText(
+                "This build does not include the Langfuse SDK, so nothing will "
+                "be sent."
+            )
+            self.langfuse_status.setStyleSheet(WARN_COLOUR)
+            return
+
+        config = self._langfuse_on_screen()
+        missing = config.missing()
+        if missing:
+            self.langfuse_status.setText(missing)
+            self.langfuse_status.setStyleSheet(
+                INFO_COLOUR if not config.enabled else WARN_COLOUR
+            )
+            return
+        self.langfuse_status.setText(
+            "Ready. Both keys are in the Windows Credential Manager as "
+            f"'{credentials.target_for(tracing.CREDENTIAL_KEY)}' and "
+            f"'{credentials.target_for(tracing.PUBLIC_CREDENTIAL_KEY)}', not in "
+            "settings.json."
+        )
+        self.langfuse_status.setStyleSheet(INFO_COLOUR)
 
     # ---- load / save -------------------------------------------------------
     def _load_into_widgets(self) -> None:
@@ -1063,6 +1397,17 @@ class SettingsDialog(QDialog):
         self.ctx_size_spin.setValue(s.context_window)
         self.margin_spin.setValue(s.safety_margin)
         self.ignore_edit.setPlainText("\n".join(s.ignore_globs))
+        self.subject_target_spin.setValue(s.commit_subject_target)
+        self.subject_limit_spin.setValue(s.commit_subject_limit)
+        self.body_limit_spin.setValue(s.commit_body_limit)
+
+        self.langfuse_check.setChecked(s.langfuse_enabled)
+        self.langfuse_host_edit.setText(s.langfuse_host)
+        self.langfuse_public_edit.setText(tracing.public_key())
+        self.langfuse_env_edit.setText(s.langfuse_environment)
+        self.langfuse_prompts_check.setChecked(s.langfuse_send_prompts)
+        self._refresh_langfuse()
+
         self._update_budget_label()
         self._refresh_update_source()
 
@@ -1078,6 +1423,21 @@ class SettingsDialog(QDialog):
         self.ctx_size_spin.valueChanged.connect(self._schedule_save)
         self.margin_spin.valueChanged.connect(self._schedule_save)
         self.ignore_edit.textChanged.connect(self._schedule_save)
+        for spin in (
+            self.subject_target_spin,
+            self.subject_limit_spin,
+            self.body_limit_spin,
+        ):
+            spin.valueChanged.connect(self._schedule_save)
+        # Both Langfuse keys are deliberately absent: they are stored on
+        # editingFinished, in the Credential Manager, and writing a credential
+        # store per keystroke would leave a dozen half-typed keys in it.
+        self.langfuse_host_edit.textChanged.connect(self._schedule_save)
+        self.langfuse_env_edit.textChanged.connect(self._schedule_save)
+        # ...but the status line follows every field as it is typed, so "no
+        # host is set yet" clears while typing rather than on losing focus.
+        self.langfuse_host_edit.textChanged.connect(self._refresh_langfuse)
+        self.langfuse_public_edit.textChanged.connect(self._refresh_langfuse)
         # The template editor saves via _on_template_text_changed, which knows
         # which template the text belongs to.
         # Repo tree: checkbox toggles plus add/remove/scan (which call directly).
@@ -1139,6 +1499,29 @@ class SettingsDialog(QDialog):
             for line in self.ignore_edit.toPlainText().splitlines()
             if line.strip()
         ]
+        s.commit_subject_target = self.subject_target_spin.value()
+        s.commit_subject_limit = self.subject_limit_spin.value()
+        s.commit_body_limit = self.body_limit_spin.value()
+
+        self._apply_langfuse()
+
+    def _apply_langfuse(self) -> None:
+        """The Langfuse fields alone, so the status line can be cheap.
+
+        Its own method because the status follows the host as it is typed, and
+        the full apply above rebuilds the repository tree -- thirty times over
+        while someone types a URL.
+
+        The secret key is deliberately absent, for the reason the API key is:
+        nothing on this path may write it to settings.json. The public key is
+        here because it is public -- Langfuse's own documentation puts it in
+        browser code.
+        """
+        s = self.settings
+        s.langfuse_enabled = self.langfuse_check.isChecked()
+        s.langfuse_host = self.langfuse_host_edit.text().strip().rstrip("/")
+        s.langfuse_environment = self.langfuse_env_edit.text().strip() or "development"
+        s.langfuse_send_prompts = self.langfuse_prompts_check.isChecked()
 
     # ---- templates ---------------------------------------------------------
     def _reload_templates(self, select: str | None = None) -> None:

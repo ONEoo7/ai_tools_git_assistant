@@ -202,12 +202,20 @@ def _generate_commit_message(ctx: ToolContext, args: dict, *, progress, is_cance
     if args.get("template"):
         settings.set_repo_template(settings.active_repo, args["template"])
 
+    from git_assistant import tracing
+
     client = build_client(settings, feature=usage.COMMIT)
-    result = CommitGenerator(settings, client).generate(
-        progress=progress, is_cancelled=is_cancelled
-    )
+    try:
+        result = CommitGenerator(settings, client).generate(
+            progress=progress, is_cancelled=is_cancelled
+        )
+    finally:
+        tracing.close(client)  # the end of the run, and so of its trace
     # The message alone, so it can be used verbatim. Everything about how it was
     # produced is in the structured half for a caller that wants it.
+    from git_assistant import commit_style
+
+    measured = commit_style.measure(result.message, commit_style.Limits.of(settings))
     return text(
         result.message,
         {
@@ -216,6 +224,11 @@ def _generate_commit_message(ctx: ToolContext, args: dict, *, progress, is_cance
             "input_tokens": result.input_tokens,
             "context_window": result.context_window,
             "dropped_files": result.dropped_files,
+            # Reported, not enforced: a client that cares can shorten it, and
+            # one that does not gets a message rather than a refusal.
+            "subject_length": measured.subject,
+            "body_length": measured.body,
+            "too_long": measured.too_long,
         },
     )
 

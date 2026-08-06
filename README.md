@@ -28,6 +28,9 @@ Its first feature generates git commit messages; more Git helpers are planned.
 - **Asked before it spends**: pressing Generate, Review or Run shows what the run
   will send - how many calls, and roughly how many tokens - before the first
   request goes out.
+- **Langfuse tracing** (optional, off by default): send every call to your own
+  Langfuse instance, prompt and reply included, to keep a searchable record of
+  what was actually asked (see below).
 
 ## Handling large diffs (context overflow)
 
@@ -258,6 +261,99 @@ estimate as measured.
 The file is `llm_usage.json`, beside `settings.json`. The recent-calls list is
 capped at 500 rows; the totals are never pruned, because "how much has this
 cost" must not change when the log is trimmed.
+
+## How long a commit message may be
+
+Two conventions nobody wrote down but everybody follows: **50 characters** for
+the subject line as a soft target, **72** as the hard cap — past it, `git log
+--oneline` and every web interface cut the subject without saying they did, so
+the last words are simply gone. The body has no such convention, but a model
+asked for "a body" will write nine paragraphs about a two-line change, so there
+is a cap there too, defaulting to **1000 characters** (500–1000 is what teams
+that bother with a rule tend to pick).
+
+Both halves matter, because a limit told to a model is a request, not a
+guarantee:
+
+- The rules are **appended to whichever template is in use** — the default one,
+  a custom one, or a per-repository one — so a template saved last year is held
+  to the limits set today, and changing the numbers in Settings actually changes
+  something.
+- The message is **measured under the editor**, live, as you type over it:
+  `Subject 47/72 - body 312/1000`, turning amber with the reason when it runs
+  over.
+
+Nothing is ever shortened to fit. Cutting a subject at 72 characters would
+produce exactly the mangled subject the limit exists to prevent. Set any of the
+three to 0 in **Advanced** to turn that rule off entirely.
+
+### When it comes back too long anyway
+
+You are asked whether to pay for a shorter one, priced first, in the same window
+every other spend goes through:
+
+```
+1 call(s), about 1,240 tokens in and 512 out (1,752 in total).
+
+- One call: the prompt that wrote this message, with the length it overran
+  quoted back to it.
+- The diff was summarised in 15 call(s) the first time. None of that is
+  repeated: the summaries are already in this prompt.
+- The same prompt with a different instruction, not the same prompt again --
+  so the answer changes even at a low temperature.
+```
+
+**A map-reduce run re-sends only its synthesis.** The notes are already in that
+prompt, so asking again costs one call rather than the fifteen the first attempt
+took, and no chunk is read or summarised twice.
+
+**The retry differs by prompt, not by sampling** — the exact overrun is quoted
+back to the model. That matters because the default temperature here is low, and
+re-sending an identical prompt at a low temperature fairly reliably produces the
+identical answer.
+
+Declining keeps the message: a run you choose not to redo still produced
+something. It is offered once, not in a loop — a model that ignored the
+instruction once will ignore it again, and asking repeatedly spends money on
+that. Retries are billed under their own feature in **LLM usage**, so "what did
+the retries cost me" has an answer.
+
+## Temperature
+
+Per provider **and** per model, under **Connection & Model** — what is careful
+for one set of weights is mute for another. The default is 0.2, because a commit
+message describes a diff rather than inventing anything; leaving it at the
+default stores nothing, so the default can change later and reach you.
+
+Anthropic's current models reject the parameter outright, and the field says so
+rather than pretending to set it.
+
+## Keeping the prompts (Langfuse)
+
+Two records of every model call already exist and neither survives the day:
+**View LLM Calls** holds one run until the window closes, and `llm_usage.json`
+holds tokens without a word of what was sent. So *"why did last Tuesday's review
+miss that"* cannot be answered -- the prompt is gone.
+
+**Settings → Advanced → Langfuse** sends every call to a
+[Langfuse](https://langfuse.com) instance you run: one trace per run, one
+generation per call, named for what that call was doing. Off until you fill in a
+host, a public key and a secret key -- both keys go to the Windows Credential
+Manager, never to `settings.json`.
+
+Every prompt here is built from your staged diffs, so **Send prompts and
+responses** is a real choice: unticked, a trace still carries the model, the
+timings, the token counts and any error, and no source code. The repository's
+*name* travels; its path does not.
+
+Traces are filed under the account running the application, tagged
+`git-assistant`, and carry the feature, the repository and the provider as
+filterable metadata.
+
+Tracing can never cost you a generation. A server that is down, misconfigured,
+or absent from the build produces a missing trace and a line in the tab saying
+why -- never a lost commit message. See
+[`src/git_assistant/tracing/README.md`](src/git_assistant/tracing/README.md).
 
 ## Before a run spends anything
 

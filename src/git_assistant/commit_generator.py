@@ -16,7 +16,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
-from git_assistant import git_ops, llm_log, prompts
+from git_assistant import commit_style, git_ops, llm_log, prompts
 from git_assistant.config import Settings
 from git_assistant.diff_strategy import (
     build_units_with_coverage,
@@ -83,6 +83,36 @@ class FileCoverage:
 
 
 @dataclass
+class Retry:
+    """Everything needed to write the message again, and nothing more.
+
+    The *last* prompt of the run, kept verbatim. For a single-shot generation
+    that is the whole thing; for a map-reduce one it is the synthesis prompt --
+    the notes, already summarised -- so asking again costs one call instead of
+    fifteen, and the chunks are never re-read.
+
+    A retry differs from the attempt before it by its prompt, not by its
+    sampling: the reason the first answer was rejected is quoted back into it.
+    That matters at a low temperature, where asking the same question again
+    would fairly reliably produce the same answer.
+    """
+
+    system: str
+    user: str
+    max_tokens: int
+    #: How many calls the original run took, so the offer can say what is being
+    #: skipped: "1 call, not the 14 that produced this".
+    calls_before: int = 1
+
+    def with_note(self, note: str) -> str:
+        """The prompt again, with why the last answer would not do."""
+        return f"{self.user.rstrip()}\n\n{note}\n" if note else self.user
+
+    def input_tokens(self, note: str = "") -> int:
+        return estimate_tokens(self.system) + estimate_tokens(self.with_note(note))
+
+
+@dataclass
 class GenerationResult:
     message: str
     strategy: str  # "single-shot" | "map-reduce"
@@ -97,6 +127,8 @@ class GenerationResult:
     #: Chunks whose summary came back empty, so their changes reached the final
     #: message through nothing at all.
     blank_notes: int = 0
+    #: What it would take to ask for the message again; see ``Retry``.
+    retry: Retry | None = None
 
 
 def render_template(template: str, *, branch: str, diffstat: str, diff: str) -> str:
@@ -122,12 +154,21 @@ class CommitGenerator:
         self.client = client
 
     def _template(self) -> str:
-        """The prompt template for the active repository.
+        """The prompt template for the active repository, plus the length rules.
 
         Each project can carry its own; repositories without one fall back to
         the default template.
+
+        The length rules are appended here rather than written into the
+        templates, so a template someone saved last year is held to the limits
+        set today -- and so every path that renders the template (the single
+        shot, the final synthesis, and both scaffolds the budget is measured
+        against) counts them. See git_assistant.commit_style.
         """
-        return self.settings.template_for_repo(self.settings.active_repo)
+        return commit_style.with_rules(
+            self.settings.template_for_repo(self.settings.active_repo),
+            commit_style.Limits.of(self.settings),
+        )
 
     # ---- what the server says about the model ------------------------------
     def _model_report(self) -> ModelInfo | None:
@@ -273,6 +314,11 @@ class CommitGenerator:
                 input_tokens=full_tokens,
                 dropped_files=dropped,
                 file_coverage=coverage,
+                retry=Retry(
+                    system=prompts.COMMIT_SYSTEM,
+                    user=full_prompt,
+                    max_tokens=out_tokens,
+                ),
             )
 
         # --- Overflow: map-reduce ------------------------------------------
@@ -338,6 +384,15 @@ class CommitGenerator:
             dropped_files=dropped,
             file_coverage=coverage,
             blank_notes=self._blank_notes,
+            # The synthesis prompt only. Asking again re-reads no chunk and
+            # re-summarises nothing: the notes are already in this prompt, and
+            # they are what the message was written from.
+            retry=Retry(
+                system=prompts.COMMIT_SYSTEM,
+                user=final_prompt,
+                max_tokens=out_tokens,
+                calls_before=1 + self._last_chunk_count,
+            ),
         )
 
     # ---- parallel execution ------------------------------------------------

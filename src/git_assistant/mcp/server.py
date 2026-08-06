@@ -321,4 +321,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     server = Server(channel, allow_writes="--allow-writes" in args)
     log.info("serving on stdio (writes %s)", "on" if server.context.allow_writes else "off")
-    return server.serve(sys.stdin.buffer)
+    try:
+        return server.serve(sys.stdin.buffer)
+    finally:
+        # This process ends when its client closes the pipe. A background
+        # exporter with something left to post would hold it open past that,
+        # and the client is no longer there to be waited for.
+        from git_assistant import tracing
+
+        tracing.shutdown()

@@ -105,7 +105,7 @@ class ClaudeClient:
         system: str,
         user: str,
         max_tokens: int,
-        temperature: float = 0.2,
+        temperature: float | None = None,
     ) -> str:
         """One completion, returned as plain text.
 

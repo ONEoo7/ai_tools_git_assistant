@@ -17,6 +17,7 @@ dependencies = [
     # Code-review rule tables are spreadsheets: read on import, written on
     # export. Pure Python, and the only way to accept the file a team already
     # keeps its standards in.
+    "langfuse>=4.14",
     "openpyxl>=3.1",
     "platformdirs>=4.2",
     "tiktoken>=0.7",

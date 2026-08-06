@@ -32,7 +32,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from git_assistant import commit_history, estimate, git_ops
+from git_assistant import commit_history, commit_style, estimate, git_ops
 from git_assistant.commit_generator import FileCoverage, GenerationResult
 from git_assistant.config import DEFAULT_TEMPLATE_NAME, Settings
 from git_assistant.diff_strategy import filter_files, split_diff
@@ -40,13 +40,22 @@ from git_assistant.providers import PROVIDERS
 from git_assistant.ui.estimate_dialog import confirm
 from git_assistant.ui.repo_picker import RepoPicker
 from git_assistant.ui.side_panel import SidePanel
-from git_assistant.ui.workers import FunctionWorker, GeneratorWorker, run_worker
+from git_assistant.ui.workers import (
+    FunctionWorker,
+    GeneratorWorker,
+    RetryWorker,
+    run_worker,
+)
 
 # Cap rendered lines per file so a huge diff can't freeze the view.
 MAX_RENDER_LINES = 4000
 
 _OMITTED_STYLE = "background-color:#5c1f1f; color:#ffb3b3;"
 _SENT_STYLE = "color:#cfcfcf;"
+
+# The length readout under the editor: quiet until it is over a hard cap.
+_LENGTH_STYLE = "color: #888;"
+_OVER_STYLE = "color: #b36b00;"
 
 # Vertical gap between distinct groups within a pane (the default ~6px spacing
 # is for related widgets, not for separating sections).
@@ -180,6 +189,9 @@ class CommitPanel(QWidget):
         self.editor = QPlainTextEdit()
         self.editor.setPlaceholderText("The generated commit message will appear here...")
 
+        self.length_label = QLabel("")
+        self.length_label.setWordWrap(True)
+
         self.regen_btn = QPushButton("Regenerate" if auto_start else "Generate")
         self.refresh_btn = QPushButton("Refresh")
         self.refresh_btn.setToolTip(
@@ -229,6 +241,12 @@ class CommitPanel(QWidget):
         left_box.setContentsMargins(SECTION_GAP, 0, SECTION_GAP, 0)
         left_box.addWidget(QLabel("Commit message"))
         left_box.addWidget(self.editor)
+        # Under the editor and live, not only after a generation: the message
+        # is editable, and a length rule that only judged the model would be
+        # silent about the line the user typed over it.
+        left_box.addWidget(self.length_label)
+        self.editor.textChanged.connect(self._refresh_length)
+        self._refresh_length()
 
         # ---- right pane: staged files + what was omitted ------------------
         right = QWidget()
@@ -497,6 +515,25 @@ class CommitPanel(QWidget):
         self.template_combo.setCurrentIndex(idx if idx >= 0 else 0)
         self.template_combo.blockSignals(False)
 
+    def _refresh_length(self) -> None:
+        """Say how long the message is, and whether that is a problem.
+
+        Reported, never enforced: cutting a subject line at 72 characters
+        would produce exactly the mangled subject the limit exists to prevent.
+        """
+        limits = commit_style.Limits.of(self.settings)
+        if not limits.asks_anything() or not self.editor.toPlainText().strip():
+            self.length_label.setText("")
+            return
+        measured = commit_style.measure(self.editor.toPlainText(), limits)
+        note = measured.note()
+        self.length_label.setText(
+            f"{measured.label()}  -  {note}" if note else measured.label()
+        )
+        self.length_label.setStyleSheet(
+            _OVER_STYLE if measured.too_long else _LENGTH_STYLE
+        )
+
     def refresh_provider(self) -> None:
         """Show the stored provider, without treating that as a user choice."""
         index = self.provider_combo.findData(self.settings.provider)
@@ -615,6 +652,58 @@ class CommitPanel(QWidget):
         self._populate_files(result.file_coverage)
         self.progress.setText("Done.")
         self._set_busy(False)
+        self._offer_retry(result)
+
+    # ---- asking again when it came back too long -----------------------------
+    def _offer_retry(self, result: GenerationResult) -> None:
+        """Ask whether to pay for a shorter one. Never decides on its own.
+
+        The message is kept and shown either way: a run the user declines to
+        redo still produced something, and throwing it away to make a point
+        about its length would be worse than the length.
+        """
+        measured = commit_style.measure(
+            result.message, commit_style.Limits.of(self.settings)
+        )
+        if not measured.too_long or result.retry is None:
+            return
+        note = measured.retry_note()
+        priced = estimate.for_retry(self.settings, result.retry, note)
+        # The same window every other spend goes through, so the answer to
+        # "what will this cost" is in the place the user already knows.
+        priced.problem = ""
+        if not confirm(self, priced):
+            self.status.setText(
+                f"{measured.note()} Kept as it is; edit it or press Regenerate."
+            )
+            return
+        self._start_retry(result.retry, note)
+
+    def _start_retry(self, retry, note: str) -> None:
+        self._set_busy(True)
+        self.progress.setText("Asking for a shorter message...")
+        worker = RetryWorker(self.settings, retry, note)
+        worker.progress.connect(self.progress.setText)
+        worker.call.connect(self._on_call)
+        worker.finished.connect(self._on_retried)
+        worker.error.connect(self._on_error)
+        self._worker = worker
+        self._thread = run_worker(worker)
+
+    def _on_retried(self, message: str) -> None:
+        """The second answer. Shown whether or not it is any shorter."""
+        self.editor.setPlainText(message)
+        self._set_busy(False)
+        measured = commit_style.measure(
+            message, commit_style.Limits.of(self.settings)
+        )
+        # Not offered a third time: a model that ignored the instruction once
+        # will ignore it again, and asking in a loop spends money on that.
+        self.progress.setText(
+            "Still over the limit - shorten it by hand."
+            if measured.too_long
+            else "Done."
+        )
 
     # ---- previous runs -----------------------------------------------------
     def _record(self, result: GenerationResult) -> None:

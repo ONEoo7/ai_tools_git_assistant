@@ -2,6 +2,7 @@
 
 The workers:
 - ``GeneratorWorker``  : runs commit-message generation, emitting live progress.
+- ``RetryWorker``      : asks for the message again when it came back too long.
 - ``ReviewWorker``     : reviews the marked files against a rule table.
 - ``AgentWorker``      : runs a repository audit, which can take minutes.
 - ``SetupWorker``      : installs LM Studio and downloads a model.
@@ -23,7 +24,7 @@ from git_assistant.commit_generator import (
     GenerationResult,
 )
 from git_assistant.config import Settings
-from git_assistant import usage
+from git_assistant import llm_log, tracing, usage
 from git_assistant.llm import build_client
 from git_assistant.llm_log import RecordingClient
 
@@ -50,6 +51,7 @@ class GeneratorWorker(QObject):
         self._cancelled = True
 
     def run(self) -> None:
+        client = None
         try:
             # Whichever provider is selected. `build_client` refuses rather
             # than falling back: generating through LM Studio while the window
@@ -72,6 +74,59 @@ class GeneratorWorker(QObject):
             self.error.emit("Cancelled.")
         except Exception as exc:  # surface any failure to the UI
             self.error.emit(str(exc))
+        finally:
+            # The end of the run, and so the end of its trace. In a `finally`
+            # because a cancelled or failed run is still a run worth reading.
+            tracing.close(client)
+
+
+class RetryWorker(QObject):
+    """Asks for the message again, from the prompt that produced it.
+
+    Its own worker rather than a flag on ``GeneratorWorker``: this run reads no
+    git, splits no diff and summarises no chunk. It is one call, and a worker
+    that could do either would have to be told which -- through a branch that
+    exists only so the two can share a name.
+    """
+
+    progress = pyqtSignal(str)
+    call = pyqtSignal(object)
+    finished = pyqtSignal(str)  # the new message
+    error = pyqtSignal(str)
+
+    def __init__(self, settings: Settings, retry, note: str = "") -> None:
+        super().__init__()
+        self._settings = settings
+        self._retry = retry
+        self._note = note
+        self._cancelled = False
+
+    def cancel(self) -> None:
+        self._cancelled = True
+
+    def run(self) -> None:
+        client = None
+        try:
+            self.progress.emit("Asking for a shorter message...")
+            client = build_client(self._settings, feature=usage.COMMIT)
+            recorder = RecordingClient(client, on_call=self.call.emit)
+            recorder.phase = llm_log.FINAL
+            message = recorder.chat(
+                model=self._settings.active_model(),
+                system=self._retry.system,
+                user=self._retry.with_note(self._note),
+                max_tokens=self._retry.max_tokens,
+            )
+            if self._cancelled:
+                self.error.emit("Cancelled.")
+                return
+            self.finished.emit(message)
+        except CancelledError:
+            self.error.emit("Cancelled.")
+        except Exception as exc:
+            self.error.emit(str(exc))
+        finally:
+            tracing.close(client)
 
 
 class ReviewWorker(QObject):
@@ -103,6 +158,7 @@ class ReviewWorker(QObject):
         # must not pay to load the review package to write a commit message.
         from git_assistant.review import reviewer
 
+        client = None
         try:
             client = build_client(self._settings, feature=usage.REVIEW)
             recorder = RecordingClient(client, on_call=self.call.emit)
@@ -119,6 +175,8 @@ class ReviewWorker(QObject):
             self.error.emit("Cancelled.")
         except Exception as exc:  # surface any failure to the UI
             self.error.emit(str(exc))
+        finally:
+            tracing.close(client)
 
 
 class AgentWorker(QObject):

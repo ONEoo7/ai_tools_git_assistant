@@ -56,6 +56,13 @@ DEFAULT_LIMIT = 500
 #: them finishes here.
 _LOCK = threading.Lock()
 
+#: The last completion this thread recorded. Read by the tracing wrapper, which
+#: has the prompt and the timing but not the provider's own token counts --
+#: those are consumed here, inside the client, one stack frame below it. Per
+#: thread because a review runs several completions at once; safe because
+#: `record` is called synchronously inside the `chat` the reader is wrapping.
+_LAST = threading.local()
+
 
 def usage_path() -> Path:
     """Path to the usage file (the directory may not yet exist)."""
@@ -231,6 +238,9 @@ def record(
         output_tokens=max(0, int(output_tokens or 0)),
         estimated=estimated,
     )
+    # Before the write, not after: the completion happened and its counts are
+    # real whether or not the statistics file could be updated.
+    _LAST.event = event
     try:
         with _LOCK:
             usage = load()
@@ -266,6 +276,21 @@ def _add(usage: Usage, event: Event) -> None:
     total.estimated_calls += 1 if event.estimated else 0
     total.first = total.first or event.when
     total.last = event.when
+
+
+def last_event() -> Event | None:
+    """The completion this thread recorded most recently, if any.
+
+    For a caller that needs the provider's own token counts and is one frame
+    above the client that received them. Pair it with `forget`, or an older
+    call's numbers can be read as this one's.
+    """
+    return getattr(_LAST, "event", None)
+
+
+def forget() -> None:
+    """Drop this thread's last completion, before making another."""
+    _LAST.event = None
 
 
 def clear() -> bool:

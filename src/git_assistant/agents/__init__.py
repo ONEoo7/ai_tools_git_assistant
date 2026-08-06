@@ -26,7 +26,7 @@ from git_assistant.agents.base import (
 from git_assistant.agents.config_audit import ConfigAuditAgent
 from git_assistant.model_runtime import ModelRuntime
 from git_assistant.agents.size_audit import SizeAuditAgent
-from git_assistant import llm_log, usage
+from git_assistant import llm_log, tracing, usage
 from git_assistant.llm import build_client
 from git_assistant.llm_log import RecordingClient
 
@@ -101,6 +101,7 @@ def run(
     if not narrate:
         return report
 
+    client = None
     try:
         client = build_client(settings, feature=usage.AUDIT)
         if on_call is not None:
@@ -109,6 +110,10 @@ def run(
         runtime = ModelRuntime(settings, client)
     except Exception as exc:
         report.warnings.append(f"Written without the model: {exc}")
+        tracing.close(client)
         return report
-    narrator.narrate(report, runtime, ctx)
+    try:
+        narrator.narrate(report, runtime, ctx)
+    finally:
+        tracing.close(client)  # the end of the run, and so of its trace
     return report

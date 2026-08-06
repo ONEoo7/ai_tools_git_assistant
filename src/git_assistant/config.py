@@ -20,6 +20,18 @@ from git_assistant.providers import DEFAULT_PROVIDER, is_known
 from git_assistant.prompts import DEFAULT_TEMPLATE
 
 APP_NAME = "git-assistant"
+
+#: What every model is asked for until someone says otherwise. Low, because a
+#: commit message is a description of a diff and not a creative act.
+DEFAULT_TEMPERATURE = 0.2
+#: What providers accept. Above 2.0 is an error from most of them, and a
+#: rejected completion is a lost commit message.
+MIN_TEMPERATURE = 0.0
+MAX_TEMPERATURE = 2.0
+
+
+def _clamp_temperature(value: float) -> float:
+    return max(MIN_TEMPERATURE, min(MAX_TEMPERATURE, value))
 LEGACY_APP_NAME = "git-commit-assistant"  # pre-rename config location
 
 # Files matching these globs are dropped from the diff before token counting.
@@ -181,6 +193,31 @@ def _profiles_from(raw: object) -> list:
     return [p for p in found if p is not None]
 
 
+def _temperatures_from(raw: object) -> dict[str, dict[str, float]]:
+    """Rebuild the nested temperature map, dropping anything unusable.
+
+    Two levels of hand-editable JSON, so two levels of not trusting it. An
+    entry that cannot be read as a number is left out entirely rather than
+    coerced, so the default applies and the model is asked for something a
+    provider will accept.
+    """
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, dict[str, float]] = {}
+    for provider, models in raw.items():
+        if not isinstance(models, dict):
+            continue
+        kept = {}
+        for model, value in models.items():
+            try:
+                kept[str(model)] = _clamp_temperature(float(value))
+            except (TypeError, ValueError):
+                continue
+        if kept:
+            out[str(provider)] = kept
+    return out
+
+
 @dataclass
 class Settings:
     """All persisted user configuration."""
@@ -195,6 +232,13 @@ class Settings:
     #: Per-provider model, so switching provider does not carry a model name
     #: the new one has never heard of into its request.
     provider_models: dict[str, str] = field(default_factory=dict)
+    #: How adventurous each model is allowed to be, keyed by provider and then
+    #: by model: ``{"lmstudio": {"qwen3.5-4b": 0.2}}``. Per model rather than
+    #: per provider because it is a property of the weights -- what is careful
+    #: for one is mute for another -- and nested rather than under a compound
+    #: key because a model id contains slashes, colons and dots, and every
+    #: separator that would survive them is one nobody can read in the file.
+    provider_temperatures: dict[str, dict[str, float]] = field(default_factory=dict)
     #: Azure pins its contract with this; a mismatch is a 404 that says
     #: nothing about the version.
     azure_api_version: str = "2024-10-21"
@@ -212,6 +256,12 @@ class Settings:
     # its original name so existing settings files load unchanged.
     prompt_template: str = DEFAULT_TEMPLATE
     templates: list[Template] = field(default_factory=list)  # named extras
+    # ---- how long a commit message may be ----------------------------------
+    #: Asked of the model and checked afterwards; 0 turns a rule off entirely.
+    #: See git_assistant.commit_style for what the numbers mean.
+    commit_subject_target: int = 50
+    commit_subject_limit: int = 72
+    commit_body_limit: int = 1000
     # Committer identities live in committer_identities.json, not here -- see
     # git_assistant.identities. An older build wrote them into this file; that
     # key is migrated and removed on first run.
@@ -240,6 +290,17 @@ class Settings:
     #: what the tab last showed. See git_assistant.mcp.launch.
     mcp_allow_writes: bool = False
     mcp_scope: str = "user"  # which Claude Code scope to register in
+    # ---- Langfuse tracing --------------------------------------------------
+    #: Off until the user turns it on and says where. Neither key is here and
+    #: neither may ever be written here -- both are in the Windows Credential
+    #: Manager, see git_assistant.tracing.settings.
+    langfuse_enabled: bool = False
+    langfuse_host: str = ""
+    langfuse_environment: str = "development"
+    langfuse_release: str = ""  # blank => this build's version
+    #: Whether the prompt and the reply travel with the trace. Off, a trace
+    #: still carries the model, the timings, the tokens and any error.
+    langfuse_send_prompts: bool = True
     context_window: int = 32768  # total tokens for input+output (0 => auto-detect)
     safety_margin: float = 0.10  # fraction of the window reserved for the model's output
     ignore_globs: list[str] = field(default_factory=lambda: list(DEFAULT_IGNORE_GLOBS))
@@ -283,6 +344,38 @@ class Settings:
 
     def active_model(self) -> str:
         return self.provider_model(self.provider)
+
+    # ---- temperature, per provider and per model ---------------------------
+    def temperature_for(self, provider: str, model: str) -> float:
+        """How adventurous this model may be, or the default nobody has changed.
+
+        Never raises and never returns something a provider would reject: a
+        hand-edited file with ``"warm"`` in it, or with 40, gets the default
+        and the clamp respectively. A rejected completion is a lost commit
+        message; a slightly wrong temperature is a slightly worse one.
+        """
+        try:
+            value = float(self.provider_temperatures.get(provider, {})[model])
+        except (KeyError, TypeError, ValueError):
+            return DEFAULT_TEMPERATURE
+        return _clamp_temperature(value)
+
+    def set_temperature(self, provider: str, model: str, value: float | None) -> None:
+        """Pin a temperature, or drop it back to the default with ``None``."""
+        for_provider = self.provider_temperatures.setdefault(provider, {})
+        if value is None:
+            for_provider.pop(model, None)
+            if not for_provider:
+                self.provider_temperatures.pop(provider, None)
+            return
+        for_provider[model] = _clamp_temperature(float(value))
+
+    def has_temperature(self, provider: str, model: str) -> bool:
+        """Whether one was chosen, as opposed to the default being in effect."""
+        return model in self.provider_temperatures.get(provider, {})
+
+    def active_temperature(self) -> float:
+        return self.temperature_for(self.provider, self.active_model())
 
     def active_repo_entry(self) -> RepoEntry | None:
         for r in self.repos:
@@ -428,6 +521,9 @@ class Settings:
                 if isinstance(value, dict)
                 else {}
             )
+        clean["provider_temperatures"] = _temperatures_from(
+            clean.get("provider_temperatures")
+        )
         repos = clean.get("repos") or []
         clean["repos"] = [
             RepoEntry(

@@ -79,7 +79,12 @@ def test_the_entry_name_is_namespaced():
 
 
 def test_no_api_key_is_ever_written_to_settings():
-    """The whole point of the credential store. A regression here is a leak."""
+    """The whole point of the credential store. A regression here is a leak.
+
+    No exceptions, deliberately -- including Langfuse's *public* key, which
+    would be defensible in a settings file. A rule with an exception in it is a
+    rule nobody can check.
+    """
     fields = set(Settings().to_dict())
     assert not [f for f in fields if "key" in f.lower() or "secret" in f.lower()]
 

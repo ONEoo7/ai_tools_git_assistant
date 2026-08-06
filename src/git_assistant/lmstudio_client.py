@@ -12,6 +12,7 @@ from __future__ import annotations
 import httpx
 
 from git_assistant import usage
+from git_assistant.config import DEFAULT_TEMPERATURE
 from git_assistant.llm import LLMError, ModelInfo
 
 
@@ -33,8 +34,12 @@ class LMStudioClient:
         connect_timeout: float = 3.0,
         provider_key: str = "lmstudio",
         feature: str = "",
+        temperature: float = DEFAULT_TEMPERATURE,
     ) -> None:
         self.base_url = base_url.rstrip("/")
+        # What a call gets when it does not ask for one; see
+        # Settings.temperature_for, which is where this comes from.
+        self.temperature = temperature
         # Which provider the recorded usage is filed under, and what it is
         # being spent on; see git_assistant.usage.
         self.provider_key = provider_key
@@ -134,7 +139,7 @@ class LMStudioClient:
         system: str,
         user: str,
         max_tokens: int,
-        temperature: float = 0.2,
+        temperature: float | None = None,
     ) -> str:
         """Run a single chat completion and return the assistant text."""
         body = {
@@ -144,7 +149,7 @@ class LMStudioClient:
                 {"role": "user", "content": user},
             ],
             "max_tokens": max_tokens,
-            "temperature": temperature,
+            "temperature": self._temperature(temperature),
             "stream": False,
         }
         try:
@@ -175,6 +180,10 @@ class LMStudioClient:
             feature=self.feature,
         )
         return text
+
+    def _temperature(self, asked: float | None) -> float:
+        """What this call should use: what it asked for, or this client's own."""
+        return self.temperature if asked is None else asked
 
     def ping(self) -> list[ModelInfo]:
         """Test connectivity by listing models; raises LMStudioError on failure."""

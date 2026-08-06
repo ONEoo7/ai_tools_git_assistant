@@ -21,6 +21,7 @@ from __future__ import annotations
 import httpx
 
 from git_assistant import usage
+from git_assistant.config import DEFAULT_TEMPERATURE
 from git_assistant.llm import LLMError, ModelInfo
 
 CHAT_TIMEOUT = 600.0
@@ -41,8 +42,12 @@ class OpenAICompatibleClient:
         list_timeout: float = LIST_TIMEOUT,
         provider_key: str = "openai",
         feature: str = "",
+        temperature: float = DEFAULT_TEMPERATURE,
     ) -> None:
         self.base_url = base_url.rstrip("/")
+        # What a call gets when it does not ask for one; see
+        # Settings.temperature_for, which is where this comes from.
+        self.temperature = temperature
         # This client serves several providers, so it has to be told which one
         # its usage is filed under -- and what it is being spent on; see
         # git_assistant.usage.
@@ -102,6 +107,10 @@ class OpenAICompatibleClient:
         """Always None: this API does not report it. Not an error."""
         return None
 
+    def _temperature(self, asked: float | None) -> float:
+        """What this call should use: what it asked for, or this client's own."""
+        return self.temperature if asked is None else asked
+
     # ---- chat --------------------------------------------------------------
     def chat(
         self,
@@ -109,7 +118,7 @@ class OpenAICompatibleClient:
         system: str,
         user: str,
         max_tokens: int,
-        temperature: float = 0.2,
+        temperature: float | None = None,
     ) -> str:
         body = {
             "model": model,
@@ -118,7 +127,7 @@ class OpenAICompatibleClient:
                 {"role": "user", "content": user},
             ],
             "max_tokens": max_tokens,
-            "temperature": temperature,
+            "temperature": self._temperature(temperature),
             "stream": False,
         }
         payload = self._request(

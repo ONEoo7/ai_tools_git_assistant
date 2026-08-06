@@ -97,13 +97,33 @@ class RecordingClient:
         self._on_call = on_call
         self._lock = threading.Lock()
         self.calls: list[LlmCall] = []
-        #: What the next call is for. Set by the generator around each phase;
-        #: map chunks run on several threads at once, so it is read under the
-        #: same lock that hands out call numbers.
-        self.phase = SINGLE
+        self.phase = SINGLE  # through the setter, so the client below hears it too
+
+    @property
+    def phase(self) -> str:
+        """What the next call is for.
+
+        Set by the generator around each phase; map chunks run on several
+        threads at once, so it is read under the same lock that hands out call
+        numbers.
+
+        Written through to the client underneath when that client keeps a phase
+        of its own -- the tracer does, and a Langfuse trace of fifteen spans all
+        called "completion" is a list rather than a story.
+        """
+        return self._phase
+
+    @phase.setter
+    def phase(self, value: str) -> None:
+        self._phase = value
+        if hasattr(self._inner, "phase"):
+            try:
+                self._inner.phase = value
+            except Exception:
+                pass
 
     # ---- the recording part ------------------------------------------------
-    def chat(self, model, system, user, max_tokens, temperature=0.2):
+    def chat(self, model, system, user, max_tokens, temperature=None):
         with self._lock:
             call = LlmCall(
                 index=len(self.calls) + 1,

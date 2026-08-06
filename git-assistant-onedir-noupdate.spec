@@ -15,7 +15,10 @@
 # then what it is for most software: install the new version over the old one.
 
 import sys
+from importlib.util import find_spec
 from pathlib import Path
+
+from PyInstaller.utils.hooks import collect_all
 
 ROOT = Path(SPECPATH)
 ICON = ROOT / "src" / "git_assistant" / "resources" / "icon.ico"
@@ -46,16 +49,30 @@ EXCLUDED = [
     "PyQt5",
 ]
 
+# Langfuse tracing. OpenTelemetry resolves its exporters and propagators through
+# entry points, which PyInstaller does not follow, so naming the packages as
+# hidden imports is not enough -- collect_all brings the metadata with them.
+# Optional in the same sense `dist_client` is: a checkout without it must still
+# build, and the application already degrades to "not sending traces".
+_lf_datas, _lf_binaries, _lf_hidden = [], [], []
+if find_spec("langfuse") is not None:
+    for _pkg in ("langfuse", "opentelemetry"):
+        _d, _b, _h = collect_all(_pkg)
+        _lf_datas += _d
+        _lf_binaries += _b
+        _lf_hidden += _h
+
 a = Analysis(
     ["src/git_assistant/__main__.py"],
     pathex=["src"],
-    binaries=[],
+    binaries=_lf_binaries,
     # No root.json and no update_url.txt: the trust root and the address only
     # mean anything to the updater, and shipping them in a build that cannot
     # update would suggest it can.
     datas=[
         (str(ICON), "git_assistant/resources"),
         (str(REVIEW_RULES), "git_assistant/resources"),
+        *_lf_datas,
     ],
     # `anthropic` is imported inside a function (git_assistant.claude_client)
     # so a build without it still runs the other providers. Declared here
@@ -68,6 +85,7 @@ a = Analysis(
         "openpyxl",
         "tiktoken_ext",
         "tiktoken_ext.openai_public",
+        *_lf_hidden,
     ],
     hookspath=[],
     runtime_hooks=[],

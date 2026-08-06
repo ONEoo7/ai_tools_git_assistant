@@ -10,3 +10,13 @@
 #: separately they drifted, and a 0.2.0 build reported 0.1.0, which would have
 #: made it offer itself as an update forever.
 __version__ = "0.3.16"
+
+#: Who wrote it and where it lives, shown at the foot of the settings window.
+#:
+#: Literals here for the same reason the version is: a packaged build carries no
+#: distribution metadata, so nothing at runtime can read them out of
+#: `pyproject.toml`. They are repeated in the Windows version resource
+#: (`tools/win_version_info.py`) and the installer (`installer/*.nsi`), which
+#: cannot import this module -- tests/test_about.py holds the three in step.
+__author__ = "Stefan Ghitescu"
+PROJECT_URL = "https://github.com/ONEoo7/ai_tools_git_assistant"

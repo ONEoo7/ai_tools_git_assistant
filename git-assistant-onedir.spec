@@ -33,10 +33,23 @@ _extra_datas, _extra_binaries, _extra_hidden = [], [], []
 if find_spec("dist_client") is not None:
     _extra_datas, _extra_binaries, _extra_hidden = collect_all("dist_client")
 
+# Langfuse tracing. OpenTelemetry resolves its exporters and propagators through
+# entry points, which PyInstaller does not follow, so naming the packages as
+# hidden imports is not enough -- collect_all brings the metadata with them.
+# Optional in the same sense `dist_client` is: a checkout without it must still
+# build, and the application already degrades to "not sending traces".
+_lf_datas, _lf_binaries, _lf_hidden = [], [], []
+if find_spec("langfuse") is not None:
+    for _pkg in ("langfuse", "opentelemetry"):
+        _d, _b, _h = collect_all(_pkg)
+        _lf_datas += _d
+        _lf_binaries += _b
+        _lf_hidden += _h
+
 a = Analysis(
     ["src/git_assistant/__main__.py"],
     pathex=["src"],
-    binaries=_extra_binaries,
+    binaries=[*_extra_binaries, *_lf_binaries],
     datas=[
         (str(ICON), "git_assistant/resources"),
         (str(REVIEW_RULES), "git_assistant/resources"),
@@ -51,6 +64,7 @@ a = Analysis(
         (str(ROOT / "src" / "git_assistant" / "updating" / "update_url.txt"),
          "git_assistant/updating"),
         *_extra_datas,
+        *_lf_datas,
     ],
     # `anthropic` is imported inside a function (git_assistant.claude_client)
     # so a build without it still runs the other providers. Declared here
@@ -64,6 +78,7 @@ a = Analysis(
         "tiktoken_ext",
         "tiktoken_ext.openai_public",
         *_extra_hidden,
+        *_lf_hidden,
     ],
     hookspath=[],
     runtime_hooks=[],

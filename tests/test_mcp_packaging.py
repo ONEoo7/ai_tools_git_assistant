@@ -133,3 +133,34 @@ def test_every_build_ships_the_review_rules(spec):
     app = text[: text.index("mcp_a = Analysis")] if "mcp_a = Analysis" in text else text
     assert "review_rules.json" in app
     assert '"git_assistant/resources"' in app
+
+
+# ---- Langfuse tracing ------------------------------------------------------------
+@pytest.mark.parametrize("spec", (*ONEDIR_SPECS, "git-assistant.spec"))
+def test_every_build_can_send_a_trace(spec):
+    """A hidden import is not enough: OTEL finds its exporter by entry point."""
+    text = _read(spec)
+    app = text[: text.index("mcp_a = Analysis")] if "mcp_a = Analysis" in text else text
+    assert 'collect_all(_pkg)' in app
+    assert '"langfuse"' in app and '"opentelemetry"' in app
+    assert "_lf_hidden" in app and "_lf_datas" in app
+
+
+def test_the_mcp_server_traces_too():
+    """It generates commit messages; unlike openpyxl this cannot be left out."""
+    text = _read("git-assistant.spec")
+    mcp = text[text.index("mcp_a = Analysis") :]
+    assert "_lf_hidden" in mcp and "_lf_datas" in mcp
+    excludes = mcp[mcp.index("excludes=") : mcp.index("noarchive")]
+    assert "langfuse" not in excludes and "opentelemetry" not in excludes
+
+
+@pytest.mark.parametrize("spec", (*ONEDIR_SPECS, "git-assistant.spec"))
+def test_a_checkout_without_langfuse_still_builds(spec):
+    """Optional in the same sense dist_client is; the app degrades on its own."""
+    assert 'find_spec("langfuse")' in _read(spec)
+
+
+def test_the_dependency_is_declared_where_it_is_installed_from_too():
+    assert "langfuse" in _read("pyproject.toml")
+    assert "langfuse" in _read("uv.lock")
