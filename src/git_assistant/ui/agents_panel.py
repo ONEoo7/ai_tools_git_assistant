@@ -26,7 +26,6 @@ from PyQt6.QtWidgets import (
     QListWidgetItem,
     QMenu,
     QMessageBox,
-    QProgressBar,
     QPushButton,
     QSizePolicy,
     QSplitter,
@@ -115,6 +114,10 @@ class AgentsPanel(QWidget):
         self.settings = settings
         self._before_run = before_run
         self._thread = None
+        #: The window's shared progress bar, set by whoever owns this panel.
+        #: None when there is none -- a panel in a test, or the tray's own
+        #: window -- and every report to it is then a no-op.
+        self.busy = None
         self._worker = None
         self._report = None
         #: (repository, agent) the displayed report describes. What is on screen
@@ -192,9 +195,6 @@ class AgentsPanel(QWidget):
         self.status.setWordWrap(True)
         self.status.setStyleSheet(INFO_COLOUR)
 
-        self.progress = QProgressBar()
-        self.progress.setTextVisible(False)
-        self.progress.hide()
 
         self.view = QTextBrowser()
         self.view.setOpenExternalLinks(False)
@@ -242,7 +242,6 @@ class AgentsPanel(QWidget):
         layout.setContentsMargins(SECTION_GAP, 0, SECTION_GAP, 0)
         layout.addWidget(self.header)
         layout.addWidget(self.status)
-        layout.addWidget(self.progress)
         layout.addWidget(self.tabs, 1)
         layout.addLayout(buttons)
 
@@ -479,8 +478,6 @@ class AgentsPanel(QWidget):
             return
         self._set_running(True)
         self.status.setText("Starting...")
-        self.progress.setRange(0, 0)
-        self.progress.show()
         self.side_panel.calls.reset()  # these belong to the run about to start
 
         worker = AgentWorker(
@@ -514,19 +511,35 @@ class AgentsPanel(QWidget):
             self._worker.cancel()
 
     def _on_pct(self, pct: int) -> None:
-        if pct < 0:
-            self.progress.setRange(0, 0)
-        else:
-            self.progress.setRange(0, 100)
-            self.progress.setValue(pct)
+        self._busy_step(pct)
 
     def _set_running(self, running: bool) -> None:
         self.run_btn.setEnabled(not running and bool(self._repo_path()))
         self.cancel_btn.setEnabled(running)
         self.agent_list.setEnabled(not running)
         self.repo_picker.setEnabled(not running)
-        if not running:
-            self.progress.hide()
+        if running:
+            self._busy_start("Repository audit")
+        else:
+            self._busy_stop()
+
+    # ---- the window's shared progress bar --------------------------------
+    def _busy_start(self, what: str) -> None:
+        """Say a task has begun, if this panel is in a window that has a bar.
+
+        `busy` is set by the window that owns this panel; a panel constructed on
+        its own -- in a test, or by the tray -- reports to nothing and works.
+        """
+        if self.busy is not None:
+            self.busy.start(self, what)
+
+    def _busy_step(self, percent: int) -> None:
+        if self.busy is not None:
+            self.busy.step(self, percent)
+
+    def _busy_stop(self) -> None:
+        if self.busy is not None:
+            self.busy.stop(self)
 
     def _on_finished(self, report) -> None:
         self._worker = None

@@ -17,6 +17,7 @@ from PyQt6.QtWidgets import (
     QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
+    QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QInputDialog,
@@ -63,6 +64,7 @@ from git_assistant.llm import LLMError, ModelInfo, build_client
 from git_assistant.prompts import DEFAULT_TEMPLATE
 from git_assistant.providers import PROVIDERS
 from git_assistant.ui.agents_panel import AgentsPanel
+from git_assistant.ui.busy_bar import BusyBar
 from git_assistant.ui.identities_panel import IdentitiesPanel
 from git_assistant.ui.mcp_panel import McpPanel
 from git_assistant.ui.identity_bar import IdentityBar
@@ -206,6 +208,18 @@ class SettingsDialog(QDialog):
         self.about_btn.setToolTip("Who wrote this, and who helped.")
         self.about_btn.clicked.connect(self._on_about)
 
+        # One bar for every tab. Each panel used to keep its own, which put it
+        # in a different place depending on where you were looking -- and
+        # nowhere at all on the tab you switched to while an audit carried on
+        # behind it. See git_assistant.ui.busy_bar.
+        self.busy = BusyBar()
+        for panel in (
+            self.commit_panel,
+            self.agents_panel,
+            self.review_panel,
+        ):
+            panel.busy = self.busy
+
         self.saved_hint = QLabel("Changes are saved automatically")
         self.saved_hint.setStyleSheet("color: #888;")
 
@@ -230,14 +244,33 @@ class SettingsDialog(QDialog):
         # The project link and the author used to sit here. They are in About
         # now, where the contributors are too: the same three facts in one
         # place reads better than two of them along the bottom of every tab.
-        bottom = QHBoxLayout()
-        bottom.addWidget(self.version_current)
-        bottom.addWidget(self.version_arrow)
-        bottom.addWidget(self.version_online)
-        bottom.addStretch(1)
-        bottom.addWidget(self.saved_hint)
-        bottom.addWidget(open_cfg_btn)
-        bottom.addWidget(self.about_btn)
+        # Three columns rather than one row, so the bar is centred in the
+        # *window* and not merely in whatever space the version text and the
+        # buttons left over. The outer columns carry equal stretch, so they
+        # take equal shares of the slack and the middle one lands on the
+        # midpoint; the bar keeps its natural width in it.
+        version_row = QHBoxLayout()
+        for label in (self.version_current, self.version_arrow, self.version_online):
+            version_row.addWidget(label)
+        version_row.addStretch(1)
+
+        buttons_row = QHBoxLayout()
+        buttons_row.addStretch(1)
+        buttons_row.addWidget(self.saved_hint)
+        buttons_row.addWidget(open_cfg_btn)
+        buttons_row.addWidget(self.about_btn)
+
+        bottom = QGridLayout()
+        bottom.setContentsMargins(0, 0, 0, 0)
+        bottom.addLayout(version_row, 0, 0)
+        bottom.addWidget(self.busy, 0, 1, Qt.AlignmentFlag.AlignCenter)
+        bottom.addLayout(buttons_row, 0, 2)
+        bottom.setColumnStretch(0, 1)
+        bottom.setColumnStretch(2, 1)
+        self.bottom_bar = bottom
+        # Equalised in showEvent, not here: see _centre_busy_bar.
+        self._version_row = version_row
+        self._buttons_row = buttons_row
 
         layout = QVBoxLayout(self)
         layout.addWidget(self.identity_bar)
@@ -253,6 +286,30 @@ class SettingsDialog(QDialog):
         self._ready = True
         self._connect_autosave()
         self.refresh_update_status()
+
+    def showEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        super().showEvent(event)
+        self._centre_busy_bar()
+
+    def _centre_busy_bar(self) -> None:
+        """Make the two outer columns equal, so the middle one is the midpoint.
+
+        Equal stretch is not enough on its own: stretch shares out the space
+        *left over* after each column's minimum, and the buttons need far more
+        of it than the version text does -- measured, that put the bar 152px
+        left of centre. Setting both outer columns to the width of the wider one
+        makes them equal, and only then is the middle column centred.
+
+        Here rather than while building the layout, because a sub-layout that
+        has not been shown yet reports a size hint of zero, which is what the
+        first attempt at this silently set the minimum to.
+        """
+        wide = max(
+            self._version_row.sizeHint().width(),
+            self._buttons_row.sizeHint().width(),
+        )
+        for column in (0, 2):
+            self.bottom_bar.setColumnMinimumWidth(column, wide)
 
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt naming
         # An audit can still be reading the object store, and a review can have

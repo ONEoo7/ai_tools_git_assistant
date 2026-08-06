@@ -29,7 +29,6 @@ from PyQt6.QtWidgets import (
     QListWidgetItem,
     QMenu,
     QMessageBox,
-    QProgressBar,
     QPushButton,
     QSizePolicy,
     QSplitter,
@@ -87,6 +86,10 @@ class ReviewPanel(QWidget):
         self.settings = settings
         self._before_run = before_run
         self._thread = None
+        #: The window's shared progress bar, set by whoever owns this panel.
+        #: None when there is none -- a panel in a test, or the tray's own
+        #: window -- and every report to it is then a no-op.
+        self.busy = None
         self._worker: ReviewWorker | None = None
         self._store = RuleStore.load()
         self._candidates: list[Candidate] = []
@@ -154,9 +157,6 @@ class ReviewPanel(QWidget):
         self.status = QLabel("")
         self.status.setWordWrap(True)
         self.status.setStyleSheet(INFO_COLOUR)
-        self.progress = QProgressBar()
-        self.progress.setTextVisible(False)
-        self.progress.hide()
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.addWidget(self._build_picker_pane())
@@ -172,7 +172,6 @@ class ReviewPanel(QWidget):
         layout = QVBoxLayout(self)
         layout.addWidget(splitter, 1)
         layout.addWidget(self.status)
-        layout.addWidget(self.progress)
         layout.addLayout(self._build_buttons())
 
         self.refresh_repos()
@@ -1002,13 +1001,30 @@ class ReviewPanel(QWidget):
             self._worker.cancel()
             self.status.setText("Cancelling...")
 
+
+    # ---- the window's shared progress bar --------------------------------
+    def _busy_start(self, what: str) -> None:
+        """Say a task has begun, if this panel is in a window that has a bar."""
+        if self.busy is not None:
+            self.busy.start(self, what)
+
+    def _busy_step(self, percent: int) -> None:
+        if self.busy is not None:
+            self.busy.step(self, percent)
+
+    def _busy_stop(self) -> None:
+        if self.busy is not None:
+            self.busy.stop(self)
+
     def _set_running(self, running: bool) -> None:
         self.cancel_btn.setEnabled(running)
         self.repo_picker.setEnabled(not running)
         self.files_list.setEnabled(not running)
         self.profile_combo.setEnabled(not running)
-        self.progress.setRange(0, 0)
-        self.progress.setVisible(running)
+        if running:
+            self._busy_start("Code review")
+        else:
+            self._busy_stop()
         if not running:
             self._update_review_button()
         else:

@@ -126,6 +126,10 @@ class CommitPanel(QWidget):
         self.settings = settings
         self._before_generate = before_generate
         self._thread = None
+        #: The window's shared progress bar, set by whoever owns this panel.
+        #: None when there is none -- a panel in a test, or the tray's own
+        #: window -- and every report to it is then a no-op.
+        self.busy = None
         self._worker: GeneratorWorker | None = None
         self._push_thread = None
         self._push_worker = None
@@ -918,7 +922,26 @@ class CommitPanel(QWidget):
             self.status.setText(f"Error: {message}")
         self._set_busy(False)
 
+
+    # ---- the window's shared progress bar --------------------------------
+    def _busy_start(self, what: str) -> None:
+        """Say a task has begun, if this panel is in a window that has a bar."""
+        if self.busy is not None:
+            self.busy.start(self, what)
+
+    def _busy_step(self, percent: int) -> None:
+        if self.busy is not None:
+            self.busy.step(self, percent)
+
+    def _busy_stop(self) -> None:
+        if self.busy is not None:
+            self.busy.stop(self)
+
     def _set_busy(self, busy: bool) -> None:
+        if busy:
+            self._busy_start("Commit message")
+        else:
+            self._busy_stop()
         self.regen_btn.setEnabled(not busy)
         # Refresh clears the very widgets a running generation is about to
         # fill, so it waits with the rest.
