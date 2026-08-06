@@ -20,3 +20,10 @@ __version__ = "0.3.16"
 #: cannot import this module -- tests/test_about.py holds the three in step.
 __author__ = "Stefan Ghitescu"
 PROJECT_URL = "https://github.com/ONEoo7/ai_tools_git_assistant"
+
+#: Everyone else who shaped this, and what they contributed. Shown under About.
+#: ``(name, what they did)``, in the order they should be read -- not sorted, so
+#: the list can be arranged by hand as it grows.
+CONTRIBUTORS: tuple[tuple[str, str], ...] = (
+    ("Stefan Dragomir", "Product feedback"),
+)

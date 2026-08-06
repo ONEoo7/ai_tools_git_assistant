@@ -17,6 +17,10 @@ def test_every_provider_is_offered_in_order():
         "Litellm Proxy",
         "Ollama",
         "Lemonade Server",
+        # The agent CLIs come last: they are experimental, and the list is read
+        # top-down by someone choosing for the first time.
+        "Claude Code CLI",
+        "Antigravity CLI",
     ]
 
 

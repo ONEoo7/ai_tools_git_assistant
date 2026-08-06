@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import html
 import json
 import os
 import re
@@ -35,7 +36,14 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from git_assistant import PROJECT_URL, __author__, __version__, git_ops, lmstudio_setup
+from git_assistant import (
+    CONTRIBUTORS,
+    PROJECT_URL,
+    __author__,
+    __version__,
+    git_ops,
+    lmstudio_setup,
+)
 from git_assistant.commit_generator import MIN_PARALLEL_CONTEXT
 from git_assistant.config import (
     DEFAULT_TEMPERATURE,
@@ -49,7 +57,7 @@ from git_assistant.config import (
     build_repo_tree,
     config_path,
 )
-from git_assistant import credentials, providers, tracing
+from git_assistant import agent_cli, credentials, providers, tracing
 from git_assistant.identities import IdentityStore
 from git_assistant.llm import LLMError, ModelInfo, build_client
 from git_assistant.prompts import DEFAULT_TEMPLATE
@@ -88,6 +96,24 @@ UNKNOWN_VERSION = "?"
 INSTALL_LINK = "action:install"
 
 
+def about_html() -> str:
+    """What the About box says. Built here so it can be read without opening one.
+
+    Grouped by what people did rather than listed flat: "Stefan Dragomir" on its
+    own says nothing, and the credit is the contribution as much as the name.
+    """
+    by_role: dict[str, list[str]] = {"Author": [__author__]}
+    for name, role in CONTRIBUTORS:
+        by_role.setdefault(role, []).append(name)
+
+    parts = [f"<h3>Git Assistant</h3><p>Version {html.escape(__version__)}</p>"]
+    for role, names in by_role.items():
+        people = "<br>".join(html.escape(name) for name in names)
+        parts.append(f"<p><b>{html.escape(role)}</b><br>{people}</p>")
+    parts.append(f'<p><a href="{PROJECT_URL}">{PROJECT_URL}</a></p>')
+    return "".join(parts)
+
+
 def _temperature_note(settings, provider, model: str) -> str:
     """What this setting is doing, or why it is doing nothing."""
     if provider.key == "claude":
@@ -116,6 +142,8 @@ class SettingsDialog(QDialog):
         self._scan_worker = None
         self._setup_thread = None
         self._setup_worker = None
+        self._install_thread = None
+        self._install_worker = None
         self._update_thread = None
         self._update_worker = None
         # The full UpdateResult from this window's own check. Needed to install:
@@ -174,6 +202,10 @@ class SettingsDialog(QDialog):
         open_cfg_btn.setToolTip(str(config_path()))
         open_cfg_btn.clicked.connect(self._on_open_config)
 
+        self.about_btn = QPushButton("About")
+        self.about_btn.setToolTip("Who wrote this, and who helped.")
+        self.about_btn.clicked.connect(self._on_about)
+
         self.saved_hint = QLabel("Changes are saved automatically")
         self.saved_hint.setStyleSheet("color: #888;")
 
@@ -192,40 +224,20 @@ class SettingsDialog(QDialog):
             | Qt.TextInteractionFlag.LinksAccessibleByKeyboard
         )
         self.version_online.linkActivated.connect(self._on_install_clicked)
-        # Where this came from and who wrote it, beside the version it is.
-        # A real address, so unlike the install link above it is handed to the
-        # browser rather than intercepted: `setOpenExternalLinks` is Qt doing
-        # exactly that, and there is nothing for this window to do first.
-        self.project_link = QLabel(
-            f'<a href="{PROJECT_URL}">Project link</a>'
-        )
-        self.project_link.setToolTip(PROJECT_URL)
-        self.project_link.setOpenExternalLinks(True)
-        self.project_link.setTextInteractionFlags(
-            Qt.TextInteractionFlag.LinksAccessibleByMouse
-            | Qt.TextInteractionFlag.LinksAccessibleByKeyboard
-        )
-        self.author_label = QLabel(f"Author: {__author__}")
-
-        for lbl in (
-            self.version_current,
-            self.version_arrow,
-            self.version_online,
-            self.author_label,
-        ):
+        for lbl in (self.version_current, self.version_arrow, self.version_online):
             lbl.setStyleSheet("color: #888;")
 
+        # The project link and the author used to sit here. They are in About
+        # now, where the contributors are too: the same three facts in one
+        # place reads better than two of them along the bottom of every tab.
         bottom = QHBoxLayout()
         bottom.addWidget(self.version_current)
         bottom.addWidget(self.version_arrow)
         bottom.addWidget(self.version_online)
-        bottom.addSpacing(SECTION_GAP)
-        bottom.addWidget(self.project_link)
-        bottom.addSpacing(SECTION_GAP)
-        bottom.addWidget(self.author_label)
         bottom.addStretch(1)
         bottom.addWidget(self.saved_hint)
         bottom.addWidget(open_cfg_btn)
+        bottom.addWidget(self.about_btn)
 
         layout = QVBoxLayout(self)
         layout.addWidget(self.identity_bar)
@@ -622,8 +634,29 @@ class SettingsDialog(QDialog):
         form.addRow("Port:", self.port_spin)
         form.addRow("", self.setup_row_host)
         form.addRow("", self.setup_status)
+        # An agent CLI is installed, not configured: no key, no address, just
+        # "is it there" and a way to put it there.
+        self.cli_status = QLabel("")
+        self.cli_status.setWordWrap(True)
+        self.install_cli_btn = QPushButton("Install...")
+        self.install_cli_btn.clicked.connect(self._on_install_cli)
+        self.recheck_cli_btn = QPushButton("Check again")
+        self.recheck_cli_btn.setToolTip(
+            "Look for it again, reading PATH from Windows rather than from this "
+            "process -- which cannot see a change made after it started."
+        )
+        self.recheck_cli_btn.clicked.connect(self._refresh_cli)
+        cli_row = QHBoxLayout()
+        cli_row.addWidget(self.install_cli_btn)
+        cli_row.addWidget(self.recheck_cli_btn)
+        cli_row.addStretch(1)
+        self.cli_row_host = QWidget()
+        self.cli_row_host.setLayout(cli_row)
+
         form.addRow("Endpoint:", self.endpoint_edit)
         form.addRow("API key:", self.key_row_host)
+        form.addRow("Command line tool:", self.cli_status)
+        form.addRow("", self.cli_row_host)
         form.addRow("", self.key_status)
         form.addRow("", self.test_btn)
         # Per provider *and* per model: what is careful for one set of weights
@@ -662,6 +695,7 @@ class SettingsDialog(QDialog):
             ),
             "endpoint": (self.endpoint_edit,),
             "key": (self.key_row_host, self.key_status),
+            "cli": (self.cli_status, self.cli_row_host),
         }
         self._conn_form = form
         return w
@@ -680,6 +714,10 @@ class SettingsDialog(QDialog):
             form.setRowVisible(field, provider.needs_endpoint)
         for field in self._provider_rows["key"]:
             form.setRowVisible(field, provider.needs_api_key)
+        for field in self._provider_rows["cli"]:
+            form.setRowVisible(field, bool(provider.cli))
+        if provider.cli:
+            self._refresh_cli()
 
         self.endpoint_edit.setPlaceholderText(provider.endpoint_hint)
         # Real, editable text rather than a greyed hint. For the local servers
@@ -909,6 +947,86 @@ class SettingsDialog(QDialog):
         self.model_combo.blockSignals(False)
         self._show_temperature(provider)
         self._update_budget_label()
+
+    # ---- agent CLIs --------------------------------------------------------
+    def _refresh_cli(self) -> None:
+        """Is the CLI this provider drives installed, and what is it?
+
+        Re-probed rather than remembered: it may have been installed, updated or
+        removed since the window opened, and the answer is one cheap
+        ``--version`` away.
+        """
+        provider = providers.get(self.settings.provider)
+        if not provider.cli:
+            return
+        found = agent_cli.probe(provider.cli)
+        self.cli_status.setText(f"{found.describe()} {provider.key_help}".strip())
+        self.cli_status.setStyleSheet(
+            INFO_COLOUR if found.installed and not found.problem else WARN_COLOUR
+        )
+        self.install_cli_btn.setEnabled(
+            not found.installed and bool(agent_cli.install_command(provider.cli))
+        )
+        self.install_cli_btn.setText(
+            "Install..." if not found.installed else "Installed"
+        )
+
+    def _on_install_cli(self) -> None:
+        """Run the vendor's installer, after showing exactly what will run.
+
+        The question quotes the command in full because it downloads a script
+        from the internet and executes it. That is the vendor's own documented
+        way in, and it is still not something to do behind a spinner.
+        """
+        provider = providers.get(self.settings.provider)
+        command = agent_cli.install_command(provider.cli)
+        if not command:
+            return
+        if (
+            QMessageBox.question(
+                self,
+                f"Install {provider.label}",
+                f"This runs the following in PowerShell:\n\n    {command}\n\n"
+                "It downloads a script from the vendor and executes it, which "
+                "is how they document installing it. Nothing else on this "
+                "machine is changed by Git Assistant.\n\n"
+                "You will need to sign in to it separately afterwards.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel,
+            )
+            != QMessageBox.StandardButton.Yes
+        ):
+            return
+
+        self.install_cli_btn.setEnabled(False)
+        self.cli_status.setText(f"Installing {provider.label}...")
+        self.cli_status.setStyleSheet(INFO_COLOUR)
+
+        worker = FunctionWorker(lambda: agent_cli.install(provider.cli))
+        worker.finished.connect(self._on_cli_installed)
+        worker.error.connect(self._on_cli_install_failed)
+        self._install_worker = worker
+        self._install_thread = run_worker(worker)
+
+    def _on_cli_installed(self, found) -> None:
+        self._install_worker = None
+        # Looked for through the registry, because this process's PATH cannot
+        # have changed -- see git_assistant.agent_cli.detect.
+        self._refresh_cli()
+        if found.installed:
+            self.cli_status.setText(
+                f"{found.describe()} Sign in to it in a terminal before using it."
+            )
+            self.cli_status.setStyleSheet(INFO_COLOUR)
+        else:
+            self.cli_status.setText(found.problem or "The installer did not finish.")
+            self.cli_status.setStyleSheet(WARN_COLOUR)
+
+    def _on_cli_install_failed(self, message: str) -> None:
+        self._install_worker = None
+        self.cli_status.setText(f"Could not install it: {message}")
+        self.cli_status.setStyleSheet(WARN_COLOUR)
+        self._refresh_cli()
 
     # ---- temperature -------------------------------------------------------
     def _show_temperature(self, provider) -> None:
@@ -2193,6 +2311,22 @@ class SettingsDialog(QDialog):
         self.scan_btn.setEnabled(True)
         self.rescan_btn.setEnabled(True)
         self.scan_status.setText(f"Scan failed: {message}")
+
+    def _on_about(self) -> None:
+        """Who wrote this and who helped.
+
+        A message box rather than a window of its own: there is nothing to do
+        here except read it and close it. Rich text so the project link is a
+        link, and `setOpenExternalLinks` so clicking it goes to a browser.
+        """
+        box = QMessageBox(self)
+        box.setWindowTitle("About Git Assistant")
+        box.setTextFormat(Qt.TextFormat.RichText)
+        box.setText(about_html())
+        label = box.findChild(QLabel, "qt_msgbox_label")
+        if label is not None:
+            label.setOpenExternalLinks(True)
+        box.exec()
 
     def _on_open_config(self) -> None:
         folder = config_path().parent

@@ -28,12 +28,16 @@ class ModelInfo:
     id: str
     max_context_length: int | None = None
     loaded: bool = False
+    #: Something true about this model that is not part of its name -- what an
+    #: alias last resolved to, for instance. Shown, never sent: `id` is what
+    #: goes to the provider. See git_assistant.agent_cli.resolved.
+    note: str = ""
 
     def label(self) -> str:
         if self.max_context_length:
             state = "loaded" if self.loaded else "available"
             return f"{self.id}  ({self.max_context_length:,} ctx, {state})"
-        return self.id
+        return f"{self.id}  ({self.note})" if self.note else self.id
 
 
 class ChatClient(Protocol):
@@ -91,6 +95,14 @@ def _provider_client(settings, provider, feature: str) -> ChatClient:
     # gets it without having to know it exists, and a caller that needs
     # something else for one call can still say so.
     warmth = settings.temperature_for(provider.key, settings.provider_model(provider.key))
+
+    if provider.cli:
+        # A local program, not an endpoint: no key, no address, and its own
+        # login. Neither CLI accepts a temperature, so `warmth` is not passed --
+        # sending one silently ignored would be worse than not offering it.
+        from git_assistant.agent_cli import CliClient
+
+        return CliClient(provider.cli, provider_key=provider.key, feature=feature)
 
     if provider.key == "lmstudio":
         from git_assistant.lmstudio_client import LMStudioClient

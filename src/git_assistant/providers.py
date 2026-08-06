@@ -52,9 +52,25 @@ class Provider:
     key_help: str = ""
     #: Placeholder for the endpoint field.
     endpoint_hint: str = ""
+    #: The agent CLI this provider drives, if it drives one. See
+    #: git_assistant.agent_cli -- a local program invoked once per completion
+    #: rather than an HTTP endpoint, with its own login and no API key here.
+    cli: str = ""
+    #: The most requests this backend may have in flight, or 0 for "as many as
+    #: the context allows". A cap here is for backends where concurrency is not
+    #: merely unhelpful but wrong; see `parallel.effective_parallel`, which is
+    #: the one place every fan-out asks.
+    max_parallel: int = 0
+    #: Shipped, but with limitations a user should know before choosing it.
+    #: Separate from `implemented`: this one *works*, and the honest thing is to
+    #: say what it costs rather than to hide it or to pretend it is like the
+    #: others.
+    experimental: bool = False
 
     def display(self) -> str:
-        return self.label if self.implemented else f"{self.label} (not yet available)"
+        if not self.implemented:
+            return f"{self.label} (not yet available)"
+        return f"{self.label} (experimental)" if self.experimental else self.label
 
     def extra_query(self, settings) -> dict[str, str]:
         """Query parameters every request needs.
@@ -140,6 +156,43 @@ PROVIDERS: tuple[Provider, ...] = (
         base_url="http://localhost:13305/api/v1",
         key_help="Runs locally; no API key required.",
         endpoint_hint="http://localhost:13305/api/v1",
+    ),
+    # ---- agent CLIs, driven as backends ------------------------------------
+    # Installed and logged in separately, so there is no key and no address
+    # here. Both are marked experimental for reasons measured rather than
+    # assumed; see docs/cli-providers.md.
+    Provider(
+        "claude-cli",
+        "Claude Code CLI",
+        implemented=True,
+        experimental=True,
+        # One at a time. Each call is a whole process, and four of them
+        # is four runtimes starting at once for no throughput gain -- the
+        # five seconds is start-up, not queueing.
+        max_parallel=1,
+        cli="claude",
+        key_help=(
+            "Uses your Claude Code login, so no API key is needed here. "
+            "Experimental: about five seconds of process start-up per call, "
+            "which a per-file code review pays once per file."
+        ),
+    ),
+    Provider(
+        "agy-cli",
+        "Antigravity CLI",
+        implemented=True,
+        experimental=True,
+        # One at a time. Each call is a whole process, and four of them
+        # is four runtimes starting at once for no throughput gain -- the
+        # five seconds is start-up, not queueing.
+        max_parallel=1,
+        cli="agy",
+        key_help=(
+            "Uses your Antigravity login, so no API key is needed here. "
+            "Experimental: about six seconds of start-up per call, and roughly "
+            "17,000 tokens of its own prompt on every call, which it offers no "
+            "way to remove."
+        ),
     ),
 )
 

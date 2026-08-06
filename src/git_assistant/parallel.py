@@ -42,9 +42,20 @@ def effective_parallel(settings: Settings, context: int) -> int:
 
     Running more than the context can service makes the server abort with
     "Context size has been exceeded", so concurrency is capped by the window.
+
+    A backend may cap it further and mean it: an agent CLI is a whole process
+    per call, so four at once is four runtimes starting simultaneously for no
+    throughput gain -- the seconds are start-up, not queueing. See
+    providers.Provider.max_parallel. Every fan-out in the application asks this
+    one function, which is why the cap belongs here and not in each of them.
     """
+    from git_assistant import providers
+
     requested = max(1, int(settings.parallel_calls or 1))
     affordable = max(1, context // MIN_PARALLEL_CONTEXT)
+    allowed = providers.get(settings.provider).max_parallel
+    if allowed:
+        requested = min(requested, allowed)
     return min(requested, affordable)
 
 

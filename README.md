@@ -318,6 +318,42 @@ instruction once will ignore it again, and asking repeatedly spends money on
 that. Retries are billed under their own feature in **LLM usage**, so "what did
 the retries cost me" has an answer.
 
+## Agent CLIs as providers (experimental)
+
+**Claude Code CLI** and **Antigravity CLI** are listed under Inference
+Providers. They use the login you already have — no API key, no address — and
+the tab finds the program, says which version it is, and offers to run the
+vendor's installer when it is missing.
+
+Both are marked *(experimental)* for measured reasons:
+
+- **five to six seconds of process start-up per call**, which a per-file code
+  review pays once per file;
+- **Antigravity adds ~17,000 tokens of its own prompt to every call** with no
+  flag to remove it, so its usable context is reported ~18k short;
+- neither accepts a temperature, so that setting does nothing for them;
+- Claude Code takes aliases (`sonnet`, `opus`, `haiku`) and **routes per call** —
+  the same alias has been served by `claude-sonnet-4-6` and by
+  `claude-haiku-4-5-20251001`. **LLM usage** records the model that actually
+  answered, and the picker shows `sonnet (last: …)` rather than pretending the
+  alias is a fixed model;
+- **one call at a time**, whatever *Parallel requests* is set to. Four
+  concurrent calls is four runtimes starting at once, and measured it saved
+  nothing: four in parallel took 8.0 s against ~7 s for one.
+
+They are run with tools off (`--tools ""` for Claude) and in an **empty
+temporary directory**, never in your repository — Antigravity offers no way to
+disable its tools, and a workspace it cannot see is the only fence left.
+
+Installing one changes `PATH`, which **a running process can never see**. The
+app re-reads `PATH` from the registry and also checks the known install
+locations directly, so the CLI is found in the same session that installed it.
+
+The GitHub Copilot CLI is deliberately absent: its non-interactive mode exits 1
+with no output at all here, and it offers neither a system prompt nor token
+counts. See [docs/cli-providers.md](docs/cli-providers.md) for the measurements
+behind all of this.
+
 ## Temperature
 
 Per provider **and** per model, under **Connection & Model** — what is careful
