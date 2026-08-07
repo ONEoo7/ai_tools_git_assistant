@@ -267,7 +267,11 @@ class Settings:
     # key is migrated and removed on first run.
     # ---- Audit tab ---------------------------------------------------------
     agents_narrate: bool = True  # let the provider write the report's prose
-    agent_last_id: str = ""  # agent selected last time
+    agent_last_id: str = ""  # the audit whose report and history are on screen
+    #: The audits ticked to run. Separate from `agent_last_id`, which is the one
+    #: being *read*: a run of three leaves three reports, and the tab can only
+    #: show one of them at a time.
+    agent_selected_ids: list[str] = field(default_factory=list)
     agent_fast_mode: bool = False  # skip the per-file history breakdown
     agent_large_file_mb: int = 5  # a binary this size is worth flagging
     #: When a branch counts as stale, and when the consistency audit may
@@ -306,6 +310,11 @@ class Settings:
     #: Whether the prompt and the reply travel with the trace. Off, a trace
     #: still carries the model, the timings, the tokens and any error.
     langfuse_send_prompts: bool = True
+    #: How the window is painted: follow the system, light, dark, or pink. See
+    #: git_assistant.ui.theme, which owns the names -- config.py should not
+    #: have to know what a palette is. An unknown value falls back rather than
+    #: refusing to start.
+    theme: str = "system"
     context_window: int = 32768  # total tokens for input+output (0 => auto-detect)
     safety_margin: float = 0.10  # fraction of the window reserved for the model's output
     ignore_globs: list[str] = field(default_factory=lambda: list(DEFAULT_IGNORE_GLOBS))

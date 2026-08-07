@@ -238,22 +238,71 @@ def test_the_context_comes_from_the_listing_without_a_second_call():
     assert g._context_window() == 8192
 
 
-def _first_call_concurrency(g, items=8):
-    """Run a probe through _run_parallel; report what overlapped the first call."""
+#: The longest a probe waits for a sibling before deciding it has none. Never
+#: reached when calls do overlap, which is every case that waits for one.
+_SIBLING_TIMEOUT = 2.0
+
+#: The window a call that should be alone is watched for company in.
+_ALONE_SAMPLE = 0.05
+
+
+def _first_call_concurrency(g, items=8, first_is_alone=False):
+    """Run a probe through _run_parallel; report what overlapped the first call.
+
+    A probe holds its slot until a sibling joins it rather than for a fixed
+    sleep. What is being measured is whether calls overlap at all, and a probe
+    that returns before the pool has started the next one measures the
+    scheduler instead -- which is why a fixed 50ms sleep here passed on an idle
+    machine and failed under ``pytest -n auto``, where every core is already
+    busy with another worker.
+
+    ``first_is_alone`` says this run is expected to send its first call by
+    itself, because the model is cold. That call has no sibling to wait for, so
+    it watches a short window instead of waiting out the timeout: it is proving
+    a negative, and a short window can only weaken that proof, never turn it
+    into a failure.
+    """
     import threading
     import time
 
-    state = {"active": 0, "peak": 0, "during_first": 0}
+    state = {"active": 0, "peak": 0, "during_first": 0, "first_looked": False}
     lock = threading.Lock()
 
     def probe(x):
         with lock:
             state["active"] += 1
             state["peak"] = max(state["peak"], state["active"])
-        time.sleep(0.05)
+            # The most that were ever running alongside this one, taken as it is
+            # seen rather than read back at the end: a probe that has left has
+            # already decremented, and an overlap that happened would read as
+            # one that did not.
+            company = state["active"]
+
+        if x == 0 and first_is_alone:
+            time.sleep(_ALONE_SAMPLE)  # long enough for a sibling to show up
+            with lock:
+                company = max(company, state["active"])
+        else:
+            deadline = time.monotonic() + _SIBLING_TIMEOUT
+            while time.monotonic() < deadline:
+                with lock:
+                    company = max(company, state["active"])
+                    if x == 0:
+                        if company > 1:
+                            break  # call 0 reports its own company; nothing else will do
+                    elif state["peak"] > 1 and state["first_looked"]:
+                        # Two calls have overlapped *and* call 0 has had its
+                        # look. Leaving before that would take away the very
+                        # thing it is here to see -- and a sibling that enters
+                        # and leaves between two polls is a sibling call 0
+                        # never sees, which is what made this test fail.
+                        break
+                time.sleep(0.001)
+
         with lock:
             if x == 0:
-                state["during_first"] = state["active"]
+                state["during_first"] = company
+                state["first_looked"] = True
             state["active"] -= 1
         return x
 
@@ -263,7 +312,7 @@ def _first_call_concurrency(g, items=8):
 
 
 def test_a_cold_model_gets_the_first_call_to_itself():
-    state = _first_call_concurrency(_cold_gen(loaded=False))
+    state = _first_call_concurrency(_cold_gen(loaded=False), first_is_alone=True)
     assert state["during_first"] == 1, "the load request must not race siblings"
     assert state["peak"] > 1, "the rest must still fan out once it is loaded"
 
@@ -276,6 +325,6 @@ def test_a_loaded_model_fans_out_immediately():
 def test_the_model_is_only_warmed_once():
     """The reduce pass must not pay the serial call again."""
     g = _cold_gen(loaded=False)
-    _first_call_concurrency(g)
+    _first_call_concurrency(g, first_is_alone=True)
     assert g._cold_start is False
     assert _first_call_concurrency(g)["during_first"] > 1

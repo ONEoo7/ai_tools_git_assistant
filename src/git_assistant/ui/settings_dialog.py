@@ -69,6 +69,7 @@ from git_assistant.ui.icon import app_icon
 from git_assistant.ui.identities_panel import IdentitiesPanel
 from git_assistant.ui.mcp_panel import McpPanel
 from git_assistant.ui.identity_bar import IdentityBar
+from git_assistant.ui.theme_picker import ThemePicker
 from git_assistant.ui.preview_dialog import SECTION_GAP, CommitPanel
 from git_assistant.ui.review_panel import ReviewPanel
 from git_assistant.ui.tags_panel import TagsPanel
@@ -219,6 +220,11 @@ class SettingsDialog(QDialog):
             lambda: tabs.setCurrentIndex(self.identities_tab_index)
         )
 
+        # Top right, at the end of the same row: the only control here that
+        # changes every other one, so it sits where nothing else competes with
+        # it rather than on the tab someone would have to go looking for.
+        self.theme_picker = ThemePicker(self.settings)
+
         # No Save/Cancel: edits are written to disk automatically (debounced).
         open_cfg_btn = QPushButton("Open config folder")
         open_cfg_btn.setToolTip(str(config_path()))
@@ -301,8 +307,14 @@ class SettingsDialog(QDialog):
         self._version_row = version_row
         self._buttons_row = buttons_row
 
+        # The identity bar takes the slack, so "push: ..." stays hard against
+        # the theme picker and the picker stays hard against the window's edge.
+        top = QHBoxLayout()
+        top.addWidget(self.identity_bar, 1)
+        top.addWidget(self.theme_picker)
+
         layout = QVBoxLayout(self)
-        layout.addWidget(self.identity_bar)
+        layout.addLayout(top)
         layout.addWidget(tabs)
         layout.addLayout(bottom)
 

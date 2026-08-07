@@ -1,6 +1,7 @@
 """Counting what each provider was asked to do, and showing it."""
 
 import json
+from datetime import datetime, timezone
 
 import pytest
 
@@ -194,6 +195,41 @@ def test_providers_are_listed_most_recently_used_first():
     usage.record("claude", "opus", 1, 1)
     usage.record("lmstudio", "qwen", 1, 1)
     assert usage.load().providers()[0] == "lmstudio"
+
+
+def test_two_calls_in_one_millisecond_are_still_ordered(monkeypatch):
+    """This test used to fail about half the time, and was right to.
+
+    Recording twice takes well under a millisecond, which is all the stamp
+    records -- so the two providers tied, and a tie was resolved by whichever
+    was seen *first*: the answer backwards.
+    """
+
+    class _Frozen(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 8, 7, 12, 0, 0, tzinfo=timezone.utc)
+
+    monkeypatch.setattr(usage, "datetime", _Frozen)
+
+    usage.record("claude", "opus", 1, 1)
+    usage.record("lmstudio", "qwen", 1, 1)
+
+    loaded = usage.load()
+    stamps = {t.provider: t.last for t in loaded.totals}
+    assert stamps["claude"] == stamps["lmstudio"], "the tie this pins is not real"
+    assert loaded.providers() == ["lmstudio", "claude"]
+
+
+def test_a_provider_older_than_the_kept_events_is_still_listed_last():
+    """Ordered by its stamp, which is the one thing a stamp can be trusted for."""
+    usage.record("claude", "opus", 1, 1, limit=1)
+    usage.record("lmstudio", "qwen", 1, 1, limit=1)
+
+    loaded = usage.load()
+
+    assert [e.provider for e in loaded.events] == ["lmstudio"]  # claude aged out
+    assert loaded.providers() == ["lmstudio", "claude"]
 
 
 def test_a_time_is_shown_in_local_time_not_utc():

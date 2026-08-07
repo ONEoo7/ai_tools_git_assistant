@@ -132,11 +132,30 @@ class Usage:
         return [t for t in self.totals if t.provider == provider]
 
     def providers(self) -> list[str]:
-        """Providers that have been used, most-recently first."""
-        seen: dict[str, str] = {}
+        """Providers that have been used, most-recently first.
+
+        Ordered by the events rather than by their timestamps. A stamp is a
+        clock reading and two calls can share one -- the file records
+        milliseconds, and a machine makes more than one decision inside a
+        millisecond -- and a tie sorted the two providers by whichever was seen
+        *first*, which is this method's answer backwards. ``events`` is held in
+        the order things actually happened, so it settles what the clock
+        cannot.
+
+        A provider whose calls have all aged out of the retained events is
+        placed after the ones still in it, ordered by its stamp: it is
+        genuinely older than all of them, which is the one thing the stamps can
+        be trusted to say.
+        """
+        order: list[str] = []
+        for event in self.events:  # newest first
+            if event.provider not in order:
+                order.append(event.provider)
+        older: dict[str, str] = {}
         for total in self.totals:
-            seen[total.provider] = max(seen.get(total.provider, ""), total.last)
-        return [p for p, _ in sorted(seen.items(), key=lambda kv: kv[1], reverse=True)]
+            if total.provider not in order:
+                older[total.provider] = max(older.get(total.provider, ""), total.last)
+        return order + sorted(older, key=lambda p: older[p], reverse=True)
 
     def grand_total(self) -> tuple[int, int, int]:
         """``(calls, input, output)`` across every provider."""
@@ -181,6 +200,10 @@ def parse(data: object) -> Usage:
         for e in data.get("events", [])
         if isinstance(e, dict) and e.get("provider")
     ]
+    # Newest first. Python's sort is stable and the file is written in this
+    # order already, so calls that share a stamp keep the order they were
+    # recorded in -- which is what `Usage.providers` reads to break exactly
+    # that tie.
     events.sort(key=lambda e: e.when, reverse=True)
     return Usage(totals=totals, events=events)
 

@@ -4,7 +4,7 @@ The workers:
 - ``GeneratorWorker``  : runs commit-message generation, emitting live progress.
 - ``RetryWorker``      : asks for the message again when it came back too long.
 - ``ReviewWorker``     : reviews the marked files against a rule table.
-- ``AgentWorker``      : runs a repository audit, which can take minutes.
+- ``AgentWorker``      : runs the ticked repository audits, which can take minutes.
 - ``SetupWorker``      : installs LM Studio and downloads a model.
 - ``FunctionWorker``   : runs an arbitrary callable (e.g. listing models) off-thread.
 
@@ -180,25 +180,35 @@ class ReviewWorker(QObject):
 
 
 class AgentWorker(QObject):
-    """Runs one repository audit off-thread.
+    """Runs the ticked repository audits off-thread.
 
     Separate from ``GeneratorWorker`` for one reason: an audit reports how far
     through it is, not just what it is doing, because reading every object in a
     large repository takes minutes and a spinner is not an answer.
+
+    Takes a list even when there is one: how many run at once, and how the
+    window is divided between them, is decided by ``agents.run_many`` -- and a
+    worker that could call either would have to be told which.
     """
 
     progress = pyqtSignal(str)
     progressPct = pyqtSignal(int)  # noqa: N815 - Qt signal naming
     call = pyqtSignal(object)  # an llm_log.LlmCall, as each one comes back
-    finished = pyqtSignal(object)  # agents.Report
+    finished = pyqtSignal(object)  # list[agents.AuditRun], in the order ticked
     error = pyqtSignal(str)
 
     def __init__(
-        self, settings: Settings, agent_id: str, repo: str, *, fast: bool, narrate: bool
+        self,
+        settings: Settings,
+        agent_ids: list[str],
+        repo: str,
+        *,
+        fast: bool,
+        narrate: bool,
     ) -> None:
         super().__init__()
         self._settings = settings
-        self._agent_id = agent_id
+        self._agent_ids = list(agent_ids)
         self._repo = repo
         self._fast = fast
         self._narrate = narrate
@@ -211,10 +221,11 @@ class AgentWorker(QObject):
         # Imported here rather than at module scope: this pulls in the whole
         # agents package, and the tray's quick action must not pay for it.
         from git_assistant import agents
+        from git_assistant.parallel import CancelledError as ParallelCancelled
 
         try:
-            report = agents.run(
-                self._agent_id,
+            runs = agents.run_many(
+                self._agent_ids,
                 self._settings,
                 repo=self._repo,
                 progress=self.progress.emit,
@@ -224,8 +235,10 @@ class AgentWorker(QObject):
                 narrate=self._narrate,
                 on_call=self.call.emit,
             )
-            self.finished.emit(report)
-        except agents.CancelledError:
+            self.finished.emit(runs)
+        except (agents.CancelledError, ParallelCancelled):
+            # Two subsystems can raise it: the audit checking between steps,
+            # and the fan-out checking between audits.
             self.error.emit("Cancelled.")
         except Exception as exc:  # surface any failure to the UI
             self.error.emit(str(exc))

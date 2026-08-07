@@ -1,5 +1,6 @@
 """The provider clients, the credential store, and per-provider settings."""
 
+import os
 import sys
 
 import httpx
@@ -10,8 +11,6 @@ from git_assistant.claude_client import ClaudeClient, _text_of
 from git_assistant.config import Settings
 from git_assistant.llm import LLMError, ModelInfo
 from git_assistant.openai_client import OpenAICompatibleClient
-
-TEST_KEY = "__git-assistant-test__"
 
 
 @pytest.fixture(autouse=True)
@@ -24,11 +23,22 @@ def _usage_store(tmp_path, monkeypatch):
 
 
 # ---- the credential store ---------------------------------------------------
-@pytest.fixture(autouse=True)
-def _clean_credential():
-    credentials.delete_secret(TEST_KEY)
-    yield
-    credentials.delete_secret(TEST_KEY)
+@pytest.fixture
+def key(request):
+    """An account name no other test is using, cleaned up either way.
+
+    These tests use the real Credential Manager, which is one store for the
+    whole machine -- there is no tmp_path for it. A name shared between tests
+    is therefore shared between `pytest -n auto` workers running them at the
+    same moment, and one test's write became another's read: the failures read
+    as "the key did not survive" when the key had simply been deleted by a
+    test in another process.
+    """
+    worker = os.environ.get("PYTEST_XDIST_WORKER", "single")
+    name = f"__git-assistant-test__{worker}-{request.node.name}"
+    credentials.delete_secret(name)
+    yield name
+    credentials.delete_secret(name)
 
 
 windows_only = pytest.mark.skipif(
@@ -37,40 +47,40 @@ windows_only = pytest.mark.skipif(
 
 
 @windows_only
-def test_a_key_round_trips():
-    credentials.set_secret(TEST_KEY, "sk-secret-value")
-    assert credentials.get_secret(TEST_KEY) == "sk-secret-value"
-    assert credentials.has_secret(TEST_KEY)
+def test_a_key_round_trips(key):
+    credentials.set_secret(key, "sk-secret-value")
+    assert credentials.get_secret(key) == "sk-secret-value"
+    assert credentials.has_secret(key)
 
 
 @windows_only
-def test_storing_again_replaces_rather_than_duplicates():
-    credentials.set_secret(TEST_KEY, "first")
-    credentials.set_secret(TEST_KEY, "second")
-    assert credentials.get_secret(TEST_KEY) == "second"
+def test_storing_again_replaces_rather_than_duplicates(key):
+    credentials.set_secret(key, "first")
+    credentials.set_secret(key, "second")
+    assert credentials.get_secret(key) == "second"
 
 
 @windows_only
-def test_a_non_ascii_key_survives():
+def test_a_non_ascii_key_survives(key):
     """The blob is UTF-16; a naive encode would corrupt or truncate it."""
     secret = "kéy-ünicode-中文"
-    credentials.set_secret(TEST_KEY, secret)
-    assert credentials.get_secret(TEST_KEY) == secret
+    credentials.set_secret(key, secret)
+    assert credentials.get_secret(key) == secret
 
 
 @windows_only
-def test_an_empty_key_deletes_rather_than_storing_blank():
+def test_an_empty_key_deletes_rather_than_storing_blank(key):
     """"No key" and "a key that is empty" are the same intent."""
-    credentials.set_secret(TEST_KEY, "something")
-    credentials.set_secret(TEST_KEY, "")
-    assert credentials.get_secret(TEST_KEY) is None
+    credentials.set_secret(key, "something")
+    credentials.set_secret(key, "")
+    assert credentials.get_secret(key) is None
 
 
 @windows_only
-def test_deleting_a_key_that_is_not_there_is_fine():
-    credentials.delete_secret(TEST_KEY)  # must not raise
-    assert credentials.get_secret(TEST_KEY) is None
-    assert credentials.has_secret(TEST_KEY) is False
+def test_deleting_a_key_that_is_not_there_is_fine(key):
+    credentials.delete_secret(key)  # must not raise
+    assert credentials.get_secret(key) is None
+    assert credentials.has_secret(key) is False
 
 
 def test_the_entry_name_is_namespaced():

@@ -1,4 +1,4 @@
-"""Audit tab: run a repository audit and read what it found.
+"""Audit tab: run the ticked repository audits and read what they found.
 
 Same shape as the Tags tab -- repository on the left, the work on the right --
 because both answer a question about one repository and the tabs should not
@@ -7,6 +7,17 @@ each invent their own layout.
 Two views of the same run: the report, and the measurements it was built from.
 The second exists because a reader who does not trust a paragraph should not
 have to trust it: every figure in the prose is in that tree.
+
+Ticking and selecting are two different things here, and deliberately so. The
+ticks say what a run does; the selection says which of its reports is on screen,
+because three audits leave three reports and this pane can show one. A run of
+several therefore ends with all of them in Previous Runs and one of them in
+front.
+
+Four panes, left to right, because they answer four questions and mixing them
+was the old layout's mistake: where a run is aimed (repository, provider), what
+it will do (the audits, each with its own settings -- see
+``git_assistant.ui.audit_cards``), what it found, and what it found last time.
 """
 
 from __future__ import annotations
@@ -22,14 +33,11 @@ from PyQt6.QtWidgets import (
     QFileDialog,
     QHBoxLayout,
     QLabel,
-    QLineEdit,
-    QListWidget,
-    QListWidgetItem,
     QMenu,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QSizePolicy,
-    QSpinBox,
     QSplitter,
     QTabWidget,
     QTextBrowser,
@@ -45,6 +53,7 @@ from git_assistant.agents import report as report_mod
 from git_assistant import estimate
 from git_assistant.config import Settings, norm_path
 from git_assistant.providers import PROVIDERS
+from git_assistant.ui.audit_cards import AuditCard
 from git_assistant.ui.estimate_dialog import confirm
 from git_assistant.ui.preview_dialog import SECTION_GAP
 from git_assistant.ui.repo_picker import RepoPicker
@@ -52,9 +61,13 @@ from git_assistant.ui.side_panel import SidePanel
 from git_assistant.ui.workers import AgentWorker, run_worker
 
 NO_REPOS_MESSAGE = "No repositories configured - add one in Repositories."
+NOTHING_TICKED_MESSAGE = "Tick at least one audit to run."
 INFO_COLOUR = "color: #8ab;"
 MUTED_COLOUR = "color: #888;"
 COMPARISON_TAB = "Comparison"
+#: The one audit fast mode means anything to: it is a property of the history
+#: scan, and no other audit has one.
+SIZE_AUDIT = "size-audit"
 
 
 def _headline_text(run, previous) -> str:
@@ -126,31 +139,31 @@ class AgentsPanel(QWidget):
         #: has to stop being shown when it stops being about what is selected.
         self._shown_key: tuple[str, str] | None = None
         self._diff = None
+        #: The options the run in flight was started with. A report is recorded
+        #: with the flags that produced it, not with whatever is ticked by the
+        #: time it comes back.
+        self._fast_used = False
+        self._narrated = settings.agents_narrate
+        #: The audit being read. Not the ticked ones -- see the module docstring.
+        self._selected = ""
 
         self.repo_picker = RepoPicker(settings)
         self.repo_picker.repoChanged.connect(self._on_repo_changed)
 
-        self.agent_list = QListWidget()
-        self.agent_list.setMaximumHeight(70)
+        # One card per audit, each carrying its own settings -- see
+        # git_assistant.ui.audit_cards for why they are not in one column.
+        self.cards = []
         for info in agents.infos():
-            item = QListWidgetItem(info.label)
-            item.setData(Qt.ItemDataRole.UserRole, info.id)
-            item.setToolTip(info.description)
-            self.agent_list.addItem(item)
-        self.agent_list.currentRowChanged.connect(self._on_agent_changed)
+            card = AuditCard(info, settings)
+            card.ticked.connect(self._on_ticks_changed)
+            card.picked.connect(lambda c=card: self._select_agent(c.agent_id))
+            if card.options is not None:
+                card.options.changed.connect(self.settings.save)
+            self.cards.append(card)
 
-        self.agent_description = QLabel("")
-        self.agent_description.setWordWrap(True)
-        self.agent_description.setStyleSheet(MUTED_COLOUR)
-        # A wrapped label asks for room for its longest line, which would push
-        # this pane wider than the picker beside it needs. Let it take whatever
-        # width the pane ends up with instead of arguing for one.
-        self.agent_description.setSizePolicy(
-            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
-        )
-
-        # Short labels: a checkbox cannot wrap, so its text sets the minimum
-        # width of this whole pane. The detail lives in the tooltips.
+        # Applies to every audit, so it belongs to none of them: it is the
+        # difference between a run that contacts a provider and one that does
+        # not, whichever audits are ticked.
         self.narrate_check = QCheckBox("Write the narrative")
         self.narrate_check.setToolTip(
             "The measurements are taken by git either way. With this on, the "
@@ -159,48 +172,6 @@ class AgentsPanel(QWidget):
         )
         self.narrate_check.setChecked(settings.agents_narrate)
         self.narrate_check.toggled.connect(self._on_options_changed)
-
-        self.fast_check = QCheckBox("Fast mode")
-        self.fast_check.setToolTip(
-            "Skips the per-file breakdown of history, which is the slow part on "
-            "a large repository."
-        )
-        self.fast_check.setChecked(settings.agent_fast_mode)
-        self.fast_check.toggled.connect(self._on_options_changed)
-
-        # The consistency audit's rules. Here rather than in Advanced because
-        # they are read only by an agent, and this is where an agent is run.
-        self.stale_months_spin = QSpinBox()
-        self.stale_months_spin.setRange(0, 120)
-        self.stale_months_spin.setSuffix(" months")
-        self.stale_months_spin.setToolTip(
-            "A branch untouched for longer than this counts as stale in the "
-            "repository consistency audit. Nothing is deleted either way."
-        )
-        self.stale_months_spin.valueChanged.connect(self._on_rules_changed)
-
-        self.merged_only_check = QCheckBox("Only propose merged branches")
-        self.merged_only_check.setToolTip(
-            "On, deletion is proposed only for branches whose commits are "
-            "already on the default branch. Off, an unmerged branch can be "
-            "proposed -- and its commits exist nowhere else."
-        )
-        self.merged_only_check.toggled.connect(self._on_rules_changed)
-
-        self.keep_unpushed_check = QCheckBox("Keep unpushed work")
-        self.keep_unpushed_check.setToolTip(
-            "Never propose a branch holding commits its upstream has not got."
-        )
-        self.keep_unpushed_check.toggled.connect(self._on_rules_changed)
-
-        self.protect_edit = QLineEdit()
-        self.protect_edit.setToolTip(
-            "Branch names never proposed for deletion, comma separated. "
-            "Globs work: release/* spares every release branch. The default "
-            "branch is protected whether or not it is listed."
-        )
-        self.protect_edit.editingFinished.connect(self._on_rules_changed)
-        self._show_rules(settings.stale_rules())
 
         # The same application-wide setting the Generate tab exposes, offered
         # here too so the provider can be switched where the run is started.
@@ -235,7 +206,8 @@ class AgentsPanel(QWidget):
         self.view = QTextBrowser()
         self.view.setOpenExternalLinks(False)
         self.view.setPlaceholderText(
-            "Pick an agent and press Run. Nothing in the repository is changed."
+            "Tick the audits to run and press Run. Nothing in the repository "
+            "is changed."
         )
 
         self.facts_tree = QTreeWidget()
@@ -281,27 +253,19 @@ class AgentsPanel(QWidget):
         layout.addWidget(self.tabs, 1)
         layout.addLayout(buttons)
 
+        # Where a run is aimed: which repository, and through which provider.
+        # Both are about the run rather than about any one audit, and both are
+        # shared with other tabs.
         picker_pane = QWidget()
         picker_box = QVBoxLayout(picker_pane)
         picker_box.setContentsMargins(0, 0, SECTION_GAP, 0)
         picker_box.addWidget(self.repo_picker, 1)
         picker_box.addSpacing(SECTION_GAP)
-        picker_box.addWidget(QLabel("Agent:"))
-        picker_box.addWidget(self.agent_list)
-        picker_box.addWidget(self.agent_description)
-        picker_box.addSpacing(SECTION_GAP)
-        picker_box.addWidget(self.narrate_check)
-        picker_box.addWidget(self.fast_check)
-        picker_box.addSpacing(SECTION_GAP)
-        picker_box.addWidget(QLabel("Stale branches after:"))
-        picker_box.addWidget(self.stale_months_spin)
-        picker_box.addWidget(self.merged_only_check)
-        picker_box.addWidget(self.keep_unpushed_check)
-        picker_box.addWidget(QLabel("Never delete:"))
-        picker_box.addWidget(self.protect_edit)
         picker_box.addWidget(QLabel("Inference Providers:"))
         picker_box.addWidget(self.provider_combo)
         picker_box.addWidget(self.provider_label)
+
+        self.audits_pane = self._build_audits_pane()
 
         # The same right-hand pane as the other run-and-read tabs: what previous
         # runs found, and how this one got there.
@@ -314,21 +278,76 @@ class AgentsPanel(QWidget):
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.addWidget(picker_pane)
+        splitter.addWidget(self.audits_pane)
         splitter.addWidget(content)
         splitter.addWidget(self.side_panel)
         splitter.setStretchFactor(0, 1)
-        splitter.setStretchFactor(1, 3)
-        splitter.setStretchFactor(2, 2)
-        splitter.setSizes([220, 600, 320])
+        splitter.setStretchFactor(1, 1)
+        splitter.setStretchFactor(2, 3)
+        splitter.setStretchFactor(3, 2)
+        splitter.setSizes([200, 300, 540, 300])
 
         outer = QVBoxLayout(self)
         outer.addWidget(splitter)
 
         self._select_stored_agent()
+        self._restore_ticks()
         self.refresh_repos()
 
     #: The calls half of the side pane, which is what a run talks to.
     calls_pane = property(lambda self: self.side_panel.calls)
+
+    #: The size audit's own option, reached often enough to name here.
+    fast_check = property(lambda self: self._options("size-audit").fast_check)
+
+    def _options(self, agent_id: str):
+        """One audit's settings widget, or ``None`` if it has none."""
+        return next(
+            (c.options for c in self.cards if c.agent_id == agent_id), None
+        )
+
+    def _build_audits_pane(self) -> QWidget:
+        """Every audit, each with what it runs with.
+
+        Scrolled rather than squeezed: an audit whose options are off the bottom
+        of the pane is an audit nobody can configure, and the pane is narrow by
+        design -- the report beside it is what the tab is for.
+        """
+        inner = QWidget()
+        box = QVBoxLayout(inner)
+        box.setContentsMargins(0, 0, 0, 0)
+        box.setSpacing(SECTION_GAP)
+        for card in self.cards:
+            box.addWidget(card)
+        box.addStretch(1)
+
+        area = self.audits_scroll = QScrollArea()
+        area.setWidget(inner)
+        area.setWidgetResizable(True)
+        area.setFrameShape(QScrollArea.Shape.NoFrame)
+        # Scrolled downwards only. A checkbox cannot wrap, so a pane narrower
+        # than its longest label does not shorten the label -- it hides the end
+        # of it, and "Only propose merged bran" is a different promise from the
+        # one being made. Wide enough for the longest, and the splitter handle
+        # is there for anyone who wants it wider.
+        area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        area.setMinimumWidth(
+            inner.minimumSizeHint().width()
+            + area.verticalScrollBar().sizeHint().width()
+        )
+
+        pane = QWidget()
+        outer = QVBoxLayout(pane)
+        outer.setContentsMargins(SECTION_GAP, 0, SECTION_GAP, 0)
+        header = QLabel("Audits:")
+        header.setToolTip(
+            "Tick the audits to run. Click one to read its report and its "
+            "previous runs."
+        )
+        outer.addWidget(header)
+        outer.addWidget(area, 1)
+        outer.addWidget(self.narrate_check)
+        return pane
 
     def _build_history_pane(self) -> QWidget:
         """Every previous run of this agent against this repository."""
@@ -374,16 +393,66 @@ class AgentsPanel(QWidget):
         return self.repo_picker.current_path()
 
     def _agent_id(self) -> str:
-        item = self.agent_list.currentItem()
-        return item.data(Qt.ItemDataRole.UserRole) if item else ""
+        """The audit whose report and history are on screen."""
+        return self._selected
+
+    def _checked_ids(self) -> list[str]:
+        """The audits a run would carry out, in the order they are listed."""
+        return [card.agent_id for card in self.cards if card.is_ticked()]
+
+    def _known(self, agent_id: str) -> bool:
+        return any(card.agent_id == agent_id for card in self.cards)
 
     def _select_stored_agent(self) -> None:
-        wanted = self.settings.agent_last_id
-        for row in range(self.agent_list.count()):
-            if self.agent_list.item(row).data(Qt.ItemDataRole.UserRole) == wanted:
-                self.agent_list.setCurrentRow(row)
-                return
-        self.agent_list.setCurrentRow(0)
+        stored = self.settings.agent_last_id
+        first = self.cards[0].agent_id if self.cards else ""
+        self._select_agent(stored if self._known(stored) else first)
+
+    def _restore_ticks(self) -> None:
+        """Tick what was ticked last time, or the audit being read.
+
+        Never nothing: a tab that opens with no audit ticked opens with its Run
+        button dead, and the reason is four pixels wide.
+        """
+        wanted = [
+            agent_id
+            for agent_id in self.settings.agent_selected_ids
+            if self._known(agent_id)
+        ]
+        self._set_ticks(wanted or [self._agent_id()])
+
+    def _set_ticks(self, agent_ids) -> None:
+        wanted = set(agent_ids)
+        for card in self.cards:  # silently, so this is one save and not three
+            card.set_ticked(card.agent_id in wanted)
+        self._on_ticks_changed()
+
+    def _on_ticks_changed(self) -> None:
+        chosen = self._checked_ids()
+        self.settings.agent_selected_ids = chosen
+        self.settings.save()
+        self.run_btn.setText(f"Run {len(chosen)} audits" if len(chosen) > 1 else "Run")
+        self.run_btn.setToolTip(
+            "Runs: " + ", ".join(self._label_of(a) for a in chosen)
+            if chosen
+            else NOTHING_TICKED_MESSAGE
+        )
+        # A dead Run button with nothing said about it is a bug report.
+        if not chosen and self.status.text() != NO_REPOS_MESSAGE:
+            self.status.setText(NOTHING_TICKED_MESSAGE)
+        elif chosen and self.status.text() == NOTHING_TICKED_MESSAGE:
+            self.status.setText("")
+        self._update_run_enabled()
+
+    @staticmethod
+    def _label_of(agent_id: str) -> str:
+        return next((i.label for i in agents.infos() if i.id == agent_id), agent_id)
+
+    def _can_run(self) -> bool:
+        return bool(self._repo_path()) and bool(self._checked_ids())
+
+    def _update_run_enabled(self) -> None:
+        self.run_btn.setEnabled(self._can_run() and self._worker is None)
 
     def refresh_repos(self) -> None:
         """Reload repositories, keeping any report already on screen.
@@ -402,7 +471,7 @@ class AgentsPanel(QWidget):
             self.status.setText(NO_REPOS_MESSAGE)
         elif self.status.text() == NO_REPOS_MESSAGE:
             self.status.setText("")
-        self.run_btn.setEnabled(bool(self._repo_path()) and self._worker is None)
+        self._update_run_enabled()
 
     def refresh_provider(self) -> None:
         """Show the stored provider, without treating that as a user choice.
@@ -428,25 +497,33 @@ class AgentsPanel(QWidget):
         self.refresh_provider()  # the model line belongs to the new provider
 
     def _refresh_header(self, stored=None) -> None:
-        item = self.agent_list.currentItem()
+        title = self._label_of(self._agent_id()) if self._agent_id() else "Audit"
         name = Path(self._repo_path()).name if self._repo_path() else "no repository"
         suffix = " (stored run)" if stored is not None else ""
-        self.header.setText(f"{item.text() if item else 'Agent'} — {name}{suffix}")
+        self.header.setText(f"{title} — {name}{suffix}")
 
     def _on_repo_changed(self, _path: str = "") -> None:
         self._refresh_header()
         self._sync_shown_report()
         self._refresh_history()
-        self.run_btn.setEnabled(bool(self._repo_path()) and self._worker is None)
+        self._update_run_enabled()
 
-    def _on_agent_changed(self, _row: int = -1) -> None:
-        agent_id = self._agent_id()
-        if not agent_id:
+    def _select_agent(self, agent_id: str) -> None:
+        """Read this audit's report, history and description from now on.
+
+        Says nothing about what a run does: an audit can be read without being
+        ticked, and ticked without being read.
+        """
+        if not self._known(agent_id) or agent_id == self._selected:
             return
-        info = next(i for i in agents.infos() if i.id == agent_id)
-        self.agent_description.setText(f"{info.description}\n\n{info.cost_hint}")
-        # Fast mode is a property of the history scan; the config audit has none.
-        self.fast_check.setVisible(agent_id == "size-audit")
+        self._selected = agent_id
+        for card in self.cards:
+            card.set_selected(card.agent_id == agent_id)
+            # For the selection a finished run makes rather than a click: the
+            # highlight is the only thing saying which report is on screen, and
+            # it is no use below the fold.
+            if card.agent_id == agent_id:
+                self.audits_scroll.ensureWidgetVisible(card)
         self.settings.agent_last_id = agent_id
         self.settings.save()
         self._refresh_header()
@@ -498,71 +575,43 @@ class AgentsPanel(QWidget):
         self._clear_report()
 
     def _on_options_changed(self, _checked: bool = False) -> None:
+        """The one option that is about the run rather than about one audit."""
         self.settings.agents_narrate = self.narrate_check.isChecked()
-        self.settings.agent_fast_mode = self.fast_check.isChecked()
-        self.settings.save()
-
-    def _show_rules(self, rules) -> None:
-        for widget, value in (
-            (self.stale_months_spin, rules.months),
-            (self.merged_only_check, rules.merged_only),
-            (self.keep_unpushed_check, rules.keep_unpushed),
-        ):
-            widget.blockSignals(True)
-            widget.setValue(value) if hasattr(widget, "setValue") else widget.setChecked(value)
-            widget.blockSignals(False)
-        self.protect_edit.setText(", ".join(rules.protect))
-
-    def _on_rules_changed(self, *_args) -> None:
-        """Keep the stale-branch rules. Read back, never held as widgets.
-
-        The audit asks `settings.stale_rules()` for an object, so what is stored
-        has to survive a round trip through the settings file -- storing the
-        widgets' values directly would work until someone hand-edited it.
-        """
-        from git_assistant.agents.branches import StaleRules
-
-        self.settings.set_stale_rules(
-            StaleRules(
-                months=self.stale_months_spin.value(),
-                protect=[
-                    part.strip()
-                    for part in self.protect_edit.text().split(",")
-                    if part.strip()
-                ],
-                merged_only=self.merged_only_check.isChecked(),
-                keep_unpushed=self.keep_unpushed_check.isChecked(),
-            )
-        )
         self.settings.save()
 
     # ---- running ------------------------------------------------------------
     def _on_run(self) -> None:
         repo = self._repo_path()
-        agent_id = self._agent_id()
-        if not repo or not agent_id:
+        chosen = self._checked_ids()
+        if not repo or not chosen:
             return
         if self._before_run is not None:
             self._before_run()  # pick up settings edited in sibling tabs
         # Only the prose costs anything, so this is asked only when it is asked
-        # for -- an audit written from the measurements sends nothing.
+        # for -- an audit written from the measurements sends nothing. Priced
+        # for the whole run: several audits divide the window between them.
         if not confirm(
             self,
-            estimate.for_audit(
-                self.settings, agent_id, narrate=self.narrate_check.isChecked()
+            estimate.for_audits(
+                self.settings, chosen, narrate=self.narrate_check.isChecked()
             ),
         ):
             return
+        # Held rather than read back later: the options are enabled again the
+        # moment the run finishes, and a report is recorded with the flags it
+        # was produced under, not the ones on screen afterwards.
+        self._fast_used = self.fast_check.isChecked() and SIZE_AUDIT in chosen
+        self._narrated = self.narrate_check.isChecked()
         self._set_running(True)
         self.status.setText("Starting...")
         self.side_panel.calls.reset()  # these belong to the run about to start
 
         worker = AgentWorker(
             self.settings,
-            agent_id,
+            chosen,
             repo,
-            fast=self.fast_check.isChecked() and agent_id == "size-audit",
-            narrate=self.narrate_check.isChecked(),
+            fast=self._fast_used,
+            narrate=self._narrated,
         )
         worker.progress.connect(self.status.setText)
         worker.progressPct.connect(self._on_pct)
@@ -591,10 +640,13 @@ class AgentsPanel(QWidget):
         self._busy_step(pct)
 
     def _set_running(self, running: bool) -> None:
-        self.run_btn.setEnabled(not running and bool(self._repo_path()))
+        self.run_btn.setEnabled(not running and self._can_run())
         self.cancel_btn.setEnabled(running)
-        self.agent_list.setEnabled(not running)
         self.repo_picker.setEnabled(not running)
+        # The whole pane, ticks and settings alike: they decided what this run
+        # does, and changing them under it would describe a run that is not the
+        # one in flight.
+        self.audits_pane.setEnabled(not running)
         if running:
             self._busy_start("Repository audit")
         else:
@@ -618,26 +670,56 @@ class AgentsPanel(QWidget):
         if self.busy is not None:
             self.busy.stop(self)
 
-    def _on_finished(self, report) -> None:
+    def _on_finished(self, runs) -> None:
+        """Record every audit that finished, and put one of them on screen."""
         self._worker = None
         self._set_running(False)
-        self._show_report(report)
-        parts = [f"Done — {len(list(report.walk()))} section(s)."]
-        parts += report.warnings
 
+        many = len(runs) > 1
+        notes: list[str] = []
+        stored_runs: dict[str, object] = {}
+        for outcome in runs:
+            prefix = f"{outcome.label}: " if many else ""
+            if not outcome.ok:
+                notes.append(f"{prefix}not run — {outcome.problem}")
+                continue
+            report = outcome.report
+            stored, problem = history.record(
+                report,
+                narrated=self._narrated,
+                fast=self._fast_used and report.agent_id == SIZE_AUDIT,
+                limit=self.settings.agent_history_limit,
+            )
+            stored_runs[outcome.agent_id] = stored
+            if problem:
+                notes.append(f"{prefix}not saved to history: {problem}")
+            notes += [f"{prefix}{warning}" for warning in report.warnings]
+
+        done = [outcome for outcome in runs if outcome.ok]
+        if not done:
+            self.status.setText(" ".join(notes) or "Nothing was audited.")
+            return
+
+        # The one being read stays the one being read, if it ran. Otherwise the
+        # first that did: a finished run with nothing on screen looks like a run
+        # that produced nothing.
+        shown = next((o for o in done if o.agent_id == self._agent_id()), done[0])
+        self._select_agent(shown.agent_id)
+        self._show_report(shown.report)
+
+        parts = [
+            f"Done — {len(done)} audit(s), all recorded."
+            if many
+            else f"Done — {len(list(shown.report.walk()))} section(s)."
+        ]
+        parts += notes
         # "Did it improve?" is the question the audit exists to answer, so it is
         # answered without being asked -- but the Report tab stays in front,
         # because Run was pressed to see the report.
-        stored, problem = history.record(
-            report,
-            narrated=self.narrate_check.isChecked(),
-            fast=self.fast_check.isChecked(),
-            limit=self.settings.agent_history_limit,
-        )
-        if problem:
-            parts.append(f"(Not saved to history: {problem})")
-        self._refresh_history(select=stored)
-        parts.append(self._auto_compare(stored))
+        self._refresh_history(select=stored_runs.get(shown.agent_id))
+        parts.append(self._auto_compare(stored_runs.get(shown.agent_id)))
+        if many:
+            parts.append("Select an audit on the left to read its report.")
         self.status.setText(" ".join(p for p in parts if p))
 
     def _auto_compare(self, stored) -> str:

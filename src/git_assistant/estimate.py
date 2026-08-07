@@ -307,6 +307,19 @@ def _nothing_to_review(plan) -> str:
 # ---- auditing a repository ------------------------------------------------------------
 def for_audit(settings: Settings, agent_id: str, *, narrate: bool) -> Estimate:
     """The narration only: measuring a repository costs nothing but time."""
+    return for_audits(settings, [agent_id], narrate=narrate)
+
+
+def for_audits(settings: Settings, agent_ids: list[str], *, narrate: bool) -> Estimate:
+    """The same, for however many audits are ticked.
+
+    Several audits run side by side, so the window is divided between them and
+    each call is sized against its share -- the same arithmetic
+    ``ModelRuntime`` will do when the run starts. Priced that way rather than
+    per audit in isolation: what a section may carry depends on how many other
+    audits are in flight beside it.
+    """
+    from git_assistant import agents
     from git_assistant.agents import prompts as agent_prompts
 
     out = Estimate(
@@ -314,8 +327,14 @@ def for_audit(settings: Settings, agent_id: str, *, narrate: bool) -> Estimate:
         model=settings.active_model(),
         provider=settings.provider,
     )
-    outlines = agent_prompts.OUTLINES.get(agent_id, {})
-    if not narrate or not outlines:
+    ids = list(dict.fromkeys(agent_ids))
+    if not ids:
+        out.problem = "No audit is ticked. Tick at least one to run."
+        return out
+
+    outlines = {i: agent_prompts.OUTLINES.get(i, {}) for i in ids}
+    narrating = [i for i in ids if outlines[i]]
+    if not narrate or not narrating:
         out.lines = [
             "Nothing is sent to the model: the report is written from the "
             "measurements alone."
@@ -323,23 +342,43 @@ def for_audit(settings: Settings, agent_id: str, *, narrate: bool) -> Estimate:
         return out
 
     context = _context(settings)
-    answer = reserved_output(context, settings.safety_margin)
-    per_call = input_budget(context, answer)
+    # What the run itself will decide, asked the same way -- see
+    # agents.audit_workers.
+    workers = agents.audit_workers(
+        settings, len(ids), narrate=True, context=context
+    )
+    share = context // workers
+    answer = reserved_output(share, settings.safety_margin)
+    per_call = input_budget(share, answer)
 
-    out.calls = len(outlines)
-    out.output_tokens = sum(o.max_tokens() for o in outlines.values())
+    sections = sum(len(o) for o in outlines.values())
+    longest = max(o.max_tokens() for i in narrating for o in outlines[i].values())
+    out.calls = sections
+    out.output_tokens = sum(
+        o.max_tokens() for i in narrating for o in outlines[i].values()
+    )
     # Deliberately not a number: what each section is handed is its own
     # measurements, and those do not exist until the scan has run.
     out.input_unknown = True
     out.input_cap = per_call
+    audits = (
+        f"{len(ids)} audit(s), one call per section: {sections} section(s)."
+        if len(ids) > 1
+        else f"One call per section of the report: {sections} section(s)."
+    )
     out.lines = [
-        f"One call per section of the report: {len(outlines)} section(s).",
+        audits,
         "The repository is measured first, and that costs nothing; only the "
         "prose is written by the model.",
         f"Each section is handed its own measurements, up to {per_call:,} "
-        "tokens, and answers in at most "
-        f"{max(o.max_tokens() for o in outlines.values()):,}.",
+        f"tokens, and answers in at most {longest:,}.",
         "A section that quotes a figure nobody measured is asked again, which "
         "is one extra call.",
     ]
+    if len(ids) > 1:
+        out.lines.insert(
+            1,
+            f"{workers} audit(s) run at a time, so at most {workers} request(s) "
+            f"are in flight and each gets {share:,} tokens of the window.",
+        )
     return out

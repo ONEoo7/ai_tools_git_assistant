@@ -32,6 +32,13 @@ git-assistant-mcp = "git_assistant.mcp.server:main"
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",
+    # `pytest -n auto` runs the suite in about a third of the time. Almost
+    # every test builds a real repository and shells out to git, so the wall
+    # clock is process start-up rather than anything this code does, and that
+    # divides cleanly across cores. Not in `addopts`: a whole-suite run wants
+    # every core, and a single test being debugged does not want to spawn two
+    # dozen workers to run it.
+    "pytest-xdist>=3.6",
 ]
 build = [
     "pyinstaller>=6.0",

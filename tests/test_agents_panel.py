@@ -45,6 +45,37 @@ def with_repo(settings):
     return settings
 
 
+def _runs(*reports: Report) -> list:
+    """What the worker hands back: one outcome per audit that was ticked."""
+    return [
+        agents.AuditRun(
+            agent_id=report.agent_id,
+            label=next(
+                (i.label for i in agents.infos() if i.id == report.agent_id),
+                report.agent_id,
+            ),
+            report=report,
+        )
+        for report in reports
+    ]
+
+
+def _ticked(panel) -> list[str]:
+    return panel._checked_ids()
+
+
+def _tick(panel, *agent_ids: str) -> None:
+    panel._set_ticks(agent_ids)
+
+
+def _card(panel, agent_id: str):
+    return next(card for card in panel.cards if card.agent_id == agent_id)
+
+
+def _options(panel, agent_id: str):
+    return _card(panel, agent_id).options
+
+
 def _report() -> Report:
     return Report(
         agent_id="size-audit",
@@ -65,10 +96,12 @@ def _report() -> Report:
 
 
 # ---- what the panel offers ----------------------------------------------------
-def test_every_registered_agent_is_listed(qapp, settings):
+def test_every_registered_agent_gets_a_card(qapp, settings):
     panel = AgentsPanel(settings)
-    shown = [panel.agent_list.item(i).text() for i in range(panel.agent_list.count())]
-    assert shown == [info.label for info in agents.infos()]
+    assert [card.agent_id for card in panel.cards] == [i.id for i in agents.infos()]
+    assert [card.check.text() for card in panel.cards] == [
+        i.label for i in agents.infos()
+    ]
 
 
 def test_run_needs_a_repository(qapp, settings):
@@ -90,13 +123,22 @@ def test_cancel_and_export_are_offered_only_when_they_mean_something(qapp, with_
     assert not panel.export_btn.isEnabled()
 
 
-def test_choosing_an_agent_describes_it_and_is_remembered(qapp, with_repo):
-    panel = AgentsPanel(with_repo)
-    panel.agent_list.setCurrentRow(1)
+def test_every_card_says_what_its_audit_is_and_costs(qapp, settings):
+    """On the card, what it costs; on hover, what it does. Both, for all three."""
+    panel = AgentsPanel(settings)
+    for info in agents.infos():
+        card = _card(panel, info.id)
+        assert card.hint.text() == info.cost_hint
+        assert info.description[:40] in card.toolTip()
 
+
+def test_choosing_an_agent_is_remembered(qapp, with_repo):
+    panel = AgentsPanel(with_repo)
     info = agents.infos()[1]
-    assert info.description[:40] in panel.agent_description.text()
-    assert info.cost_hint in panel.agent_description.text()
+
+    panel._select_agent(info.id)
+
+    assert panel._agent_id() == info.id
     assert with_repo.agent_last_id == info.id
 
 
@@ -106,13 +148,161 @@ def test_the_stored_agent_is_selected_on_open(qapp, with_repo):
     assert panel._agent_id() == "config-audit"
 
 
-def test_fast_mode_is_only_offered_where_it_applies(qapp, with_repo):
-    """The config audit has no history scan to skip."""
+# ---- ticking what runs, selecting what is read ---------------------------------
+def test_every_audit_can_be_ticked(qapp, settings):
+    panel = AgentsPanel(settings)
+    for card in panel.cards:
+        assert card.check.isEnabled()
+
+
+def test_the_tab_opens_with_something_ticked(qapp, with_repo):
+    """A Run button that is dead on arrival explains nothing about why."""
     panel = AgentsPanel(with_repo)
-    panel.agent_list.setCurrentRow(0)  # size audit
-    assert panel.fast_check.isVisible() or not panel.isVisible()
-    panel.agent_list.setCurrentRow(1)  # config audit
-    assert not panel.fast_check.isVisible()
+    assert _ticked(panel) == [panel._agent_id()]
+    assert panel.run_btn.isEnabled()
+
+
+def test_the_ticked_audits_are_remembered(qapp, with_repo):
+    panel = AgentsPanel(with_repo)
+    _tick(panel, "size-audit", "consistency-audit")
+
+    assert with_repo.agent_selected_ids == ["size-audit", "consistency-audit"]
+    assert _ticked(AgentsPanel(with_repo)) == ["size-audit", "consistency-audit"]
+
+
+def test_ticking_and_selecting_are_different_questions(qapp, with_repo):
+    """One says what a run does; the other says whose report is on screen."""
+    panel = AgentsPanel(with_repo)
+    _tick(panel, "config-audit", "consistency-audit")
+    panel._select_agent("size-audit")  # reading an audit that will not run
+
+    assert panel._agent_id() == "size-audit"
+    assert _ticked(panel) == ["config-audit", "consistency-audit"]
+
+
+def test_clicking_a_card_is_what_selects_it(qapp, with_repo):
+    """The card is the widget; nothing else has to know how selection works."""
+    panel = AgentsPanel(with_repo)
+
+    _card(panel, "consistency-audit").picked.emit()
+
+    assert panel._agent_id() == "consistency-audit"
+    assert _card(panel, "consistency-audit").property("selected") is True
+    assert _card(panel, "size-audit").property("selected") is False
+
+
+def test_selecting_a_card_changes_its_colour_and_not_its_size(qapp, with_repo):
+    """A card that unfolds when clicked shifts the ones below it out of reach."""
+    panel = AgentsPanel(with_repo)
+    panel.resize(1200, 600)
+    panel.show()
+    qapp.processEvents()
+    before = [card.sizeHint().height() for card in panel.cards]
+
+    panel._select_agent("consistency-audit")
+    qapp.processEvents()
+
+    assert [card.sizeHint().height() for card in panel.cards] == before
+    panel.hide()
+
+
+def test_every_option_is_on_screen_whichever_card_is_selected(qapp, with_repo):
+    """Nothing is hidden behind selecting the audit it belongs to."""
+    panel = AgentsPanel(with_repo)
+    panel.resize(1200, 600)
+    panel.show()
+    qapp.processEvents()
+
+    for agent_id in ("size-audit", "config-audit", "consistency-audit"):
+        panel._select_agent(agent_id)
+        qapp.processEvents()
+        for card in panel.cards:
+            assert card.hint.isVisible()
+            assert card.options is None or card.options.isVisible()
+    panel.hide()
+
+
+def test_running_nothing_is_not_offered(qapp, with_repo):
+    panel = AgentsPanel(with_repo)
+    _tick(panel)
+
+    assert not panel.run_btn.isEnabled()
+    assert "Tick at least one" in panel.status.text()
+
+    _tick(panel, "size-audit")
+    assert panel.run_btn.isEnabled()
+    assert panel.status.text() == ""
+
+
+def test_the_button_says_how_many_audits_it_will_run(qapp, with_repo):
+    panel = AgentsPanel(with_repo)
+    _tick(panel, "size-audit")
+    assert panel.run_btn.text() == "Run"
+
+    _tick(panel, "size-audit", "config-audit")
+    assert panel.run_btn.text() == "Run 2 audits"
+
+
+def test_an_audits_settings_live_with_it_and_nowhere_else(qapp, with_repo):
+    """The reported confusion: the consistency rules shown under a size audit.
+
+    Every option is inside the audit that reads it, so there is no arrangement
+    of ticks that can put one under another.
+    """
+    panel = AgentsPanel(with_repo)
+    options = {card.agent_id: card.options for card in panel.cards}
+
+    assert options["size-audit"].fast_check.parent() is options["size-audit"]
+    stale = options["consistency-audit"]
+    assert stale.stale_months_spin.parent() is stale
+    assert stale.protect_edit.parent() is stale
+    assert _card(panel, "consistency-audit").isAncestorOf(stale.protect_edit)
+    assert not _card(panel, "size-audit").isAncestorOf(stale.protect_edit)
+
+
+def test_an_audits_settings_are_live_only_while_it_will_run(qapp, with_repo):
+    """Readable either way, so what a run would use can be seen without one."""
+    panel = AgentsPanel(with_repo)
+
+    _tick(panel, "size-audit")
+    assert panel.fast_check.isEnabled()
+    assert not _options(panel, "consistency-audit").isEnabled()
+
+    _tick(panel, "consistency-audit")
+    assert not panel.fast_check.isEnabled()
+    assert _options(panel, "consistency-audit").isEnabled()
+
+
+def test_each_audits_settings_reach_the_settings_file(qapp, with_repo):
+    """The agents read the file, not these widgets."""
+    panel = AgentsPanel(with_repo)
+    _tick(panel, "size-audit", "config-audit", "consistency-audit")
+
+    panel.fast_check.setChecked(True)
+    _options(panel, "config-audit").large_file_spin.setValue(64)
+    _options(panel, "consistency-audit").stale_months_spin.setValue(9)
+
+    assert with_repo.agent_fast_mode is True
+    assert with_repo.agent_large_file_mb == 64
+    assert with_repo.stale_rules().months == 9
+
+
+def test_an_audits_settings_are_where_it_left_them_next_time(qapp, with_repo):
+    """Stored, not held: the audit reads the settings file and not a widget."""
+    panel = AgentsPanel(with_repo)
+    _tick(panel, "consistency-audit", "config-audit")
+    stale = _options(panel, "consistency-audit")
+    stale.protect_edit.setText("main, release/*, keep-me")
+    stale.protect_edit.editingFinished.emit()
+    _options(panel, "config-audit").large_file_spin.setValue(32)
+
+    reopened = AgentsPanel(with_repo)
+
+    assert _options(reopened, "consistency-audit").protect_edit.text() == (
+        "main, release/*, keep-me"
+    )
+    assert _options(reopened, "config-audit").large_file_spin.value() == 32
+    assert with_repo.stale_rules().protect == ["main", "release/*", "keep-me"]
 
 
 def test_the_provider_can_be_chosen_here_too(qapp, with_repo):
@@ -159,7 +349,7 @@ def test_options_are_persisted(qapp, with_repo):
 # ---- a finished run -----------------------------------------------------------
 def test_a_report_fills_both_views(qapp, with_repo):
     panel = AgentsPanel(with_repo)
-    panel._on_finished(_report())
+    panel._on_finished(_runs(_report()))
 
     assert "190.3 GiB" in panel.view.toHtml()
     assert panel.facts_tree.topLevelItemCount() == 1
@@ -173,18 +363,85 @@ def test_warnings_are_surfaced_not_swallowed(qapp, with_repo):
     report = _report()
     report.warnings.append("Section 1 was written from the measurements.")
     panel = AgentsPanel(with_repo)
-    panel._on_finished(report)
+    panel._on_finished(_runs(report))
     assert "written from the measurements" in panel.status.text()
 
 
 def test_a_refresh_keeps_a_report_that_took_minutes(qapp, with_repo):
     panel = AgentsPanel(with_repo)
-    panel._on_finished(_report())
+    panel._on_finished(_runs(_report()))
 
     panel.refresh_repos()
 
     assert "190.3 GiB" in panel.view.toHtml()
     assert panel.copy_btn.isEnabled()
+
+
+def test_a_run_of_several_records_them_all_and_shows_one(qapp, with_repo):
+    panel = AgentsPanel(with_repo)
+    repo = panel._repo_path()
+    panel._select_agent("config-audit")  # the one being read
+
+    panel._on_finished(
+        _runs(
+            _report_for(repo=repo, agent_id="size-audit"),
+            _report_for(repo=repo, agent_id="config-audit"),
+        )
+    )
+
+    # The one being read is the one that stays in front.
+    assert panel._agent_id() == "config-audit"
+    assert panel._report.agent_id == "config-audit"
+    assert "2 audit(s)" in panel.status.text()
+    # Both are in the history, each under its own audit.
+    assert panel.runs_tree.topLevelItemCount() == 1
+    panel._select_agent("size-audit")
+    assert panel.runs_tree.topLevelItemCount() == 1
+
+
+def test_a_run_whose_audit_is_not_the_one_being_read_still_shows_something(
+    qapp, with_repo
+):
+    panel = AgentsPanel(with_repo)
+    panel._select_agent("consistency-audit")  # an audit that was not ticked
+
+    panel._on_finished(
+        _runs(_report_for(repo=panel._repo_path(), agent_id="config-audit"))
+    )
+
+    assert panel._agent_id() == "config-audit"
+    assert "190.3 GiB" in panel.view.toHtml()
+
+
+def test_an_audit_that_failed_is_named_not_swallowed(qapp, with_repo):
+    """Two of three finishing is not a run that reports "done"."""
+    panel = AgentsPanel(with_repo)
+    runs = _runs(_report_for(repo=panel._repo_path(), agent_id="size-audit"))
+    runs.append(
+        agents.AuditRun(
+            agent_id="config-audit",
+            label="Repository configuration audit",
+            problem="not a git repository",
+        )
+    )
+
+    panel._on_finished(runs)
+
+    assert "Repository configuration audit" in panel.status.text()
+    assert "not a git repository" in panel.status.text()
+    assert "190.3 GiB" in panel.view.toHtml()  # the one that did finish
+
+
+def test_a_run_where_nothing_finished_says_so(qapp, with_repo):
+    panel = AgentsPanel(with_repo)
+
+    panel._on_finished(
+        [agents.AuditRun(agent_id="size-audit", label="Size", problem="git is missing")]
+    )
+
+    assert "git is missing" in panel.status.text()
+    assert panel._report is None
+    assert panel.run_btn.isEnabled()
 
 
 def test_cancelling_says_so_without_a_dialog(qapp, with_repo):
@@ -279,11 +536,11 @@ def _report_for(repo="/x/demo", agent_id="size-audit", **kw):
 def test_switching_agent_clears_the_previous_report(qapp, with_repo):
     """The reported bug: a config audit stayed on screen titled as a size audit."""
     panel = AgentsPanel(with_repo)
-    panel.agent_list.setCurrentRow(0)
-    panel._on_finished(_report_for(agent_id=panel._agent_id()))
+    panel._select_agent("size-audit")
+    panel._on_finished(_runs(_report_for(agent_id=panel._agent_id())))
     assert "190.3 GiB" in panel.view.toHtml()
 
-    panel.agent_list.setCurrentRow(1)
+    panel._select_agent("config-audit")
 
     assert panel._report is None
     assert "190.3 GiB" not in panel.view.toHtml()
@@ -295,7 +552,9 @@ def test_switching_repository_clears_the_previous_report(qapp, with_repo):
     with_repo.repos = [RepoEntry("/x/demo"), RepoEntry("/x/other")]
     panel = AgentsPanel(with_repo)
     panel.refresh_repos()
-    panel._on_finished(_report_for(repo=panel._repo_path(), agent_id=panel._agent_id()))
+    panel._on_finished(
+        _runs(_report_for(repo=panel._repo_path(), agent_id=panel._agent_id()))
+    )
 
     tree = panel.repo_picker.repo_list
     tree.setCurrentItem(tree.topLevelItem(1))
@@ -305,9 +564,11 @@ def test_switching_repository_clears_the_previous_report(qapp, with_repo):
 
 def test_the_same_repository_and_agent_keeps_its_report(qapp, with_repo):
     panel = AgentsPanel(with_repo)
-    panel._on_finished(_report_for(repo=panel._repo_path(), agent_id=panel._agent_id()))
+    panel._on_finished(
+        _runs(_report_for(repo=panel._repo_path(), agent_id=panel._agent_id()))
+    )
 
-    panel._on_agent_changed()  # re-selecting the same agent changes nothing
+    panel._select_agent(panel._agent_id())  # re-selecting changes nothing
     panel.refresh_repos()
 
     assert panel._report is not None
@@ -316,7 +577,9 @@ def test_the_same_repository_and_agent_keeps_its_report(qapp, with_repo):
 # ---- history ------------------------------------------------------------------
 def test_a_finished_run_is_listed_in_previous_runs(qapp, with_repo):
     panel = AgentsPanel(with_repo)
-    panel._on_finished(_report_for(repo=panel._repo_path(), agent_id=panel._agent_id()))
+    panel._on_finished(
+        _runs(_report_for(repo=panel._repo_path(), agent_id=panel._agent_id()))
+    )
 
     assert panel.runs_tree.topLevelItemCount() == 1
     assert "First run recorded" in panel.status.text()
@@ -327,11 +590,11 @@ def test_the_second_run_is_compared_with_the_first(qapp, with_repo):
     repo, agent = panel._repo_path(), panel._agent_id()
     first = _report_for(repo=repo, agent_id=agent, head="a" * 40)
     first.sections[0].facts.append(Fact("garbage_size", "Garbage", "1.0 KiB", 1024))
-    panel._on_finished(first)
+    panel._on_finished(_runs(first))
 
     second = _report_for(repo=repo, agent_id=agent, head="a" * 40)
     second.sections[0].facts.append(Fact("garbage_size", "Garbage", "0 B", 0))
-    panel._on_finished(second)
+    panel._on_finished(_runs(second))
 
     assert panel.runs_tree.topLevelItemCount() == 2
     assert panel.tabs.isTabEnabled(panel.diff_tab)
@@ -342,8 +605,8 @@ def test_the_second_run_is_compared_with_the_first(qapp, with_repo):
 def test_a_finished_run_does_not_steal_the_report_tab(qapp, with_repo):
     panel = AgentsPanel(with_repo)
     repo, agent = panel._repo_path(), panel._agent_id()
-    panel._on_finished(_report_for(repo=repo, agent_id=agent))
-    panel._on_finished(_report_for(repo=repo, agent_id=agent))
+    panel._on_finished(_runs(_report_for(repo=repo, agent_id=agent)))
+    panel._on_finished(_runs(_report_for(repo=repo, agent_id=agent)))
 
     assert panel.tabs.currentIndex() == 0
 
@@ -355,7 +618,9 @@ def test_the_comparison_tab_is_off_until_there_is_something_in_it(qapp, with_rep
 
 def test_opening_a_stored_run_says_it_is_stored(qapp, with_repo):
     panel = AgentsPanel(with_repo)
-    panel._on_finished(_report_for(repo=panel._repo_path(), agent_id=panel._agent_id()))
+    panel._on_finished(
+        _runs(_report_for(repo=panel._repo_path(), agent_id=panel._agent_id()))
+    )
     panel._clear_report()
 
     panel.runs_tree.setCurrentItem(panel.runs_tree.topLevelItem(0))
@@ -370,11 +635,11 @@ def test_opening_a_stored_run_says_it_is_stored(qapp, with_repo):
 def test_the_pane_lists_only_this_repository_and_agent(qapp, with_repo):
     panel = AgentsPanel(with_repo)
     repo = panel._repo_path()
-    panel._on_finished(_report_for(repo=repo, agent_id="size-audit"))
-    panel._on_finished(_report_for(repo=repo, agent_id="config-audit"))
-    panel._on_finished(_report_for(repo="/x/elsewhere", agent_id="size-audit"))
+    panel._on_finished(_runs(_report_for(repo=repo, agent_id="size-audit")))
+    panel._on_finished(_runs(_report_for(repo=repo, agent_id="config-audit")))
+    panel._on_finished(_runs(_report_for(repo="/x/elsewhere", agent_id="size-audit")))
 
-    panel.agent_list.setCurrentRow(0)  # size audit
+    panel._select_agent("size-audit")
     assert panel.runs_tree.topLevelItemCount() == 1
 
 
@@ -382,7 +647,9 @@ def test_deleting_a_run_removes_it_from_the_list(qapp, with_repo, monkeypatch):
     from PyQt6.QtWidgets import QMessageBox
 
     panel = AgentsPanel(with_repo)
-    panel._on_finished(_report_for(repo=panel._repo_path(), agent_id=panel._agent_id()))
+    panel._on_finished(
+        _runs(_report_for(repo=panel._repo_path(), agent_id=panel._agent_id()))
+    )
     monkeypatch.setattr(
         QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes
     )
@@ -398,7 +665,9 @@ def test_history_that_cannot_be_written_does_not_lose_the_report(qapp, with_repo
     monkeypatch.setattr(history, "record", lambda *a, **k: (None, "disk is full"))
     panel = AgentsPanel(with_repo)
 
-    panel._on_finished(_report_for(repo=panel._repo_path(), agent_id=panel._agent_id()))
+    panel._on_finished(
+        _runs(_report_for(repo=panel._repo_path(), agent_id=panel._agent_id()))
+    )
 
     assert "190.3 GiB" in panel.view.toHtml()
     assert "disk is full" in panel.status.text()
@@ -567,6 +836,40 @@ def test_an_audit_that_writes_no_prose_is_not_worth_asking_about(
     panel._on_run()
 
     assert seen and seen[0].calls == 0
+
+
+def test_a_run_carries_every_ticked_audit(qapp, with_repo, monkeypatch):
+    monkeypatch.setattr("git_assistant.ui.agents_panel.confirm", lambda *a: True)
+    started = []
+    monkeypatch.setattr(
+        "git_assistant.ui.agents_panel.run_worker", lambda w: started.append(w)
+    )
+    panel = AgentsPanel(with_repo)
+    _tick(panel, "size-audit", "consistency-audit")
+
+    panel._on_run()
+
+    assert started and started[0]._agent_ids == ["size-audit", "consistency-audit"]
+
+
+def test_the_estimate_covers_the_whole_run_not_one_audit(qapp, with_repo, monkeypatch):
+    """Several audits divide the window between them, and are priced that way."""
+    seen = []
+    monkeypatch.setattr(
+        "git_assistant.ui.agents_panel.confirm",
+        lambda parent, est: seen.append(est) or False,
+    )
+    panel = AgentsPanel(with_repo)
+    panel.narrate_check.setChecked(True)
+
+    _tick(panel, "config-audit")
+    panel._on_run()
+    _tick(panel, "config-audit", "size-audit")
+    panel._on_run()
+
+    one, both = seen
+    assert both.calls > one.calls
+    assert any("at a time" in line for line in both.lines)
 
 
 def test_declining_an_audit_sends_nothing(qapp, with_repo, monkeypatch):

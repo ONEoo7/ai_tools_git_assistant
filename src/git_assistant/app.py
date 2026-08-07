@@ -9,6 +9,8 @@ from PyQt6.QtNetwork import QLocalServer, QLocalSocket
 from PyQt6.QtWidgets import QApplication, QMessageBox, QSystemTrayIcon
 
 from git_assistant import faults, git_ops
+from git_assistant.config import Settings
+from git_assistant.ui import theme
 from git_assistant.ui.icon import app_icon
 
 APP_ID = "ONEoo7.GitAssistant"
@@ -86,6 +88,12 @@ def main() -> int:
     app.setWindowIcon(app_icon())
     # Tray apps must keep running after their dialogs close.
     app.setQuitOnLastWindowClosed(False)
+
+    # Before any window exists, so the first one is painted right rather than
+    # repainted in front of the user. Reading the settings file is the only
+    # thing this needs and it cannot fail the launch: an unknown theme falls
+    # back to following the system.
+    theme.apply(app, Settings.load().theme)
 
     # Everything this application does is a git command. Without git it is not
     # degraded, it is inert -- every repository would read as empty and every

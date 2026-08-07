@@ -6,9 +6,16 @@ scaffolding -- with none of its map-reduce machinery, which narration does not
 need: an audit is a handful of short sections written one after another.
 
 ``is_cold`` is here rather than in the caller because it comes out of the same
-listing the context window does, and one lookup answers both. Narration never
-asks: its calls are serial, so the first simply waits for the load like any
-other. A code review fans out, and asks.
+listing the context window does, and one lookup answers both. One audit's
+narration never asks: its calls are serial, so the first simply waits for the
+load like any other. A code review fans out, and asks -- and so does a run of
+several audits at once.
+
+``slots`` is the other half of fanning out. A local server divides the loaded
+context between the requests in flight, so a narration running beside two
+siblings gets a third of the window and has to be sized for a third of the
+window. One slot -- the single-audit case -- is the whole window, which is why
+nothing that runs alone had to change.
 """
 
 from __future__ import annotations
@@ -20,9 +27,13 @@ DEFAULT_CONTEXT_WINDOW = 8192
 
 
 class ModelRuntime:
-    def __init__(self, settings, client: ChatClient) -> None:
+    def __init__(self, settings, client: ChatClient, *, slots: int = 1) -> None:
         self.settings = settings
         self.client = client
+        #: How many requests may be in flight against this window at once. The
+        #: caller sets it from ``parallel.effective_parallel``; it is a plain
+        #: attribute so a fan-out can settle it after asking for the window.
+        self.slots = max(1, slots)
         self._model: ModelInfo | None = None
         self._looked_up = False
 
@@ -61,12 +72,19 @@ class ModelRuntime:
         model = self._report()
         return model is not None and not model.loaded
 
+    def share(self) -> int:
+        """The part of the window one request may use.
+
+        The whole of it when nothing else is running, which is the usual case.
+        """
+        return max(1, self.context_window() // self.slots)
+
     def reserved_output(self) -> int:
-        return reserved_output(self.context_window(), self.settings.safety_margin)
+        return reserved_output(self.share(), self.settings.safety_margin)
 
     def budget(self, overhead: int = 0) -> int:
         """Tokens left for the facts once the prompt scaffolding is paid for."""
-        return input_budget(self.context_window(), self.reserved_output(), overhead)
+        return input_budget(self.share(), self.reserved_output(), overhead)
 
     def chat(self, *, system: str, user: str, max_tokens: int) -> str:
         return self.client.chat(

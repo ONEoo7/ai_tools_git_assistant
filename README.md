@@ -481,6 +481,11 @@ uv run git-assistant
 
 1. Start LM Studio, load a model, and start its server (default `127.0.0.1:1234`).
 2. Click the tray icon (or its menu → **Git Assistant**) to open the window.
+   Top right, beside what the bar says about pushing, is **Theme**: *Follow
+   system* (the default — Windows already knows whether you read dark or light),
+   *Light*, *Dark*, or *Pink 🦄🌈*, which is pink with rainbows on the splitters
+   and the progress bar and is a perfectly readable light theme. It applies as
+   you pick it and is remembered.
    - **Connection & Model:** enter IP/port, click *Test connection*, pick a model,
      and optionally set the context window size. With LM Studio selected there is
      also *Set up LM Studio for me...*, which installs LM Studio via winget,
@@ -500,9 +505,17 @@ uv run git-assistant
      endings are decided in `.gitattributes` rather than per machine, and a
      dozen other things. Git measures, the configured provider writes the
      prose — and any figure it invents is rejected before the report shows it.
-     Every run is recorded (beside `settings.json`, marked with the commit it
-     describes) and each new one is compared with the last, so *Previous runs*
-     answers whether anything actually improved.
+     The *Audits* pane has one card per audit, each carrying the settings only
+     that audit reads: fast mode belongs to the size audit, the stale-branch
+     rules to the consistency audit, and neither is shown under the other.
+     Tick as many as you want and press *Run*: they are run side by side, never
+     more at once than the provider is allowed to be asked (the same *Parallel
+     calls* limit a code review fans out under, with the context window divided
+     between them). Ticking says what runs; clicking a card says whose report is
+     on screen, because a run of three leaves three reports. Every run is
+     recorded (beside `settings.json`, marked with the commit it describes) and
+     each new one is compared with the last, so *Previous runs* answers whether
+     anything actually improved.
    - **MCP Server:** offer the repositories, audits and commit-message
      generation to an MCP client over stdio. *Test server* starts it and reports
      what it answered; the buttons register it with Claude Desktop
@@ -685,7 +698,17 @@ uv run python tools/make_icon.py
 ## Development
 
 ```bash
-uv run pytest
+uv run pytest -n auto
+```
+
+Almost every test builds a real repository and shells out to git, so the wall
+clock is process start-up rather than anything this code does — and that divides
+cleanly across cores: about 150 seconds serially against about 50 with `-n auto`
+on 24 of them. Left out of `addopts` deliberately, because a single test being
+debugged does not want two dozen workers spawned to run it:
+
+```bash
+uv run pytest tests/test_theme.py -q
 ```
 
 Enable the repository's git hooks once per clone:
