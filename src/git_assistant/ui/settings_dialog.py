@@ -65,6 +65,7 @@ from git_assistant.prompts import DEFAULT_TEMPLATE
 from git_assistant.providers import PROVIDERS
 from git_assistant.ui.agents_panel import AgentsPanel
 from git_assistant.ui.busy_bar import BusyBar
+from git_assistant.ui.icon import app_icon
 from git_assistant.ui.identities_panel import IdentitiesPanel
 from git_assistant.ui.mcp_panel import McpPanel
 from git_assistant.ui.identity_bar import IdentityBar
@@ -72,16 +73,13 @@ from git_assistant.ui.preview_dialog import SECTION_GAP, CommitPanel
 from git_assistant.ui.review_panel import ReviewPanel
 from git_assistant.ui.tags_panel import TagsPanel
 from git_assistant.ui.usage_pane import UsagePane
-from git_assistant.features import NO_UPDATES_NOTE, UPDATES_SUPPORTED
-
-# Absent from the no-update build; see git_assistant.features.
-if UPDATES_SUPPORTED:
-    from git_assistant.ui.update_prompt import UpdateCheckWorker
-    from git_assistant.updating.client import (
-        UpdateConfig,
-        ensure_update_config,
-        update_config_path,
-    )
+from git_assistant.ui.update_prompt import UpdateCheckWorker
+from git_assistant.updating import (
+    CHECK_MINUTES,
+    PACKAGE_ID,
+    unavailable_reason,
+    winget_path,
+)
 from git_assistant.tokenizer import input_budget, reserved_output
 from git_assistant.ui.workers import FunctionWorker, SetupWorker, run_worker
 
@@ -114,6 +112,28 @@ def about_html() -> str:
         parts.append(f"<p><b>{html.escape(role)}</b><br>{people}</p>")
     parts.append(f'<p><a href="{PROJECT_URL}">{PROJECT_URL}</a></p>')
     return "".join(parts)
+
+
+def show_about(parent=None) -> None:
+    """Who wrote this and who helped.
+
+    A message box rather than a window of its own: there is nothing to do here
+    except read it and close it. Rich text so the project link is a link, and
+    `setOpenExternalLinks` so clicking it goes to a browser.
+
+    Takes a parent rather than being a method, because the tray menu offers this
+    with no window open to parent it to.
+    """
+    box = QMessageBox(parent)
+    box.setWindowTitle("About Git Assistant")
+    box.setTextFormat(Qt.TextFormat.RichText)
+    box.setText(about_html())
+    if parent is None:
+        box.setWindowIcon(app_icon())  # otherwise it is Qt's default, not ours
+    label = box.findChild(QLabel, "qt_msgbox_label")
+    if label is not None:
+        label.setOpenExternalLinks(True)
+    box.exec()
 
 
 def _temperature_note(settings, provider, model: str) -> str:
@@ -204,6 +224,14 @@ class SettingsDialog(QDialog):
         open_cfg_btn.setToolTip(str(config_path()))
         open_cfg_btn.clicked.connect(self._on_open_config)
 
+        # Its own window, opened from here since the tray menu no longer offers
+        # anything but this window, About and Exit.
+        self.metrics_btn = QPushButton("Metrics...")
+        self.metrics_btn.setToolTip(
+            "Count lines of code across your repositories, by file type."
+        )
+        self.metrics_btn.clicked.connect(self._on_metrics)
+
         self.about_btn = QPushButton("About")
         self.about_btn.setToolTip("Who wrote this, and who helped.")
         self.about_btn.clicked.connect(self._on_about)
@@ -257,6 +285,7 @@ class SettingsDialog(QDialog):
         buttons_row = QHBoxLayout()
         buttons_row.addStretch(1)
         buttons_row.addWidget(self.saved_hint)
+        buttons_row.addWidget(self.metrics_btn)
         buttons_row.addWidget(open_cfg_btn)
         buttons_row.addWidget(self.about_btn)
 
@@ -382,7 +411,10 @@ class SettingsDialog(QDialog):
             tooltip=(
                 "Click to install"
                 if self._available is not None
-                else "Use 'Check for updates...' in the tray menu to install it"
+                # Reopening is what refreshes this: raising the window from the
+                # tray re-runs its own check, which is what makes the readout
+                # clickable. There is no tray menu item for it any more.
+                else "Close and reopen this window to install it"
             ),
         )
 
@@ -430,7 +462,7 @@ class SettingsDialog(QDialog):
         )
 
     def refresh_update_status(self) -> None:
-        """Ask the update service what it has, off the GUI thread.
+        """Ask winget what it has, off the GUI thread.
 
         Runs when the window is opened *and* when an already-open window is
         raised from the tray. Both matter: this window is constructed once and
@@ -441,26 +473,19 @@ class SettingsDialog(QDialog):
         The tray also pushes its own results in through `set_online_version`,
         so the two readouts cannot disagree.
         """
-        if not UPDATES_SUPPORTED:
-            # Not "updates are off", which invites looking for the switch that
-            # turns them on. There isn't one: the code is not in this build.
-            self._show_update_state("no updater", tooltip=NO_UPDATES_NOTE)
-            return
-
         if self._update_thread is not None:
             return  # one at a time
 
-        config = UpdateConfig.load()
-        reason = config.unavailable_reason()
+        reason = unavailable_reason()
         if reason is not None:
             # Nothing to ask, and a worker that raises immediately would only
             # turn a clear reason into a stack trace in a label.
             self._show_update_state("updates are off", tooltip=reason)
             return
 
-        self._show_update_state("checking...", tooltip="Contacting the update service")
+        self._show_update_state("checking...", tooltip=f"Asking winget about {PACKAGE_ID}")
 
-        worker = UpdateCheckWorker(config)
+        worker = UpdateCheckWorker()
         worker.found.connect(self._on_update_found)
         worker.none_available.connect(self._on_update_none)
         worker.error.connect(self._on_update_error)
@@ -495,11 +520,10 @@ class SettingsDialog(QDialog):
     def _on_update_none(self) -> None:
         self._show_update_state(
             "up to date",
-            tooltip=f"The update service has nothing newer than v{__version__}",
+            tooltip=f"winget has nothing newer than v{__version__} for {PACKAGE_ID}",
         )
 
     def _on_update_error(self, message: str) -> None:
-        # Verification failures land here too, and they are not "no update".
         self._show_update_state("update check failed", tooltip=message)
 
     # ---- tabs --------------------------------------------------------------
@@ -1270,11 +1294,10 @@ class SettingsDialog(QDialog):
         self.ignore_edit.setPlaceholderText("One glob per line, e.g. *.lock")
         self.ignore_edit.setMaximumHeight(140)
 
-        # Where updates come from. Read-only here on purpose: this dialog saves
-        # automatically, and the update address is the one setting that must
-        # not be changed by a stray keystroke in a window that writes as you
-        # type. The button opens the file instead, so changing it is a
-        # deliberate act.
+        # Where updates come from. Nothing to configure any more -- it is
+        # winget, and the package identifier is fixed by winget-pkgs -- so this
+        # is a readout, and its job is to answer "why is nothing updating"
+        # without anyone reading the source.
         update_row = QHBoxLayout()
         self.update_source = QLabel()
         self.update_source.setTextInteractionFlags(
@@ -1282,14 +1305,6 @@ class SettingsDialog(QDialog):
         )
         self.update_source.setWordWrap(True)
         update_row.addWidget(self.update_source, 1)
-        # No Edit button without an updater: it opens `update.json`, and a file
-        # that configures a subsystem this build does not contain is worse than
-        # no file -- it implies the address is the reason nothing updates.
-        if UPDATES_SUPPORTED:
-            edit_update_btn = QPushButton("Edit...")
-            edit_update_btn.setToolTip(str(update_config_path()))
-            edit_update_btn.clicked.connect(self._on_edit_update_config)
-            update_row.addWidget(edit_update_btn)
 
         # How long a commit message may be. Asked of the model and checked
         # afterwards; 0 turns a rule off. See git_assistant.commit_style.
@@ -2369,72 +2384,42 @@ class SettingsDialog(QDialog):
         self.rescan_btn.setEnabled(True)
         self.scan_status.setText(f"Scan failed: {message}")
 
-    def _on_about(self) -> None:
-        """Who wrote this and who helped.
+    def _on_metrics(self) -> None:
+        # Imported here rather than at the top: it is a whole window, and one
+        # nobody opens on most runs.
+        from git_assistant.ui.metrics_dialog import MetricsDialog
 
-        A message box rather than a window of its own: there is nothing to do
-        here except read it and close it. Rich text so the project link is a
-        link, and `setOpenExternalLinks` so clicking it goes to a browser.
-        """
-        box = QMessageBox(self)
-        box.setWindowTitle("About Git Assistant")
-        box.setTextFormat(Qt.TextFormat.RichText)
-        box.setText(about_html())
-        label = box.findChild(QLabel, "qt_msgbox_label")
-        if label is not None:
-            label.setOpenExternalLinks(True)
-        box.exec()
+        MetricsDialog(self.settings, self).exec()
+
+    def _on_about(self) -> None:
+        show_about(self)
 
     def _on_open_config(self) -> None:
         folder = config_path().parent
         folder.mkdir(parents=True, exist_ok=True)
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
 
-    # ---- update service ----------------------------------------------------
+    # ---- update source -------------------------------------------------------
     def _refresh_update_source(self) -> None:
-        """Show where this installation looks for updates, and why.
+        """Say what updates this installation, and why it might not.
 
-        "It is checking the wrong server" and "it is not checking at all" look
-        identical from the outside otherwise -- the menu item is simply absent
-        -- which leaves no way to tell a missing address from a typo in one.
+        "winget has not published it yet", "there is no winget on this machine"
+        and "you are running a checkout" are three different answers, and from
+        the outside they all look like an application that never updates.
         """
-        if not UPDATES_SUPPORTED:
-            self.update_source.setText(NO_UPDATES_NOTE)
-            self.update_source.setStyleSheet("color: #888;")
-            return
+        text = f"winget · {PACKAGE_ID}"
+        found = winget_path()
+        if found:
+            text += f"\n{found}"
 
-        config = UpdateConfig.load()
-        if config.problem:
-            self.update_source.setText(config.problem)
-            self.update_source.setStyleSheet("color: #c0392b;")
-            return
-
-        reason = config.unavailable_reason()
-        if config.base_url:
-            text = config.base_url
-            if config.origin:
-                text += f"  (from {config.origin})"
-            if reason:
-                # Configured, but something else disables updating: a source
-                # checkout, or a build packaged without the verifier.
-                text += f"\nUpdates are off: {reason}"
+        reason = unavailable_reason()
+        if reason:
+            text += f"\nUpdates are off: {reason}"
+            self.update_source.setStyleSheet("color: #b36b00;")
         else:
-            text = reason or "not configured"
-
+            text += f"\nChecked at startup and every {CHECK_MINUTES} minutes."
+            self.update_source.setStyleSheet("color: #888;")
         self.update_source.setText(text)
-        self.update_source.setStyleSheet("color: #888;")
-
-    def _on_edit_update_config(self) -> None:
-        """Open `update.json`, creating an inert template if it is absent.
-
-        The template overrides nothing, so this cannot change where updates
-        come from -- it only gives somebody a file to edit. Without it the
-        answer to "where do I change the URL" was "create this JSON file by
-        hand in a directory the application never mentions".
-        """
-        path = ensure_update_config()
-        QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
-        self._refresh_update_source()
 
     def _on_trust_all(self) -> None:
         box = QMessageBox(self)

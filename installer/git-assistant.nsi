@@ -5,9 +5,9 @@
 ;     makensis /DVERSION=0.2.0 installer\git-assistant.nsi
 ;
 ; Deliberately a PER-USER install:
-;   * the app self-updates by replacing the files it runs from, so the install
-;     directory must be writable without elevation - Program Files would mean a
-;     UAC prompt for every update;
+;   * this is the build published on winget, and winget runs this installer to
+;     upgrade it - Program Files would mean a UAC prompt for every upgrade,
+;     raised by a process the user did not start;
 ;   * no admin rights are needed to install at all.
 
 Unicode true
@@ -55,9 +55,9 @@ Unicode true
 ; PERMACHINE switches this from a per-user install under %LOCALAPPDATA% to a
 ; per-machine one under Program Files.
 ;
-; The per-user location exists so the self-updater can replace the files it
-; runs from without a UAC prompt. A build without the updater has no such need,
-; and a user-writable install directory is one of the ingredients Defender's
+; The per-user location was originally so the self-updater could replace the
+; files it ran from without a UAC prompt; it stays because winget upgrades that
+; build. A user-writable install directory is one of the ingredients Defender's
 ; heuristics score: an unsigned executable somewhere any process can rewrite,
 ; registered to appear at sign-in, is the shape of malware persistence. Program
 ; Files is not writable without elevation, which removes that ingredient.
@@ -179,8 +179,8 @@ FunctionEnd
 ; There is deliberately no .onInstSuccess, and no finish-page "run now" option.
 ; No installer variant starts the application.
 ;
-; It used to relaunch after a silent (self-update) run, so the tray icon did not
-; simply vanish mid-update. That is friendlier, but an installer that executes a
+; It used to relaunch after a silent run, so the tray icon did not simply
+; vanish mid-update. That is friendlier, but an installer that executes a
 ; program when it finishes is a defining behaviour of a dropper, and this one is
 ; already being quarantined -- see the README for what has and has not been
 ; ruled out. Not launching is the one thing an installer can do about that which

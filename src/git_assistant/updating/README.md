@@ -1,153 +1,111 @@
-# The trusted root
+# Updating
 
-`root.json` in this directory is the TUF root this application trusts. It is
-shipped inside the build rather than fetched, because fetching it would open a
-trust-on-first-use window in which a network attacker could hand the
-application a root of their own.
+Git Assistant does not update itself. It asks **winget** what version of
+`StefanGhitescu.GitAssistant` is published, and if that is newer than the one
+running it asks winget to install it. Everything that ends up on disk is fetched
+and hash-checked by the Windows Package Manager against the manifest merged into
+`microsoft/winget-pkgs` — see [`docs/winget.md`](../../../docs/winget.md) and
+[`installer/winget/`](../../../installer/winget).
 
-It declares **root at 3-of-5** and **targets at 2-of-3**, so a release is only
-accepted if enough independent keys agree.
+The code is [`winget.py`](winget.py); the Qt glue is
+`git_assistant.ui.update_prompt`.
 
-## What is here now: a development root
+## What this replaced, and why
 
-Produced by `scripts/ceremony.py --dev` in the distribution platform. The keys
-are real and persist, so publishing and updating work end to end — unlike a
-throwaway root, this one can actually sign releases.
+There used to be a TUF-verified self-updater here: `root.json` (a 3-of-5 root
+shipped inside the build), `update_url.txt`, a `dist_client` wheel carrying a
+compiled Rust verifier, and `update.json` for pointing an installation at a
+different service. It worked, and the trust model was stronger than winget's in
+one specific respect — releases were signed by keys held offline.
 
-It is not a production root, and the difference is custody rather than
-cryptography:
+It went anyway, because of the capability rather than the cryptography. **An
+unsigned binary that downloads an executable and runs it is behaviourally a
+dropper**, which is how builds of this application kept being quarantined; one
+release was blocked *in the build tree*. No configuration switch answers "can
+this program fetch and execute something" — only the code's absence does, which
+is why a second installer existed with the whole subsystem compiled out.
 
-- all five root keys were generated on one machine, in one sitting, by one
-  operator;
-- the keystores are unlocked by a known development password, with no key file;
-- `offline.kdbx` is sitting on the same disk as everything else.
-
-A production ceremony splits custody so no single person or machine ever holds
-a threshold, uses a composite master key with the key file on separate media,
-and keeps the offline store off the service host entirely. `ceremony.py`
-enforces those rules when `ENV=production`; it cannot enforce the human part.
-
-**Before shipping to anyone but yourself**, run the production ceremony and
-replace this file.
+Shelling out to winget removes the capability instead of hiding it. There is now
+one build, no `-noupdate` variant, and nothing in this package that fetches or
+executes a release.
 
 ## When updating is offered at all
 
-Three conditions, all required, all in `UpdateConfig.unavailable_reason`:
+Three conditions, all required, all in `unavailable_reason()`:
 
-1. There is an update URL — the repository root, not its `metadata` directory.
-2. This is a **packaged build** (`sys.frozen`), not a source checkout.
-3. `dist_client` is importable, so there is something to verify with.
+1. **Windows.** winget is Windows-only.
+2. **winget is on the machine.** `shutil.which`, then the App Execution Alias in
+   `%LOCALAPPDATA%\Microsoft\WindowsApps` directly — the alias is the usual
+   answer, but it is on the *user's* PATH, which a process launched by an
+   installer may not have yet.
+3. **This is a packaged build** (`sys.frozen`), not a source checkout. A
+   checkout is refused because upgrading one means installing the packaged
+   application beside it, and because a developer should not be told about a
+   release every five minutes.
 
-### Where the URL comes from
+Each reason is a sentence the UI shows. "winget has not published it yet",
+"there is no winget here" and "you are running a checkout" all look identical
+from the outside — an application that never updates — so they are said apart.
 
-Two sources, each with one owner.
+## How often it checks
 
-**The build.** `update_url.txt` sits beside `root.json` in this directory and
-is **committed**, so every build carries an address by construction. It has to
-be the build rather than an environment variable, because **an installed
-desktop application never sees a shell's environment** — it is launched from
-the Start Menu and inherits the *user* environment, so a variable exported in a
-terminal reached a checkout, where updating is refused, and reached nothing
-else.
+**At startup, then every five minutes** (`CHECK_MINUTES`), so an application
+left running for days notices a release without anyone opening a window. The
+window runs its own check when it is opened or raised.
 
-It is committed rather than generated because the generated version failed
-open. The address came only from a `UPDATE_URL` repository variable, and an
-unset variable produced a build with no updater at all — silent, and from the
-outside indistinguishable from the feature being broken. That shipped twice.
-`vars.UPDATE_URL` still overrides the committed value for a fork or a staging
-pipeline, and a build with neither is now a build failure.
+A check is one `winget search`, which reads a local source index winget itself
+keeps current; it is not a download. The tray holds one check thread at a time,
+which matters more at five-minute intervals than it did at the four hours the
+old updater used — a winget that is slow because its index is being rebuilt must
+not accumulate a thread per tick.
 
-**`update.json`**, in the platform config directory beside `settings.json`
-(`%LOCALAPPDATA%\git-assistant\update.json` on Windows). Reach it from
-**Settings → Advanced → Update service → Edit…**, which creates it from an
-inert template if it is not there and opens it. That row also shows the address
-currently in use and where it came from — "it is checking the wrong server" and
-"it is not checking at all" are otherwise indistinguishable, since both show up
-as the menu item simply being absent.
+Silent unless there is something to install. A failed check says nothing,
+because a laptop that starts offline would otherwise produce a toast every five
+minutes; the failure is shown in the window's version readout, where somebody
+looking for it will find it. A version already offered this session is not
+offered again — that is what turns an update into nagware.
 
-```json
-{
-  "url": "https://updates.example",
-  "channel": "stable",
-  "check_interval_minutes": 240
-}
+## Reading winget's output
+
+winget has no machine-readable output for `search` or `list`. The one thing
+parsed is the version, and it is found by locating the **package identifier** in
+the row and taking the next token:
+
+```
+Name          Id                           Version  Source
+----------------------------------------------------------
+Git Assistant StefanGhitescu.GitAssistant  0.4.0    winget
 ```
 
-It exists so an installation can be pointed elsewhere when its usual service is
-unreachable. A build whose only address is compiled in cannot recover when that
-address dies.
+Matching the `Version` header instead would work on an English Windows and
+quietly find nothing on any other — the worst shape a bug can take, since it
+cannot be reproduced by whoever wrote it. The identifier is never translated.
 
-### How often it checks
+Exit code 20, or "No package found", means the package is not published. That is
+not an error: it is the state today, until the manifest is merged.
 
-At startup, then on a timer, so an application left running for days notices a
-release without anyone opening a window. `check_interval_minutes` sets the
-period; the default is 240 and the floor is 1.
+## Installing
 
-The floor is a floor rather than a fixed value because "check every ten
-seconds" is a reasonable thing to want while testing a deployment and an
-unreasonable thing to leave switched on. Every check is a full metadata walk —
-the root chain, timestamp, snapshot, the delegated role, then the pointer — so
-ten seconds is roughly 8,600 of them per machine per day, essentially all of
-which find nothing. Releases are minutes-to-days apart; checking faster than
-they are published buys latency nobody perceives at a cost the server pays.
+`winget upgrade` if winget already lists the package, `winget install` if not.
+Both, because this application also ships an NSIS installer and a portable zip:
+`winget upgrade` on an install winget never made does nothing at all, and the
+installer replacing an existing install in place is how it has always been
+upgraded. The consent dialog names whichever command it is about to run.
 
-A bad value is clamped, never rejected: wanting faster checks is a preference,
-and refusing the whole file over it would turn that into "updating is off".
+`--silent` so the installer's window does not open behind the tray. A
+per-machine install needs elevation to replace `Program Files`, so winget raises
+a UAC prompt; declining it is reported, not swallowed — the user pressed
+**Install now**, and silence after that is indistinguishable from a dead button.
 
-An automatic check that finds a version it has already offered this session
-says nothing more — the window's readout still updates, it just stops
-interrupting. The tray's **Check for updates…** always answers, though, even
-for a version already declined; a button that does nothing because of a
-decision made an hour ago is indistinguishable from a broken one.
+The portable zip is a real exception rather than an oversight. An unzipped copy
+sets `sys.frozen`, so it passes the packaged-build check, but winget would
+install a *second* copy under `%LOCALAPPDATA%` while the folder actually being
+run sat unchanged and stale. Portable means portable: replace the folder.
 
-There is no push channel, deliberately. The edge is a static file server with
-no application behind it, and clients are anonymous by construction — the
-install id is generated locally and never sent, so a staged rollout is
-evaluated on the client and there is no per-client response to forge. Having
-the service notify clients would mean it tracking who runs what, which is a
-larger change than the latency is worth.
+## Exercising it during development
 
-### Three more things about the file
-
-- **The application never rewrites it.** It is a separate file rather than a
-  key in `settings.json` precisely because the application rewrites that one on
-  every edit, and a file the application rewrites is a poor place to keep the
-  thing that decides where its code comes from. The single write is creating
-  the template on request, whose `url` is empty — so it overrides nothing, and
-  an existing file is never touched. A hand-edited address cannot be clobbered,
-  least of all at the moment it is needed.
-- **A broken override does not fall back.** If `url` is missing a scheme or the
-  JSON does not parse, updating is disabled and the reason says so. Falling
-  back to the packaged address would hide the mistake behind the failure the
-  user was trying to escape.
-- **Editing it cannot change what is trusted.** The keys a release must be
-  signed by are fixed by `root.json` above, so pointing this at a hostile
-  server produces verification failures, not bad code. That is also why plain
-  `http` is accepted: TUF signs the metadata and pins the target hashes, so a
-  loopback deployment is a normal way to run this.
-
-The second is the one worth explaining. Self-update replaces the files it is
-running from; in a packaged build those files *are* the build, and in a `git
-clone` they are a working tree with uncommitted work in it. There is
-deliberately no environment variable to force it on in a checkout, because a
-switch like that is one somebody eventually leaves on.
-
-To exercise the updater during development, run a packaged build — or drive
-`dist_client` directly, which is the layer that resolves the channel pointer
-and checks every signature.
-
-## Rotating it
-
-Replacing this file changes what the *next* build trusts. Installations already
-in the field keep trusting the root they shipped with and reach the new one by
-following the root chain the repository serves — which is why root rotation is
-signed by the old root as well as the new. Do not treat this file as a switch
-that retires the previous root.
-
-## Why 3-of-5 and not 3-of-3
-
-The spare keys are the point. Issue exactly `threshold` keys and every one of
-them is load-bearing forever: lose a single root key under 3-of-3 and root can
-never be re-signed, so once it expires every installed client is permanently
-unable to accept anything — and recovery would have to be signed by the keys
-that are gone.
+A checkout is refused, so the useful seam is the `runner` argument every command
+takes — pass something that returns a `CompletedProcess` and no process starts.
+That is how `tests/test_updating.py` drives the whole module. To watch it talk
+to a real winget without a packaged build, call `available_version()` directly;
+it does not go through `unavailable_reason()`.

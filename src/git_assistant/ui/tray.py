@@ -15,22 +15,11 @@ from PyQt6.QtWidgets import (
 from git_assistant import git_ops
 from git_assistant.config import RepoEntry, Settings
 from git_assistant.ui.icon import app_icon
-from git_assistant.ui.preview_dialog import PreviewDialog
 from git_assistant.ui.repo_watcher import RepoWatcher
-from git_assistant.features import UPDATES_SUPPORTED
-from git_assistant.ui.settings_dialog import SettingsDialog
+from git_assistant.ui.settings_dialog import SettingsDialog, show_about
+from git_assistant.ui.update_prompt import UpdateCheckWorker, UpgradeWorker, ask_to_install
 from git_assistant.ui.workers import FunctionWorker, run_worker
-
-# Absent from the no-update build, along with everything they reach. Imported
-# behind the flag rather than defensively at each call site so that a build
-# without the updater cannot import it by accident. See git_assistant.features.
-if UPDATES_SUPPORTED:
-    from git_assistant.ui.update_prompt import UpdateCheckWorker, ask_to_install
-    from git_assistant.updating import (
-        UpdateConfig,
-        clear_staged_updates,
-        install_update,
-    )
+from git_assistant.updating import CHECK_MINUTES, unavailable_reason
 
 
 def _norm(path: str) -> str:
@@ -48,13 +37,11 @@ class TrayApp:
         self.tray.setToolTip("Git Assistant")
         self.tray.activated.connect(self._on_activated)
 
-        # Self-update. Read before the menu is built, because the menu asks
-        # whether updating is configured. The address comes from `update.json`
-        # if the user wrote one, otherwise from the build. A developer checkout
-        # has neither and is refused anyway, so it never reaches the network.
-        self._update_config = UpdateConfig.load() if UPDATES_SUPPORTED else None
+        # Updating, which is winget's job now -- see git_assistant.updating.
         self._update_worker = None
         self._update_thread = None
+        self._upgrade_worker = None
+        self._upgrade_thread = None
         # Versions already put in front of the user this session. A repeating
         # check must not re-open a modal every interval for a release that was
         # answered with "Later" -- that turns an update into nagware, and is
@@ -65,9 +52,7 @@ class TrayApp:
         # with the right lifetime is also what stops the timer being collected
         # while it is still armed.
         self._update_timer = QTimer(self.tray)
-        self._update_timer.timeout.connect(
-            lambda: self._check_for_update(announce_nothing=False)
-        )
+        self._update_timer.timeout.connect(self._check_for_update)
 
         self.menu = QMenu()
         self.tray.setContextMenu(self.menu)
@@ -85,51 +70,45 @@ class TrayApp:
         # were resolved, or repos unblocked since) so the tray shows owner\name.
         self._backfill_owners()
 
-        # Remove the installer that produced this build, if there is one. This
-        # is the only moment it can go: the copy that downloaded it launched it
-        # and then quit, so it was never both alive and finished. This one is.
-        if UPDATES_SUPPORTED:
-            clear_staged_updates()
-
         if self._updates_on:
-            self._check_for_update(announce_nothing=False)
+            self._check_for_update()
             # Then keep checking, so an application left running for days does
             # not need the window raised to notice a release. Qt takes
-            # milliseconds; the config is in minutes because a unit anyone can
-            # get wrong by three orders of magnitude should not be the one in
-            # the file people edit.
-            self._update_timer.start(self._update_config.check_minutes * 60_000)
+            # milliseconds; CHECK_MINUTES is in minutes because that is the unit
+            # the interval is reasoned about in.
+            self._update_timer.start(CHECK_MINUTES * 60_000)
 
     @property
     def _updates_on(self) -> bool:
-        """Is this build able to update itself, and configured to?
+        """Can this installation be updated by winget at all?
 
-        Two separate questions collapsed into the one every caller asks. The
-        no-update build answers False at the first hurdle, without touching
-        `UpdateConfig`, which it does not have.
+        Asked once, at startup. Whether winget exists and whether this is an
+        installed build are both settled for the life of the process, so
+        re-deciding it every five minutes would only mean running the same
+        checks to reach the same answer.
         """
-        return self._update_config is not None and self._update_config.enabled
+        return unavailable_reason() is None
 
     # ---- menu --------------------------------------------------------------
     def _rebuild_menu(self) -> None:
+        """Open the window, say what this is, or stop. Nothing else.
+
+        Everything the menu used to offer -- generating a message, metrics,
+        checking for an update -- is in the window, and a tray menu that
+        duplicates the window is two places to keep in step and two places to
+        look for the same thing.
+        """
         self.menu.clear()
 
-        # The active repository is chosen in the Generate tab's selector, so the
-        # tray menu stays a short list of actions.
-        gen = self.menu.addAction("Generate commit message")
-        gen.triggered.connect(self._on_generate)
-        metrics_act = self.menu.addAction("Metrics...")
-        metrics_act.triggered.connect(self._on_metrics)
-        settings_act = self.menu.addAction("Settings...")
-        settings_act.triggered.connect(self._on_settings)
-        if self._updates_on:
-            update_act = self.menu.addAction("Check for updates...")
-            update_act.triggered.connect(
-                lambda: self._check_for_update(announce_nothing=True)
-            )
+        show_act = self.menu.addAction("Git Assistant")
+        show_act.triggered.connect(self._on_settings)
+        # Bold, and what Enter picks: the same thing clicking the icon does.
+        self.menu.setDefaultAction(show_act)
+        about_act = self.menu.addAction("About")
+        about_act.triggered.connect(self._on_about)
         self.menu.addSeparator()
-        quit_act = self.menu.addAction("Quit")
-        quit_act.triggered.connect(self.app.quit)
+        exit_act = self.menu.addAction("Exit")
+        exit_act.triggered.connect(self.app.quit)
 
     # ---- actions -----------------------------------------------------------
     def _on_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
@@ -141,28 +120,10 @@ class TrayApp:
         ):
             self._on_settings()
 
-    def _on_generate(self) -> None:
-        if not self.settings.repos:
-            self._notify(
-                "No repository configured",
-                "Add a git repository in Settings first.",
-            )
-            self._on_settings()
-            return
-        if not self.settings.active_model():
-            self._notify(
-                "No model selected",
-                "Open Settings, test the connection, and pick a model.",
-            )
-            self._on_settings()
-            return
-        dialog = PreviewDialog(self.settings)
-        dialog.exec()
-
-    def _on_metrics(self) -> None:
-        from git_assistant.ui.metrics_dialog import MetricsDialog
-
-        MetricsDialog(self.settings).exec()
+    def _on_about(self) -> None:
+        # Parentless: the menu is reachable with no window open, and the About
+        # box is the one thing here that does not need one.
+        show_about(self._main_window)
 
     def show_main_window(self) -> None:
         """Open (or raise) the main window. Entry point for a second launch."""
@@ -208,39 +169,28 @@ class TrayApp:
         else:
             QMessageBox.information(None, title, message)
 
-    # ---- self-update -------------------------------------------------------
-    def _check_for_update(self, *, announce_nothing: bool) -> None:
-        """Run one update check off-thread.
+    # ---- updating ------------------------------------------------------------
+    def _check_for_update(self) -> None:
+        """Ask winget, off-thread. Runs at startup and every CHECK_MINUTES.
 
-        ``announce_nothing`` separates the automatic check at startup, which
-        should stay quiet when there is nothing to say -- including when the
-        check itself fails -- from the menu item, where silence would look like
-        a broken button.
+        Quiet unless there is something to install. Nothing in the tray menu
+        asks for a check, so every call here is the timer or startup, and
+        silence when there is nothing to say -- including when winget itself
+        fails -- is what stops a laptop that starts offline from producing a
+        toast every five minutes. Asking is done by opening the window, which
+        runs its own check and shows the result, and any failure, in its
+        version readout.
+
+        The guard on `_update_thread` matters more at five-minute intervals
+        than it did at four hours: a winget that is slow because its source
+        index is being rebuilt must not accumulate one thread per tick.
         """
         if not self._updates_on or self._update_thread is not None:
-            return  # no updater in this build, or one already running
+            return  # winget cannot update this install, or a check is running
 
-        worker = UpdateCheckWorker(self._update_config)
-        # `announce_nothing` marks the menu item, which is someone asking. That
-        # ask is always answered, even for a version already declined -- a
-        # button that does nothing because of a decision made an hour ago is
-        # indistinguishable from a broken one.
-        worker.found.connect(
-            lambda result: self._on_update_found(result, asked=announce_nothing)
-        )
+        worker = UpdateCheckWorker()
+        worker.found.connect(self._on_update_found)
         worker.error.connect(self._tell_window_check_failed)
-        if announce_nothing:
-            worker.none_available.connect(
-                lambda: self._notify("Up to date", "You have the latest version.")
-            )
-            # A failure is only worth interrupting for when someone asked. An
-            # unreachable update server on a laptop that starts offline is the
-            # normal case, not news, and the automatic check runs on a timer --
-            # one toast at startup would become one every interval. The settings
-            # window still shows the failure via `_tell_window_check_failed`.
-            worker.error.connect(
-                lambda message: self._notify("Update check failed", message)
-            )
 
         # Keep the open window in step. Its readout is filled once, when it is
         # constructed, and a window that was already open when this check ran
@@ -283,13 +233,12 @@ class TrayApp:
         if window is not None:
             window.set_update_error(message)
 
-    def _on_update_found(self, result, *, asked: bool = True) -> None:
-        # An automatic check that has already offered this version says nothing
-        # more. The window's readout is still kept current by
-        # `_tell_window_about_update`, so the information is not lost -- it just
-        # stops interrupting. A newer release resets this by not being in the
-        # set.
-        if not asked and result.version in self._update_offered:
+    def _on_update_found(self, result) -> None:
+        # A check that has already offered this version says nothing more. The
+        # window's readout is still kept current by `_tell_window_about_update`,
+        # so the information is not lost -- it just stops interrupting. A newer
+        # release resets this by not being in the set.
+        if result.version in self._update_offered:
             return
         self._update_offered.add(result.version)
 
@@ -300,48 +249,62 @@ class TrayApp:
         self.offer_install(result)
 
     def offer_install(self, result) -> None:
-        """Ask for consent, then install. One path, whatever led here.
+        """Ask for consent, then let winget do it. One path, whatever led here.
 
         Reached from the tray notification and from clicking the readout in the
         settings window. Deliberately the same method rather than two copies:
         two copies is how a consent dialog ends up meaning slightly different
         things depending on which route you took to it.
         """
-        if not self._updates_on:
-            return  # nothing here can run in a build without the updater
-
-        from git_assistant.updating.client import current_version
-
-        if not ask_to_install(result, current_version()):
+        if not self._updates_on or self._upgrade_thread is not None:
             return
 
-        # Tens of megabytes over the network, so off the GUI thread. The tray
-        # would otherwise stop responding for the whole download, which reads
-        # as the application hanging on a button press.
-        self._notify("Downloading update", f"Fetching Git Assistant {result.version}...")
-        worker = FunctionWorker(lambda: install_update(self._update_config, result))
-        worker.finished.connect(self._on_installer_started)
-        worker.error.connect(lambda message: self._notify("Update failed", message))
-        self._install_worker = worker
-        self._install_thread = run_worker(worker)
+        if not ask_to_install(result):
+            return
 
-    def _on_installer_started(self, _path: object) -> None:
-        """The installer is running. Get out of its way.
+        # winget downloads the installer and runs it, so this is a download and
+        # an install, off the GUI thread. The tray would otherwise stop
+        # responding throughout, which reads as the application hanging on a
+        # button press.
+        self._notify(
+            "Installing update",
+            f"winget is installing Git Assistant {result.version}. This "
+            "application will close while it does.",
+        )
+        worker = UpgradeWorker(result)
+        worker.finished.connect(self._on_upgrade_finished)
+        worker.error.connect(self._on_upgrade_failed)
+        self._upgrade_worker = worker
+        self._upgrade_thread = run_worker(worker)
+        self._upgrade_thread.finished.connect(self._forget_upgrade_worker)
 
-        It stops this application itself before replacing files, so quitting is
-        not strictly required -- but being killed means settings edited in this
-        session are never written. Quitting on a short timer leaves the
-        notification on screen long enough to read.
+    def _forget_upgrade_worker(self) -> None:
+        self._upgrade_worker = None
+        self._upgrade_thread = None
 
-        The installer no longer starts the new version -- no variant does, see
+    def _on_upgrade_failed(self, message: str) -> None:
+        # Always announced, unlike a failed check: this one the user asked for
+        # by pressing Install now, and silence after that reads as a dead button.
+        self._notify("Update failed", message)
+
+    def _on_upgrade_finished(self, note: object) -> None:
+        """winget is done. Get out of the way.
+
+        The installer stops this application itself while it replaces the
+        files, so reaching here at all usually means it did not need to -- but
+        quitting is what gets settings written either way, and the new build
+        cannot start while the old one holds its own directory open.
+
+        The installer does not start the new version -- see
         installer/git-assistant.nsi -- so this is the last thing the user is
         told before the tray icon disappears. It has to say that reopening is
         theirs to do, or an update looks like a crash.
         """
+        if note is None:
+            return  # the error path already said what happened; stay running
         self._notify(
-            "Installing update",
-            "Git Assistant will close while the update is applied. "
-            "Start it again from the Start menu when it finishes.",
+            "Update installed",
+            "Git Assistant will close now. Start it again from the Start menu.",
         )
         QTimer.singleShot(2000, self.app.quit)
 

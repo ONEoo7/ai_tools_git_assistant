@@ -1,9 +1,13 @@
-"""Registering this server with Claude Desktop and Claude Code.
+"""Registering this server with the clients that can run it.
 
-Claude Desktop reads a JSON file that also holds everything else the user has
-ever configured there, so registration is a parse, one key, and a write back --
-never a template. A file that will not parse is refused rather than replaced:
-losing someone's preferences is far worse than an unregistered server.
+Most clients -- Claude Desktop, Antigravity, VS Code's GitHub Copilot -- read a
+JSON file that also holds everything else the user has ever configured there, so
+registration is a parse, one key, and a write back -- never a template. A file
+that will not parse is refused rather than replaced: losing someone's
+preferences is far worse than an unregistered server.
+
+They differ only in where the file is, what the servers live under and what an
+entry looks like, which is what `JsonClient` records.
 
 Claude Code has a CLI for exactly this, so that is what gets used.
 """
@@ -15,7 +19,8 @@ import os
 import shutil
 import subprocess
 import sys
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from git_assistant.mcp import SERVER_NAME
@@ -49,30 +54,111 @@ class Registration:
         return f"Registered ({'writes allowed' if writes else 'read-only'})."
 
 
-# ---- Claude Desktop ---------------------------------------------------------
+# ---- clients that keep their servers in a JSON file -------------------------
+@dataclass(frozen=True)
+class JsonClient:
+    """A client whose registration is one key in a file it also owns.
+
+    `path` is a callable rather than a path so the file is located when it is
+    needed -- these live under the home directory, which a test may move.
+    """
+
+    label: str
+    #: The object the servers hang off. Everyone but VS Code calls it mcpServers.
+    key: str
+    path: Callable[[], Path]
+    #: What one server looks like to this client.
+    entry: Callable[[list[str]], dict] = field(default=lambda c: registration(c))
+    #: What the user has to do before the client notices.
+    restart: str = ""
+
+
 def desktop_config_path() -> Path:
     roaming = os.environ.get("APPDATA") or str(Path.home() / "AppData" / "Roaming")
     return Path(roaming) / "Claude" / "claude_desktop_config.json"
 
 
-def _read_desktop(path: Path) -> dict:
+def antigravity_config_path() -> Path:
+    """Antigravity 2.0 moved this; earlier builds are still read where they are."""
+    home = Path.home() / ".gemini"
+    candidates = (
+        home / "config" / "mcp_config.json",  # 2.0, shared with the CLI and SDK
+        home / "antigravity" / "mcp_config.json",  # before that
+    )
+    return next((p for p in candidates if p.exists()), candidates[0])
+
+
+def vscode_config_path() -> Path:
+    """`mcp.json` beside VS Code's own user settings, Insiders included."""
+    if sys.platform == "win32":
+        base = Path(os.environ.get("APPDATA") or Path.home() / "AppData" / "Roaming")
+    elif sys.platform == "darwin":
+        base = Path.home() / "Library" / "Application Support"
+    else:
+        base = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
+    candidates = tuple(
+        base / name / "User" / "mcp.json" for name in ("Code", "Code - Insiders")
+    )
+    return next((p for p in candidates if p.exists()), candidates[0])
+
+
+DESKTOP = JsonClient(
+    label="Claude Desktop",
+    key="mcpServers",
+    path=lambda: desktop_config_path(),
+    restart=(
+        "Quit Claude Desktop completely and start it again — it reads this file "
+        "only at startup."
+    ),
+)
+
+ANTIGRAVITY = JsonClient(
+    label="Antigravity",
+    key="mcpServers",
+    path=lambda: antigravity_config_path(),
+    restart=(
+        "In Antigravity, open Manage MCP servers from the agent panel and "
+        "refresh — or restart it."
+    ),
+)
+
+VSCODE = JsonClient(
+    label="VS Code (GitHub Copilot)",
+    key="servers",  # not mcpServers: VS Code reads its own shape
+    path=lambda: vscode_config_path(),
+    entry=lambda command: {"type": "stdio", **registration(command)},
+    restart=(
+        "In VS Code, run “MCP: List Servers” from the Command Palette and start "
+        "it — or reload the window."
+    ),
+)
+
+#: Everything the tab offers a Register button for, in the order it shows them.
+JSON_CLIENTS = (DESKTOP, ANTIGRAVITY, VSCODE)
+
+
+def _read_config(path: Path) -> dict:
     if not path.exists():
         return {}
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        text = path.read_text(encoding="utf-8")
+    except (UnicodeDecodeError, OSError) as exc:
+        raise ClientError(f"could not read {path}: {exc}") from exc
+    if not text.strip():
+        return {}  # Antigravity creates this file empty; there is nothing to lose
+    try:
+        data = json.loads(text)
     except (json.JSONDecodeError, UnicodeDecodeError) as exc:
         raise ClientError(
             f"{path.name} is not valid JSON ({exc}). Fix or move it; this will "
             "not overwrite it."
         ) from exc
-    except OSError as exc:
-        raise ClientError(f"could not read {path}: {exc}") from exc
     if not isinstance(data, dict):
         raise ClientError(f"{path.name} does not hold a JSON object; leaving it alone.")
     return data
 
 
-def _write_desktop(path: Path, data: dict) -> None:
+def _write_config(path: Path, data: dict) -> None:
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         backup = path.with_name(path.name + ".git-assistant.bak")
@@ -85,48 +171,58 @@ def _write_desktop(path: Path, data: dict) -> None:
         raise ClientError(f"could not write {path}: {exc}") from exc
 
 
-def desktop_status(wanted: list[str] | None = None) -> Registration:
-    path = desktop_config_path()
+def json_status(client: JsonClient, wanted: list[str] | None = None) -> Registration:
+    path = client.path()
     try:
-        data = _read_desktop(path)
+        data = _read_config(path)
     except ClientError as exc:
         return Registration(detail=str(exc))
-    entry = (data.get("mcpServers") or {}).get(SERVER_NAME)
+    entry = (data.get(client.key) or {}).get(SERVER_NAME)
     if not isinstance(entry, dict):
         return Registration(detail=str(path))
     command = [str(entry.get("command", "")), *[str(a) for a in entry.get("args", [])]]
     return Registration(present=True, command=command, detail=str(path))
 
 
-def register_desktop(command: list[str]) -> str:
+def register_json(client: JsonClient, command: list[str]) -> str:
     """Add this server, leaving every other setting in the file untouched."""
-    path = desktop_config_path()
-    data = _read_desktop(path)
-    servers = data.get("mcpServers")
+    path = client.path()
+    data = _read_config(path)
+    servers = data.get(client.key)
     if not isinstance(servers, dict):
         servers = {}
-    servers[SERVER_NAME] = registration(command)
-    data["mcpServers"] = servers
-    _write_desktop(path, data)
-    return (
-        f"Added to {path}.\n\nQuit Claude Desktop completely and start it again — "
-        "it reads this file only at startup."
-    )
+    servers[SERVER_NAME] = client.entry(command)
+    data[client.key] = servers
+    _write_config(path, data)
+    return f"Added to {path}.\n\n{client.restart}".strip()
 
 
-def unregister_desktop() -> str:
-    path = desktop_config_path()
-    data = _read_desktop(path)
-    servers = data.get("mcpServers")
+def unregister_json(client: JsonClient) -> str:
+    path = client.path()
+    data = _read_config(path)
+    servers = data.get(client.key)
     if not isinstance(servers, dict) or SERVER_NAME not in servers:
         return f"{SERVER_NAME} was not registered in {path.name}."
     servers.pop(SERVER_NAME)
     if servers:
-        data["mcpServers"] = servers
+        data[client.key] = servers
     else:
-        data.pop("mcpServers")  # leave the file as it was found
-    _write_desktop(path, data)
-    return f"Removed from {path}. Restart Claude Desktop to apply it."
+        data.pop(client.key)  # leave the file as it was found
+    _write_config(path, data)
+    return f"Removed from {path}. Restart {client.label} to apply it."
+
+
+# Claude Desktop by name, which is how the rest of this package still asks.
+def desktop_status(wanted: list[str] | None = None) -> Registration:
+    return json_status(DESKTOP, wanted)
+
+
+def register_desktop(command: list[str]) -> str:
+    return register_json(DESKTOP, command)
+
+
+def unregister_desktop() -> str:
+    return unregister_json(DESKTOP)
 
 
 # ---- Claude Code -------------------------------------------------------------

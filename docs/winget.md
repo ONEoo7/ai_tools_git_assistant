@@ -6,6 +6,14 @@ fields winget-pkgs cannot work out for itself are written down, reviewable and
 diffable, instead of living only in a pull request against someone else's
 repository.
 
+**winget is now also how the application updates itself.** It asks
+`winget search --id StefanGhitescu.GitAssistant --exact` at startup and every
+five minutes, and on the user's say-so runs `winget upgrade`. So the manifests
+below are no longer only a distribution channel — an identifier that does not
+match, or a version that never gets published, is an application that silently
+never updates. See
+[`src/git_assistant/updating/README.md`](../src/git_assistant/updating/README.md).
+
 This document is *here* and not in that directory because the directory is
 copied wholesale into `manifests/s/StefanGhitescu/GitAssistant/<version>/`, and
 `winget validate` reads every file in it — a README there failed validation on
@@ -69,10 +77,17 @@ winget validate --manifest .\installer\winget
 winget install --manifest .\installer\winget
 ```
 
-`ManifestVersion` here is `1.6.0`. If the open PR uses a different schema
+`ManifestVersion` here is `1.12.0`. If the open PR uses a different schema
 version, match it rather than this — a mixed set is a validation failure, and
 the version in the PR is the one a reviewer has already looked at.
 
-`ReleaseDate` and the hash are for 0.3.17 and go stale by design; the automation
-replaces both on the next release. They are correct here so this set can be
-submitted as-is if the initial PR is superseded rather than amended.
+`PackageVersion`, `ReleaseDate`, `InstallerUrl` and `InstallerSha256` go stale
+by design; the automation replaces all four on the next release.
+
+**These four cannot be submitted as-is right now.** They name
+`git-assistant-<version>-user-windows-x64-setup.exe`, and the released v0.3.18
+assets are still called `...-noupdate-user-...` — the `-noupdate` suffix named a
+second build with the self-updater compiled out, which no longer exists. The
+first release cut after that change publishes the new filename and the
+automation regenerates the URL and hash to match. Until then, submitting by hand
+means taking the URL and hash from the release you are actually submitting.

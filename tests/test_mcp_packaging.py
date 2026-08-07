@@ -1,7 +1,7 @@
 """The server has to be in what ships, and the installer has to know about it.
 
-Text assertions over the build files, in the idiom of test_features.py: three
-build paths that have to agree about what ships, and have not before.
+Text assertions over the build files: the specs, the workflow and the NSIS
+script all have to agree about what ships, and have not before.
 """
 
 import subprocess
@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-ONEDIR_SPECS = ("git-assistant-onedir.spec", "git-assistant-onedir-noupdate.spec")
+ONEDIR_SPECS = ("git-assistant-onedir.spec",)
 MCP_EXE = "GitAssistantMcp"
 
 

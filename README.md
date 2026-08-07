@@ -5,11 +5,13 @@ A **system-tray Git assistant** powered by a **local LLM** served by
 
 Its first feature generates git commit messages; more Git helpers are planned.
 
-- Lives in the system tray — click the icon or use the menu to generate a message.
+- Lives in the system tray — click the icon to open the window. The right-click
+  menu is deliberately three items: **Git Assistant**, **About**, **Exit**;
+  everything else is in the window.
 - Talks to LM Studio's OpenAI-compatible API (pick IP/port, list models, select one).
 - Manages a **list of repos** (add one by one, or scan a folder to add all repos
-  under it), grouped by folder; the tray shows the 3 most-recent with the rest
-  in a submenu.
+  under it), grouped by folder; the active one is picked with the selector on
+  each repo-driven tab.
 - **Auto-watch** (opt-in per folder): tick a scanned folder and newly cloned
   repos are added automatically, via a lightweight native filesystem watcher.
 - **Committer identity switcher**: a *Commit as* dropdown above the tabs shows the
@@ -18,7 +20,8 @@ Its first feature generates git commit messages; more Git helpers are planned.
 - Output: an **editable preview** you can **Copy** to the clipboard or **Commit** directly.
 - Default format: **Conventional Commits**, with a fully **editable prompt template**.
 - **Handles diffs larger than the model's context window** (see below).
-- **Metrics** window: count lines of code across selected repos or a scanned
+- **Metrics** window (*Metrics...* along the bottom of the main window): count
+  lines of code across selected repos or a scanned
   directory, broken down by file type (uses `git ls-files`, so `.gitignore` is
   respected and binaries are skipped).
 - **Code review** tab: check the files you have staged against a table of rules
@@ -31,6 +34,9 @@ Its first feature generates git commit messages; more Git helpers are planned.
 - **Langfuse tracing** (optional, off by default): send every call to your own
   Langfuse instance, prompt and reply included, to keep a searchable record of
   what was actually asked (see below).
+- **Updates come from winget**, not from the app: it checks whether a newer
+  `StefanGhitescu.GitAssistant` is published and, on your say-so, runs
+  `winget upgrade` (see below).
 
 ## Handling large diffs (context overflow)
 
@@ -474,7 +480,7 @@ uv run git-assistant
 ## First-time setup
 
 1. Start LM Studio, load a model, and start its server (default `127.0.0.1:1234`).
-2. Open the tray menu → **Settings…**
+2. Click the tray icon (or its menu → **Git Assistant**) to open the window.
    - **Connection & Model:** enter IP/port, click *Test connection*, pick a model,
      and optionally set the context window size. With LM Studio selected there is
      also *Set up LM Studio for me...*, which installs LM Studio via winget,
@@ -499,17 +505,57 @@ uv run git-assistant
      answers whether anything actually improved.
    - **MCP Server:** offer the repositories, audits and commit-message
      generation to an MCP client over stdio. *Test server* starts it and reports
-     what it answered; the buttons register it with Claude Desktop (a merge into
-     `claude_desktop_config.json` that leaves every other setting alone) or with
-     Claude Code (`claude mcp add`, user scope by default). Read-only unless
+     what it answered; the buttons register it with Claude Desktop
+     (`claude_desktop_config.json`), Antigravity (`~/.gemini/config/mcp_config.json`,
+     or the older `~/.gemini/antigravity/` file when that is the one there), VS
+     Code's GitHub Copilot (`mcp.json` beside its user settings, written in the
+     `servers` shape VS Code reads) or Claude Code (`claude mcp add`, user scope
+     by default). Each file client is a merge that leaves every other setting
+     alone, and a file that will not parse is refused rather than replaced.
+     Read-only unless
      *Allow write operations* is ticked **and** the server is registered again —
      the flag lives in the registered command, not in a file it re-reads.
    - **Identities:** add the identities you commit as; pick one for the active
      repo with the *Commit as* selector above the tabs.
    - **Template / Advanced:** optionally customize the prompt, diff source
-     (staged vs. all uncommitted), output reserve, and ignore globs.
-3. Stage your changes, pick the **active repo** from the tray menu, and choose
-   **Generate commit message**. Edit if needed, then **Copy** or **Commit**.
+     (staged vs. all uncommitted), output reserve, and ignore globs. *Update
+     source* is a readout, not a setting — see **Updating** below.
+3. Stage your changes, pick the **active repo** in the **Generate Commit Message**
+   tab, and generate. Edit if needed, then **Copy** or **Commit**.
+
+## Updating
+
+Git Assistant does not update itself. It asks **winget** whether a newer
+`StefanGhitescu.GitAssistant` is published — **at startup and every five
+minutes** — and if so offers to install it. Saying yes runs:
+
+```bash
+winget upgrade --id StefanGhitescu.GitAssistant --exact
+```
+
+`winget install` instead, if winget does not already list the package: this app
+also ships an NSIS installer and a portable zip, and `winget upgrade` on an
+install winget never made does nothing at all. The consent dialog names
+whichever command it is about to run, and that command is yours to run by hand
+if you would rather the application did not.
+
+Everything that lands on disk is fetched and hash-checked by the Windows Package
+Manager against the merged manifest. Nothing in this application downloads or
+executes a release.
+
+Updating is off, with the reason shown in *Settings → Advanced → Update source*,
+when there is no winget on the machine, when you are running from a source
+checkout, or off Windows. The version readout at the bottom-left of the window
+shows the result of the last check; click it when it says an update is available.
+
+**This replaced a TUF-verified self-updater.** That one downloaded an installer,
+verified it against metadata signed by keys held for this project, and ran it.
+The cryptography was not the problem — the *capability* was: an unsigned binary
+that downloads and executes something is behaviourally a dropper, which is why
+builds of it kept being quarantined (see *Antivirus* below), and why a second
+installer had to exist with the whole subsystem compiled out. There is one build
+now, no `-noupdate` variant, and no such code in it. The portable zip is still
+the exception: replace the folder to upgrade it.
 
 ## Build
 
@@ -523,15 +569,17 @@ uv run --extra build python tools/build.py
 | Target | Output | Notes |
 | --- | --- | --- |
 | `portable` | `dist/GitAssistant.exe` | Single file, no install, run from anywhere |
-| `installer` | `dist/GitAssistant-<version>-setup.exe` | Per-user NSIS installer |
+| `installer` | `dist/GitAssistant-<version>-user-setup.exe` | Per-user NSIS installer |
+| `installer-machine` | `dist/GitAssistant-<version>-machine-setup.exe` | Program Files, needs admin |
 
 Build just one with `python tools/build.py portable` or `... installer`.
 The installer needs NSIS (`winget install NSIS.NSIS`).
 
 The installer is deliberately **per-user** (`%LOCALAPPDATA%\Programs\GitAssistant`,
-no admin): the app self-updates by replacing the files it runs from, and a
-Program Files install would demand a UAC prompt for every update. It offers a
-desktop shortcut, and the uninstaller asks before removing your settings.
+no admin): it is also the build published on winget, and a Program Files install
+would make every `winget upgrade` raise a UAC prompt from a process the user did
+not start. It offers a desktop shortcut, and the uninstaller asks before removing
+your settings.
 
 ### No automatic startup (and why)
 
@@ -598,13 +646,14 @@ The observed sequence is always the same: a fresh hash builds and sits readable 
 `build/` and `dist/`; installing and running it produces the verdict; the verdict
 then propagates back onto the build-tree copies, so the project stops compiling.
 
-### Per-machine install (no-update build only)
+### Per-machine install
 
-The no-update installer installs to **`%ProgramFiles%\GitAssistant`** and requires
+The `-machine` installer installs to **`%ProgramFiles%\GitAssistant`** and requires
 elevation, where the ordinary one installs per-user without it. A user-writable
-install directory is one of the ingredients these heuristics score, and it only
-exists so the self-updater can replace the files it runs from without a UAC prompt
-— a build with no updater has no such need.
+install directory is one of the ingredients these heuristics score; it was
+originally per-user so the self-updater could replace the files it ran from
+without a UAC prompt, and it stays per-user because that is the build winget
+upgrades.
 
 Consequences: a UAC prompt at install, shortcuts and the uninstall entry become
 machine-wide (`HKLM`), and the finish page no longer offers to launch the app,
@@ -614,16 +663,16 @@ untouched — the app resolves those with `platformdirs` regardless.
 Both installers still clean up the *per-user* autostart leftovers from ≤ 0.3.8,
 since every release that wrote them was a per-user install.
 
-**Code signing is the fix.** The binary is unsigned and self-updating, so its hash
-changes with every release and reputation never accumulates — each build is judged
-on its features alone. Azure Trusted Signing is a per-month option that needs no
+**Code signing is the fix.** The binary is unsigned, so its hash changes with
+every release and reputation never accumulates — each build is judged on its
+features alone. Azure Trusted Signing is a per-month option that needs no
 hardware token. If a build is flagged, report it at
 <https://www.microsoft.com/en-us/wdsi/filesubmission>, which retracts the verdict
 for every user rather than one machine.
 
 The installed build uses PyInstaller's *onedir* layout rather than onefile, so
-startup does not re-extract the whole bundle each launch and the updater can
-replace individual files.
+startup does not re-extract the whole bundle each launch and the installer winget
+runs replaces individual changed files.
 
 The icon is a multi-resolution `.ico` at
 `src/git_assistant/resources/icon.ico`. Regenerate it after changing the artwork

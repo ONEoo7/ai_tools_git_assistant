@@ -6,8 +6,8 @@
 # Onedir (not onefile) because this build is what the NSIS installer ships:
 #   - startup is much faster; a tray app launches with Windows and stays running,
 #     whereas onefile re-extracts the whole bundle to %TEMP% on every launch.
-#   - the self-updater can replace individual changed files instead of swapping
-#     a ~43 MB monolith.
+#   - the installer winget runs replaces individual changed files instead of
+#     swapping a ~43 MB monolith.
 # The onefile spec (git-assistant.spec) is kept for the portable download.
 
 import sys
@@ -26,18 +26,11 @@ REVIEW_RULES = ROOT / "src" / "git_assistant" / "resources" / "review_rules.json
 sys.path.insert(0, str(ROOT / "tools"))
 from win_version_info import read_version, version_resource  # noqa: E402
 
-# The updater is an optional dependency. dist_client wraps a native library via
-# ctypes, which PyInstaller cannot follow - collect_all pulls it in explicitly.
-# Mirrors the same conditional in .github/workflows/release.yml.
-_extra_datas, _extra_binaries, _extra_hidden = [], [], []
-if find_spec("dist_client") is not None:
-    _extra_datas, _extra_binaries, _extra_hidden = collect_all("dist_client")
-
 # Langfuse tracing. OpenTelemetry resolves its exporters and propagators through
 # entry points, which PyInstaller does not follow, so naming the packages as
 # hidden imports is not enough -- collect_all brings the metadata with them.
-# Optional in the same sense `dist_client` is: a checkout without it must still
-# build, and the application already degrades to "not sending traces".
+# Optional: a checkout without it must still build, and the application already
+# degrades to "not sending traces".
 _lf_datas, _lf_binaries, _lf_hidden = [], [], []
 if find_spec("langfuse") is not None:
     for _pkg in ("langfuse", "opentelemetry"):
@@ -49,21 +42,10 @@ if find_spec("langfuse") is not None:
 a = Analysis(
     ["src/git_assistant/__main__.py"],
     pathex=["src"],
-    binaries=[*_extra_binaries, *_lf_binaries],
+    binaries=_lf_binaries,
     datas=[
         (str(ICON), "git_assistant/resources"),
         (str(REVIEW_RULES), "git_assistant/resources"),
-        # TUF trust root: the updater refuses to run without it.
-        (str(ROOT / "src" / "git_assistant" / "updating" / "root.json"),
-         "git_assistant/updating"),
-        # The address this build looks for updates at. Committed, and bundled
-        # here as well as by the release workflow -- a local build that omits
-        # it has an updater with nowhere to look, which is indistinguishable
-        # from a broken one and was omitted here until it was noticed in an
-        # installed build that had no packaged URL at all.
-        (str(ROOT / "src" / "git_assistant" / "updating" / "update_url.txt"),
-         "git_assistant/updating"),
-        *_extra_datas,
         *_lf_datas,
     ],
     # `anthropic` is imported inside a function (git_assistant.claude_client)
@@ -77,7 +59,6 @@ a = Analysis(
         "openpyxl",
         "tiktoken_ext",
         "tiktoken_ext.openai_public",
-        *_extra_hidden,
         *_lf_hidden,
     ],
     hookspath=[],

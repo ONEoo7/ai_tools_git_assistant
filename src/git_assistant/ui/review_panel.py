@@ -1037,8 +1037,13 @@ class ReviewPanel(QWidget):
 
         parts = [run.summary() + "."]
         stored, problem = history.record(run, limit=self.settings.review_history_limit)
-        if problem:
+        if problem and stored is None:
             parts.append(f"(Not saved to history: {problem})")
+        elif problem:
+            # It *is* saved -- the run file is the record, and only the index
+            # that lists it went wrong. Saying "not saved" here would send
+            # someone re-running forty calls they already have on disk.
+            parts.append(f"({problem})")
         self._refresh_history(select=stored)
         self.status.setText(" ".join(parts))
 

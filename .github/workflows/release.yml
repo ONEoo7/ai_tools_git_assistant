@@ -59,114 +59,6 @@ jobs:
       - name: Install dependencies
         run: uv sync --locked --extra build
 
-      # dist-client carries the TUF verifier and is not on an index yet, so it
-      # is injected rather than resolved. Both the URL and the expected digest
-      # live in .github/dist-client.lock -- in the repository, so changing what
-      # verifies every future update is a commit someone reviews rather than a
-      # CI setting someone can flip unseen.
-      #
-      # Without the file the build proceeds with no updater. That is a real
-      # difference in what ships, so it goes in the job summary rather than
-      # passing unnoticed.
-      - name: Install the update verifier
-        id: updater
-        run: |
-          $lock = ".github/dist-client.lock"
-          if (-not (Test-Path $lock)) {
-            "present=false" >> $env:GITHUB_OUTPUT
-            $msg = "No $lock - this build ships WITHOUT self-update."
-            Write-Warning $msg
-            "### Self-update: not included`n`n$msg" >> $env:GITHUB_STEP_SUMMARY
-            exit 0
-          }
-
-          $config = @{}
-          foreach ($line in Get-Content $lock) {
-            if ($line -match '^\s*([a-z0-9]+)\s*=\s*(\S+)\s*$') {
-              $config[$Matches[1]] = $Matches[2]
-            }
-          }
-          foreach ($key in @("url", "sha256")) {
-            if (-not $config.ContainsKey($key)) { throw "$lock has no '$key'" }
-          }
-
-          # Keep the published filename: a wheel must be named
-          # <name>-<version>-<tags>.whl or pip refuses to install it, and
-          # renaming it to something tidy like dist_client.whl fails with an
-          # error about the version that says nothing about the rename.
-          $name = Split-Path -Leaf ([uri]$config.url).AbsolutePath
-          Invoke-WebRequest -Uri $config.url -OutFile $name
-
-          $actual = (Get-FileHash $name -Algorithm SHA256).Hash.ToLower()
-          if ($actual -ne $config.sha256.ToLower()) {
-            throw "verifier wheel digest mismatch`nexpected $($config.sha256)`ngot      $actual"
-          }
-
-          uv pip install $name
-          "present=true" >> $env:GITHUB_OUTPUT
-          "### Self-update: included`n`n``$name```n`nSHA-256 ``$actual`` (matches the pin)" >> $env:GITHUB_STEP_SUMMARY
-
-      # The trusted root must exist before the build, or the packaged
-      # application has an updater that trusts nothing.
-      - name: Check the trusted root is present
-        if: steps.updater.outputs.present == 'true'
-        run: |
-          if (-not (Test-Path "src/git_assistant/updating/root.json")) {
-            throw "root.json is missing; see src/git_assistant/updating/README.md"
-          }
-
-      # An installed desktop application never sees a shell's environment: it
-      # is launched from the Start Menu and inherits the *user* environment, so
-      # configuring this through an environment variable reached a checkout,
-      # where self-update is refused, and reached nothing else. Writing the
-      # address into the build is what makes a fresh install work with no
-      # configuration at all.
-      #
-      # Users override it in `update.json` beside their settings, so a service
-      # that goes down does not strand every installation.
-      #
-      # The address is COMMITTED, in `update_url.txt`, so every build carries
-      # one by construction. It used to come only from a repository variable,
-      # and an unset variable shipped a build with no updater at all — which is
-      # exactly what happened, twice, and looked from the outside like the
-      # feature being broken rather than unconfigured.
-      #
-      # `vars.UPDATE_URL` still overrides it, for a fork or a staging pipeline
-      # that publishes somewhere else. It is a variable rather than a secret:
-      # it is a URL, it is readable in any packaged build, and hiding it would
-      # only hide it from whoever reviews this workflow.
-      #
-      # Missing entirely is now a build failure. Shipping an application whose
-      # updater silently does nothing is worse than not shipping.
-      - name: Set the update service address
-        if: steps.updater.outputs.present == 'true'
-        run: |
-          $file = "src/git_assistant/updating/update_url.txt"
-          $override = "${{ vars.UPDATE_URL }}".Trim()
-
-          if ($override) {
-            $url = $override
-            $source = "UPDATE_URL repository variable"
-          } elseif (Test-Path $file) {
-            $url = (Get-Content $file -Raw).Trim()
-            $source = "$file (committed)"
-          } else {
-            throw "no update service address: $file is missing and UPDATE_URL is unset"
-          }
-
-          if ($url -notmatch '^https?://') {
-            throw "the update address must start with http:// or https://, got '$url' from $source"
-          }
-          # The repository root, not its metadata directory. Getting this wrong
-          # produces 404s on every metadata fetch and an error that talks about
-          # timestamp.json rather than about the URL.
-          if ($url -match '/metadata/?$') {
-            throw "the update address is the repository root, not its metadata directory: '$url'"
-          }
-
-          $url | Set-Content -Path $file -NoNewline -Encoding utf8
-          "### Update service`n`n``$url```n`nfrom $source" >> $env:GITHUB_STEP_SUMMARY
-
       # --onedir, not --onefile: a onefile build unpacks to %TEMP% on every
       # launch, which defeats both A/B slot installs and Authenticode pinning of
       # the files actually executed.
@@ -174,57 +66,35 @@ jobs:
       # --add-data is separate from --icon and both are needed: --icon sets the
       # executable's shell icon, while the tray loads icon.ico at runtime.
       #
-      # --collect-all dist_client pulls in the verifier library that travels
-      # inside that wheel. PyInstaller does not follow a ctypes load, so
-      # without it the packaged application would import dist_client and then
-      # fail to find the library it wraps.
-      # Built from the spec, like the variant below it. A command line can only
+      # Built from the spec, not a command line. A command line can only
       # produce one executable, and this build needs two: the tray application
       # and the console MCP server a client starts over stdio. It was also a
-      # fourth place that had to agree with the specs about what ships, and did
-      # not. The spec picks up dist_client conditionally through find_spec and
-      # bundles the update metadata itself, so nothing here has to.
+      # place that had to agree with the specs about what ships, and did not.
+      #
+      # ONE bundle now. There used to be a second with the self-updater left
+      # out, because a build that downloads and runs an installer is what
+      # endpoint protection reacts to. Updating goes through winget, so there
+      # is no such code to leave out. See git_assistant.updating.
       - name: Build
         run: uv run pyinstaller --noconfirm git-assistant-onedir.spec
 
-      # The second variant: the same application with the self-updater left out
-      # of the bundle entirely. It is what both the portable zip and the
-      # per-machine installer are cut from.
+      # The portable zip: the same bundle as the installers, unzipped anywhere.
       #
-      # Built from the spec rather than a command line like the step above,
-      # because what has to be excluded (git_assistant.updating, the
-      # update_prompt module, dist_client) and what must NOT be (httpx, which
-      # lmstudio_client needs and which an earlier attempt dropped, producing a
-      # build that died on launch) is expressed there and covered by tests.
+      # An unzipped copy still reports `sys.frozen`, so it passes the "is this
+      # installed" check -- but `winget upgrade` on a folder winget never
+      # installed does nothing, and `winget install` would put a *second*,
+      # installed copy under %LOCALAPPDATA% while the folder actually being run
+      # sat unchanged and stale. So portable means portable: unzip it, run it,
+      # replace the folder to upgrade. Nothing writes outside it except the
+      # settings every variant keeps in %LOCALAPPDATA%\git-assistant.
       #
-      # Its own dist directory, so neither installer can package the other's
-      # build.
-      - name: Build the no-update variant
-        run: uv run pyinstaller --noconfirm git-assistant-onedir-noupdate.spec
-
-      # The portable zip is cut from the no-update build, not the one above.
-      #
-      # Self-update in a portable build was always wrong: `is_installed()` is
-      # just `sys.frozen`, so an unzipped copy passed the check, and updating
-      # means downloading and running an *installer*. A user who unpacked the
-      # zip somewhere and accepted an update would get a second, installed copy
-      # under %LOCALAPPDATA% while the folder they were actually running from
-      # sat unchanged and stale.
-      #
-      # Portable therefore means portable: unzip it, run it, replace the folder
-      # to upgrade. Nothing writes outside it except the settings every variant
-      # keeps in %LOCALAPPDATA%\git-assistant.
-      #
-      # Named for what it contains. There is only one zip, so the suffix
-      # disambiguates nothing today -- but a filename outlives the release notes
-      # that explain it, ending up in scripts and bookmarks stripped of context,
-      # and "the portable one" is not a safe thing to have to remember about a
-      # build that cannot update itself.
+      # The `-noupdate` suffix this file used to carry is gone with the build
+      # variant it named.
       - name: Package
         id: pkg
         run: |
-          $name = "git-assistant-${{ steps.v.outputs.version }}-noupdate-windows-x64.zip"
-          uv run python -m zipfile -c $name dist/GitAssistant-noupdate/
+          $name = "git-assistant-${{ steps.v.outputs.version }}-windows-x64.zip"
+          uv run python -m zipfile -c $name dist/GitAssistant/
           $sha = (Get-FileHash $name -Algorithm SHA256).Hash.ToLower()
           "name=$name" >> $env:GITHUB_OUTPUT
           "sha256=$sha" >> $env:GITHUB_OUTPUT
@@ -354,26 +224,23 @@ jobs:
       # The .nsi path must be ABSOLUTE. Given a relative one, NSIS resolves
       # ${__FILEDIR__} to <cwd>\installer\installer -- the script's own
       # directory appended twice -- and the LICENSE and icon lookups fail.
-      # Four installers from two bundles. The axes are independent: whether the
-      # self-updater is in the bundle (which bundle) and where it installs
-      # (a define on the same .nsi).
+      # Two installers from one bundle, differing only in where they install:
       #
       #   -user     %LOCALAPPDATA%\Programs, no UAC prompt
       #   -machine  Program Files, requires elevation
       #
-      # Both halves are named explicitly. Leaving either implicit is how
-      # "noupdate" came to mean "and also per-machine" by coincidence rather
-      # than by name.
+      # There were four, because a second bundle existed with the self-updater
+      # compiled out. Updating is winget's job now and no build contains an
+      # updater to leave out, so the axis is gone along with the two filenames
+      # that only ever differed by it.
       - name: Build the installers
         id: inst
         run: |
           $version = "${{ steps.v.outputs.version }}"
           $root = $PWD.Path
           $variants = @(
-            @{ key = "user";           dir = "dist\GitAssistant";            exe = "GitAssistant.exe";  machine = $false },
-            @{ key = "machine";        dir = "dist\GitAssistant";            exe = "GitAssistant.exe";  machine = $true  },
-            @{ key = "noupdate-user";  dir = "dist\GitAssistant-noupdate";   exe = "GitAssistant.exe";  machine = $false },
-            @{ key = "noupdate-machine"; dir = "dist\GitAssistant-noupdate"; exe = "GitAssistant.exe";  machine = $true  }
+            @{ key = "user";    dir = "dist\GitAssistant"; exe = "GitAssistant.exe"; machine = $false },
+            @{ key = "machine"; dir = "dist\GitAssistant"; exe = "GitAssistant.exe"; machine = $true  }
           )
 
           foreach ($v in $variants) {
@@ -390,10 +257,10 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw "makensis failed with $LASTEXITCODE for $($v.key)" }
             if (-not (Test-Path $name)) { throw "installer was not produced: $name" }
 
-            # Underscores in the output key: `steps.inst.outputs.noupdate-user`
-            # is parsed as a subtraction by the Actions expression language, so
-            # a hyphen here yields an empty string at the point of use rather
-            # than an error anywhere near this line.
+            # Underscores in the output key: a hyphen is parsed as a
+            # subtraction by the Actions expression language, so it would yield
+            # an empty string at the point of use rather than an error anywhere
+            # near this line.
             $out = $v.key -replace '-', '_'
             $sha = (Get-FileHash $name -Algorithm SHA256).Hash.ToLower()
             "${out}_name=$name" >> $env:GITHUB_OUTPUT
@@ -413,8 +280,6 @@ jobs:
             ${{ steps.pkg.outputs.name }}
             ${{ steps.inst.outputs.user_name }}
             ${{ steps.inst.outputs.machine_name }}
-            ${{ steps.inst.outputs.noupdate_user_name }}
-            ${{ steps.inst.outputs.noupdate_machine_name }}
 
       # gh is preinstalled on the runner. Using it rather than a release action
       # keeps one less third-party dependency in the path that produces the
@@ -428,28 +293,30 @@ jobs:
           $notes = @'
           Automated build.
 
-          | Download | Installs to | Admin | Self-update | SHA-256 |
+          | Download | Installs to | Admin | Updates | SHA-256 |
           | --- | --- | --- | --- | --- |
-          | `${{ steps.inst.outputs.user_name }}` | `%LOCALAPPDATA%` | no | yes | `${{ steps.inst.outputs.user_sha256 }}` |
-          | `${{ steps.inst.outputs.machine_name }}` | `Program Files` | yes | yes* | `${{ steps.inst.outputs.machine_sha256 }}` |
-          | `${{ steps.inst.outputs.noupdate_user_name }}` | `%LOCALAPPDATA%` | no | no | `${{ steps.inst.outputs.noupdate_user_sha256 }}` |
-          | `${{ steps.inst.outputs.noupdate_machine_name }}` | `Program Files` | yes | no | `${{ steps.inst.outputs.noupdate_machine_sha256 }}` |
-          | `${{ steps.pkg.outputs.name }}` (portable zip) | anywhere | no | no | `${{ steps.pkg.outputs.sha256 }}` |
+          | `${{ steps.inst.outputs.user_name }}` | `%LOCALAPPDATA%` | no | winget | `${{ steps.inst.outputs.user_sha256 }}` |
+          | `${{ steps.inst.outputs.machine_name }}` | `Program Files` | yes | winget* | `${{ steps.inst.outputs.machine_sha256 }}` |
+          | `${{ steps.pkg.outputs.name }}` (portable zip) | anywhere | no | replace the folder | `${{ steps.pkg.outputs.sha256 }}` |
 
           **Which download?**
 
           - `-user` installs for you alone and never prompts for admin.
           - `-machine` installs to `Program Files` for everyone, and asks for admin once
             at install time.
-          - `-noupdate` builds contain no self-updater at all — not a disabled one, the
-            code is absent — so they cannot download or run anything. Upgrade by
-            installing a newer version over the old one.
-          - The **portable zip** is the no-update build: unzip anywhere, run
-            `GitAssistant.exe`, replace the folder to upgrade.
+          - The **portable zip**: unzip anywhere, run `GitAssistant.exe`, replace the
+            folder to upgrade.
 
-          \* A `-machine` install shows a UAC prompt for **each** update, and follows a
-          separate update channel so that it is offered a `-machine` installer rather
-          than a per-user one. If that channel is not published, it finds no updates.
+          **Updating.** Git Assistant no longer updates itself. It asks winget every
+          five minutes whether a newer `StefanGhitescu.GitAssistant` is published, and
+          on your say-so runs `winget upgrade` — so what lands on disk is fetched and
+          hash-checked by the Windows Package Manager, not by this application. The
+          previous releases carried a TUF-verified self-updater and a second build with
+          it compiled out; there is one build now, and no code in it that downloads or
+          executes a release.
+
+          \* A `-machine` install needs elevation to replace `Program Files`, so winget
+          raises a UAC prompt when it runs the installer.
 
           Nothing here starts Git Assistant automatically at sign-in, and no installer
           launches the application when it finishes.
@@ -457,8 +324,6 @@ jobs:
           gh release create "${{ github.ref_name }}" `
             "${{ steps.inst.outputs.user_name }}" `
             "${{ steps.inst.outputs.machine_name }}" `
-            "${{ steps.inst.outputs.noupdate_user_name }}" `
-            "${{ steps.inst.outputs.noupdate_machine_name }}" `
             "${{ steps.pkg.outputs.name }}" `
             --title "${{ github.ref_name }}" `
             --notes $notes
@@ -496,32 +361,28 @@ jobs:
             "### winget: not submitted`n`n$msg" >> $env:GITHUB_STEP_SUMMARY
           }
 
-      # Submits the -noupdate-USER installer and NOTHING else.
-      #
-      # winget owns upgrades for anything it installed. Publishing the
-      # self-updating build here would put two update mechanisms on one machine:
-      # the application replaces itself, the manifest goes on asserting the
-      # version it shipped, and `winget upgrade` then reinstalls over a newer
-      # build. A -machine install would also raise a UAC prompt per update, from
-      # a process the user did not start.
+      # Submits the per-USER installer and NOTHING else.
       #
       # Exactly ONE installer, deliberately. Two nullsoft installers of the same
       # Architecture are duplicates to winget-pkgs validation unless each
       # declares a `Scope`, and this action generates manifests from the release
-      # assets rather than inventing that field. The published 0.3.16 manifest
-      # carries the single per-user installer and no Scope, so matching both
-      # here would produce the first auto-submitted version that fails
-      # validation -- on a release that had already shipped.
+      # assets rather than inventing that field. The published manifest carries
+      # the single per-user installer and no Scope, so matching both here would
+      # produce the first auto-submitted version that fails validation -- on a
+      # release that had already shipped.
+      #
+      # Per-user rather than per-machine for a second reason: this is the
+      # package the application's own update check upgrades, and a per-machine
+      # install raises a UAC prompt from a process the user did not start.
       #
       # To offer both scopes later: hand-edit a version's installer manifest to
       # add `Scope: user` and `Scope: machine`, get it merged, then widen this
-      # regex to `noupdate-(user|machine)-windows-x64-setup\.exe$` so the
-      # generated manifests have a base that already distinguishes them.
+      # regex to `(user|machine)-windows-x64-setup\.exe$` so the generated
+      # manifests have a base that already distinguishes them.
       #
-      # The regex matches the whole suffix rather than just "noupdate", so the
-      # portable zip (`-noupdate-windows-x64.zip`), the per-machine build and
-      # both self-updating installers are excluded by construction -- not by the
-      # default regex happening not to reach them.
+      # The regex matches the whole suffix rather than just "user", so the
+      # portable zip and the per-machine installer are excluded by construction
+      # -- not by the default regex happening not to reach them.
       #
       # Pinned by commit, like every other third-party action here, and more
       # sharply than most: `v2` is a lightweight tag pointing at `main`, so it
@@ -541,7 +402,7 @@ jobs:
           identifier: StefanGhitescu.GitAssistant
           version: ${{ steps.v.outputs.version }}
           release-tag: ${{ github.ref_name }}
-          installers-regex: 'noupdate-user-windows-x64-setup\.exe$'
+          installers-regex: '-user-windows-x64-setup\.exe$'
           release-notes-url: https://github.com/${{ github.repository }}/releases/tag/${{ github.ref_name }}
           token: ${{ secrets.WINGET_TOKEN }}
 

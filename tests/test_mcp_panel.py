@@ -1,5 +1,6 @@
 """The MCP Server tab, and the property that the server path never loads Qt."""
 
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -47,10 +48,12 @@ def qapp():
 def settings(tmp_path, monkeypatch):
     s = Settings()
     s.save = lambda: None  # never touch the real config file
-    # Never the developer's real Claude Desktop config, either.
+    # Never a real client's config, either: the tab reads all of them.
     monkeypatch.setattr(
         clients, "desktop_config_path", lambda: tmp_path / "claude_desktop_config.json"
     )
+    monkeypatch.setattr(clients, "antigravity_config_path", lambda: tmp_path / "mcp_config.json")
+    monkeypatch.setattr(clients, "vscode_config_path", lambda: tmp_path / "mcp.json")
     return s
 
 
@@ -104,6 +107,34 @@ def test_write_tools_are_shown_as_unavailable_until_enabled(qapp, settings):
 def test_the_scope_defaults_to_every_project(qapp, settings):
     panel = McpPanel(settings)
     assert panel.scope_combo.currentText() == clients.DEFAULT_SCOPE
+
+
+def test_every_file_backed_client_gets_a_row(qapp, settings):
+    panel = McpPanel(settings)
+    labels = [client.label for client, *_ in panel._json_rows]
+    assert labels == [c.label for c in clients.JSON_CLIENTS]
+    assert "Antigravity" in labels
+    assert "VS Code (GitHub Copilot)" in labels
+
+
+def test_a_client_with_nothing_registered_cannot_be_removed(qapp, settings):
+    panel = McpPanel(settings)
+    assert all(not remove.isEnabled() for *_, remove in panel._json_rows)
+
+
+def test_registering_a_client_from_its_own_row(qapp, settings, monkeypatch):
+    from PyQt6.QtWidgets import QMessageBox
+
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes)
+    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: None)
+    panel = McpPanel(settings)
+    row = next(r for r in panel._json_rows if r[0] is clients.VSCODE)
+
+    row[2].click()
+
+    written = json.loads(clients.vscode_config_path().read_text(encoding="utf-8"))
+    assert written["servers"]["git-assistant"]["type"] == "stdio"
+    assert row[3].isEnabled()  # and Remove is now the thing to do
 
 
 def test_building_the_tab_asks_claude_code_nothing(qapp, settings, monkeypatch):

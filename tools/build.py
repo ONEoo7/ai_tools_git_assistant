@@ -3,9 +3,9 @@
     uv run --extra build python tools/build.py            # portable + installed
     uv run --extra build python tools/build.py portable   # dist/GitAssistant.exe
     uv run --extra build python tools/build.py installer  # dist/GitAssistant-<v>-setup.exe
-    uv run --extra build python tools/build.py installer-noupdate
-                                    # dist/GitAssistant-<v>-noupdate-setup.exe
-                                    # same app with the self-updater left out
+    uv run --extra build python tools/build.py installer-machine
+                                    # dist/GitAssistant-<v>-machine-setup.exe
+                                    # same app, Program Files instead of %LOCALAPPDATA%
 
 The version is read from ``src/git_assistant/__init__.py`` and passed to NSIS,
 so the installer can never disagree with what the running app reports.
@@ -135,29 +135,21 @@ def build_portable() -> None:
     print(f"           + {DIST / 'GitAssistantMcp.exe'}")
 
 
-def build_installer(
-    version: str, *, updater: bool = True, permachine: bool = False
-) -> None:
+def build_installer(version: str, *, permachine: bool = False) -> None:
     """Onedir build wrapped in an NSIS installer.
 
-    Two independent axes:
-
-    ``updater``     whether the self-updater is in the bundle at all (a
-                    separate spec, not a setting -- the point is that the
-                    capability is absent).
-    ``permachine``  Program Files and elevation, versus %LOCALAPPDATA% and no
-                    UAC prompt.
-
-    They are independent, but not equally sensible in every combination: a
-    self-updating per-machine install needs a UAC prompt for each update, and
-    must be served a per-machine installer to update *into* -- see
-    ``default_channel`` in the updater.
+    One axis now: ``permachine`` picks Program Files and elevation over
+    %LOCALAPPDATA% and no UAC prompt. There used to be a second -- whether the
+    self-updater was in the bundle at all -- because a build that could
+    download and execute an installer was what endpoint protection reacted to,
+    and no setting answers that question, only the code's absence. Updating
+    goes through winget now, so there is nothing to leave out and one build
+    serves both audiences. See git_assistant.updating.
     """
-    spec = "git-assistant-onedir.spec" if updater else "git-assistant-onedir-noupdate.spec"
-    payload = DIST / ("GitAssistant" if updater else "GitAssistant-noupdate")
-    suffix = ("" if updater else "-noupdate") + ("-machine" if permachine else "-user")
+    payload = DIST / "GitAssistant"
+    suffix = "-machine" if permachine else "-user"
 
-    pyinstaller(spec)
+    pyinstaller("git-assistant-onedir.spec")
 
     # Sign the application before NSIS packages it, then sign the installer
     # afterwards. Both matter and for different reasons: the installer is what
@@ -195,13 +187,11 @@ def build_installer(
     print(f"installer -> {installer}")
 
 
-#: target -> (updater, permachine). "installer" keeps its old meaning so an
-#: existing habit still builds the ordinary per-user, self-updating one.
+#: target -> permachine. "installer" keeps its old meaning so an existing habit
+#: still builds the ordinary per-user one.
 INSTALLERS = {
-    "installer": (True, False),
-    "installer-machine": (True, True),
-    "installer-noupdate": (False, True),
-    "installer-noupdate-user": (False, False),
+    "installer": False,
+    "installer-machine": True,
 }
 TARGETS = ("all", "portable", *INSTALLERS)
 
@@ -217,13 +207,12 @@ def main(argv: list[str]) -> int:
     if target in ("all", "portable"):
         build_portable()
     if target in ("all", "installer"):
-        build_installer(version, updater=True, permachine=False)
-    # The variants are not part of "all": each is a deliberate alternative, and
-    # building them by default would put four installers of the same version in
+        build_installer(version, permachine=False)
+    # The variant is not part of "all": it is a deliberate alternative, and
+    # building it by default would put two installers of the same version in
     # dist/ for anyone who only wanted the ordinary one.
     if target in INSTALLERS and target != "installer":
-        updater, permachine = INSTALLERS[target]
-        build_installer(version, updater=updater, permachine=permachine)
+        build_installer(version, permachine=INSTALLERS[target])
     return 0
 
 

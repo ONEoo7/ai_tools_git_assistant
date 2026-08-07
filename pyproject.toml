@@ -36,19 +36,10 @@ dev = [
 build = [
     "pyinstaller>=6.0",
 ]
-# Note: self-update needs `dist-client`, which is deliberately NOT declared
-# here. It is not published to an index yet, so declaring it — with or without
-# a path source — makes `uv sync` fail for anyone without the distribution
-# platform checked out beside this repository, including CI.
-#
-# It is installed explicitly instead, from a wheel that carries the compiled
-# TUF verifier inside it:
-#
-#     uv pip install dist_client-<version>-py3-none-<platform>.whl
-#
-# Without it the application has no updater and says so; `UpdateConfig.enabled`
-# checks for it. There is no path that falls back to fetching updates without
-# verifying them. Move this to a real dependency once dist-client is published.
+# Note: updating has no dependency to declare. It shells out to winget, which
+# is part of Windows, and this used to be where `dist-client` — a wheel
+# carrying a compiled TUF verifier, injected in CI because it is on no index —
+# had to be explained. See git_assistant.updating.
 
 [build-system]
 requires = ["hatchling"]

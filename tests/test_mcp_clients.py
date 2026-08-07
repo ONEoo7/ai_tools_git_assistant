@@ -30,6 +30,15 @@ def config(tmp_path, monkeypatch):
     return path
 
 
+@pytest.fixture
+def home(tmp_path, monkeypatch):
+    """A home directory of our own: these clients all live under the real one."""
+    monkeypatch.setattr(clients.Path, "home", classmethod(lambda cls: tmp_path))
+    monkeypatch.setenv("APPDATA", str(tmp_path / "AppData" / "Roaming"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / ".config"))
+    return tmp_path
+
+
 class Runner:
     """The claude CLI, recorded rather than run."""
 
@@ -121,6 +130,126 @@ def test_status_notices_a_command_that_no_longer_matches(config):
 
 def test_removing_when_nothing_is_registered_says_so(config):
     assert "was not registered" in clients.unregister_desktop()
+
+
+# ---- Antigravity -------------------------------------------------------------------
+def test_antigravity_writes_where_the_ide_and_cli_both_read(home):
+    clients.register_json(clients.ANTIGRAVITY, COMMAND)
+
+    path = home / ".gemini" / "config" / "mcp_config.json"
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert data["mcpServers"][SERVER_NAME] == {"command": COMMAND[0], "args": ["--mcp"]}
+
+
+def test_antigravity_keeps_using_the_older_file_when_that_is_the_one_there(home):
+    """Moving someone's servers to the 2.0 path would unregister the lot."""
+    legacy = home / ".gemini" / "antigravity" / "mcp_config.json"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text(json.dumps({"mcpServers": {"other": {"command": "x"}}}), "utf-8")
+
+    clients.register_json(clients.ANTIGRAVITY, COMMAND)
+
+    data = json.loads(legacy.read_text(encoding="utf-8"))
+    assert data["mcpServers"]["other"] == {"command": "x"}
+    assert data["mcpServers"][SERVER_NAME]["command"] == COMMAND[0]
+    assert not (home / ".gemini" / "config" / "mcp_config.json").exists()
+
+
+def test_removing_from_antigravity_leaves_the_other_servers(home):
+    path = home / ".gemini" / "config" / "mcp_config.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({"mcpServers": {"other": {"command": "x"}}}), "utf-8")
+    clients.register_json(clients.ANTIGRAVITY, COMMAND)
+
+    clients.unregister_json(clients.ANTIGRAVITY)
+
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert data["mcpServers"] == {"other": {"command": "x"}}
+
+
+# ---- VS Code (GitHub Copilot) --------------------------------------------------------
+def test_vscode_gets_its_own_shape_not_the_claude_one(home, monkeypatch):
+    monkeypatch.setattr(clients.sys, "platform", "win32")
+
+    clients.register_json(clients.VSCODE, [*COMMAND, "--allow-writes"])
+
+    path = home / "AppData" / "Roaming" / "Code" / "User" / "mcp.json"
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert "mcpServers" not in data  # VS Code reads `servers`, and only that
+    assert data["servers"][SERVER_NAME] == {
+        "type": "stdio",  # without this VS Code will not start it
+        "command": COMMAND[0],
+        "args": ["--mcp", "--allow-writes"],
+    }
+
+
+def test_vscode_registration_leaves_inputs_and_other_servers_alone(home, monkeypatch):
+    monkeypatch.setattr(clients.sys, "platform", "win32")
+    path = home / "AppData" / "Roaming" / "Code" / "User" / "mcp.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        json.dumps({"inputs": [{"id": "token"}], "servers": {"other": {"command": "x"}}}),
+        encoding="utf-8",
+    )
+
+    clients.register_json(clients.VSCODE, COMMAND)
+
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert data["inputs"] == [{"id": "token"}]
+    assert data["servers"]["other"] == {"command": "x"}
+
+
+def test_vscode_uses_insiders_when_that_is_the_one_installed(home, monkeypatch):
+    monkeypatch.setattr(clients.sys, "platform", "win32")
+    insiders = home / "AppData" / "Roaming" / "Code - Insiders" / "User" / "mcp.json"
+    insiders.parent.mkdir(parents=True)
+    insiders.write_text("{}", encoding="utf-8")
+
+    assert clients.vscode_config_path() == insiders
+
+
+def test_vscode_status_reads_the_command_back_out_of_its_own_shape(home, monkeypatch):
+    monkeypatch.setattr(clients.sys, "platform", "win32")
+    assert clients.json_status(clients.VSCODE, COMMAND).present is False
+
+    clients.register_json(clients.VSCODE, COMMAND)
+    status = clients.json_status(clients.VSCODE, COMMAND)
+
+    assert status.present is True
+    assert "read-only" in status.describe(COMMAND)
+
+
+# ---- every file-backed client ---------------------------------------------------------
+@pytest.mark.parametrize("client", clients.JSON_CLIENTS, ids=lambda c: c.label)
+def test_no_client_is_registered_without_saying_what_to_do_next(client, home):
+    """A registration nobody restarts for looks exactly like one that failed."""
+    assert client.restart
+    assert client.restart in clients.register_json(client, COMMAND)
+
+
+@pytest.mark.parametrize("client", clients.JSON_CLIENTS, ids=lambda c: c.label)
+def test_an_empty_file_is_written_into_rather_than_refused(client, home):
+    """Antigravity ships this file empty, which is not the same as damaged."""
+    path = client.path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("", encoding="utf-8")
+
+    clients.register_json(client, COMMAND)
+
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert data[client.key][SERVER_NAME]["command"] == COMMAND[0]
+
+
+@pytest.mark.parametrize("client", clients.JSON_CLIENTS, ids=lambda c: c.label)
+def test_a_file_that_will_not_parse_is_refused_for_every_client(client, home):
+    path = client.path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("{ not json", encoding="utf-8")
+
+    with pytest.raises(clients.ClientError, match="not valid JSON"):
+        clients.register_json(client, COMMAND)
+
+    assert path.read_text(encoding="utf-8") == "{ not json"
 
 
 # ---- Claude Code -------------------------------------------------------------------

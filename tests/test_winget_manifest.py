@@ -79,12 +79,17 @@ def test_the_three_manifests_declare_their_own_types():
 
 
 # ---- what is published, and what is deliberately not -------------------------------
-def test_only_the_per_user_build_without_the_updater_is_published():
-    """winget owns upgrades for what it installed. Publishing the self-updating
-    build would put two update mechanisms on one machine."""
+def test_only_the_per_user_installer_is_published():
+    """One installer, and the per-user one.
+
+    Two nullsoft installers of one architecture are duplicates to validation
+    unless each declares a scope, and this is the package the application's own
+    update check upgrades -- per-machine would raise a UAC prompt from a
+    process the user did not start.
+    """
     url = _read(INSTALLER)
-    assert "noupdate-user" in url
-    for excluded in ("noupdate-machine", "-machine-", ".zip"):
+    assert "-user-windows-x64-setup.exe" in url
+    for excluded in ("-machine-", ".zip", "noupdate"):
         assert excluded not in url
 
 
@@ -92,8 +97,8 @@ def test_the_installer_url_matches_the_regex_the_workflow_submits():
     """The workflow picks the asset by regex; a manifest naming a different one
     would be replaced by that asset on the next automatic release."""
     workflow = _read(ROOT / ".github" / "workflows" / "release.yml")
-    assert "noupdate-user-windows-x64-setup\\.exe$" in workflow
-    assert "noupdate-user-windows-x64-setup.exe" in _read(INSTALLER)
+    assert "-user-windows-x64-setup\\.exe$" in workflow
+    assert "-user-windows-x64-setup.exe" in _read(INSTALLER)
 
 
 def test_the_identifier_matches_the_one_the_workflow_submits():

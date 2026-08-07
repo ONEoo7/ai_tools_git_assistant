@@ -19,17 +19,11 @@ REVIEW_RULES = ROOT / "src" / "git_assistant" / "resources" / "review_rules.json
 sys.path.insert(0, str(ROOT / "tools"))
 from win_version_info import read_version, version_resource  # noqa: E402
 
-# Optional updater: dist_client loads a native library via ctypes, which
-# PyInstaller cannot follow. Mirrors .github/workflows/release.yml.
-_extra_datas, _extra_binaries, _extra_hidden = [], [], []
-if find_spec("dist_client") is not None:
-    _extra_datas, _extra_binaries, _extra_hidden = collect_all("dist_client")
-
 # Langfuse tracing. OpenTelemetry resolves its exporters and propagators through
 # entry points, which PyInstaller does not follow, so naming the packages as
 # hidden imports is not enough -- collect_all brings the metadata with them.
-# Optional in the same sense `dist_client` is: a checkout without it must still
-# build, and the application already degrades to "not sending traces".
+# Optional: a checkout without it must still build, and the application already
+# degrades to "not sending traces".
 _lf_datas, _lf_binaries, _lf_hidden = [], [], []
 if find_spec("langfuse") is not None:
     for _pkg in ("langfuse", "opentelemetry"):
@@ -41,20 +35,11 @@ if find_spec("langfuse") is not None:
 a = Analysis(
     ["src/git_assistant/__main__.py"],
     pathex=["src"],
-    binaries=[*_extra_binaries, *_lf_binaries],
+    binaries=_lf_binaries,
     datas=[
         # Ship the .ico so the tray/window icon resolves at runtime.
         (str(ICON), "git_assistant/resources"),
         (str(REVIEW_RULES), "git_assistant/resources"),
-        # TUF trust root: the updater refuses to run without it.
-        (str(ROOT / "src" / "git_assistant" / "updating" / "root.json"),
-         "git_assistant/updating"),
-        # Where this build looks for updates. Bundled here as well as by the
-        # onedir spec and the release workflow: three build paths that have to
-        # agree about what ships, and did not.
-        (str(ROOT / "src" / "git_assistant" / "updating" / "update_url.txt"),
-         "git_assistant/updating"),
-        *_extra_datas,
         *_lf_datas,
     ],
     # `anthropic` is imported inside a function (git_assistant.claude_client)
@@ -68,7 +53,6 @@ a = Analysis(
         "openpyxl",
         "tiktoken_ext",
         "tiktoken_ext.openai_public",
-        *_extra_hidden,
         *_lf_hidden,
     ],
     hookspath=[],

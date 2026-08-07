@@ -1,5 +1,8 @@
 """Recorded reviews: kept, listed, and still readable much later."""
 
+import os
+import time
+
 import pytest
 
 from git_assistant.agents import history as agent_history
@@ -155,6 +158,135 @@ def test_a_limit_of_zero_keeps_everything():
     for day in range(1, 6):
         history.record(_run(when=f"2026-08-0{day}T10:00:00Z"), limit=0)
     assert len(history.list_runs("/x/demo")) == 5
+
+
+# ---- a scanner holding the index open ----------------------------------------------------
+# On Windows `os.replace` fails with "Access is denied" while any other process
+# has the destination open, and an antivirus or the search indexer reading a
+# file written milliseconds ago does exactly that. Measured at roughly 0.75% of
+# writes on one machine -- which surfaced as this file's retention test failing
+# about one run in twenty-five, and never as anything anyone noticed in the app.
+
+
+@pytest.fixture
+def no_waiting(monkeypatch):
+    """Skip the backoff so a give-up path costs no wall-clock time.
+
+    Patched on the `time` module rather than through `history`, so the fixture
+    does not itself depend on the retry existing -- otherwise these tests error
+    on setup against a version without it instead of failing on behaviour,
+    which is the difference between a regression test and a decoration.
+    """
+    monkeypatch.setattr(time, "sleep", lambda _seconds: None)
+
+
+class Sticky:
+    """An `os.replace` that denies the first `failures` calls.
+
+    Holds the real one: `history.os` is the same module object as this file's
+    `os`, so patching it and then calling `os.replace` here recurses forever.
+    """
+
+    def __init__(self, failures: int):
+        self.failures = failures
+        self.calls = 0
+        self._real = os.replace
+
+    def __call__(self, src, dst):
+        self.calls += 1
+        if self.calls <= self.failures:
+            raise PermissionError(13, "Access is denied")
+        return self._real(src, dst)
+
+
+def test_a_scanner_holding_the_index_is_waited_out(monkeypatch, no_waiting):
+    """The common case: it clears in milliseconds, so the review is not lost."""
+    replace = Sticky(failures=2)
+    monkeypatch.setattr(history.os, "replace", replace)
+
+    stored, problem = history.record(_run())
+
+    assert problem == ""
+    assert stored is not None
+    assert replace.calls == 3  # two denials, then through
+    assert len(history.list_runs("/x/demo")) == 1
+
+
+def test_a_review_that_reached_the_disk_is_never_reported_as_lost(monkeypatch, no_waiting):
+    """The run file is the record; the index is a cache derived from it.
+
+    Reporting "not saved" for a review that is sitting on disk sends someone to
+    re-run forty model calls they already have.
+    """
+    monkeypatch.setattr(history.os, "replace", Sticky(failures=99))
+
+    stored, problem = history.record(_run())
+
+    assert stored is not None
+    assert "saved" in problem
+    assert "could not be written" in problem
+
+
+def test_a_review_survives_an_index_that_could_not_be_written(monkeypatch, no_waiting):
+    """Dropping the stale index is what keeps the review findable.
+
+    Left in place it describes the directory as it was *before* this review and
+    is never re-derived -- a readable index is trusted -- so the run would be
+    hidden for good by a scanner's timing.
+
+    The earlier review matters: with no index at all the next read rebuilds
+    from the run files anyway, so a denial on the very first write is harmless
+    and proves nothing. The damage needs an index that already exists.
+    """
+    history.record(_run(when="2026-08-01T10:00:00Z"))
+    monkeypatch.setattr(history.os, "replace", Sticky(failures=99))
+
+    history.record(_run(when="2026-08-05T10:00:00Z"))
+
+    assert not (history.runs_dir("/x/demo") / history.INDEX_FILE).exists()
+    listed = history.list_runs("/x/demo")  # rebuilt from the run files
+    assert [r.started_at[:10] for r in listed] == ["2026-08-05", "2026-08-01"]
+
+
+def test_retention_still_holds_when_one_index_write_is_denied(monkeypatch, no_waiting):
+    """The exact shape of the flake: a denial partway through a retention run.
+
+    The fourth review's index write failing used to leave its run file orphaned
+    on disk and the index describing the third review's state, so the fifth
+    review pruned against stale data and four files survived a limit of three.
+    """
+    real_replace = os.replace
+    seen = {"index_writes": 0}
+
+    def replace(src, dst):
+        if str(dst).endswith(history.INDEX_FILE):
+            seen["index_writes"] += 1
+            # The fourth, which is where it was observed. Denying the *first*
+            # proves nothing: with no index on disk the next read rebuilds from
+            # the run files, so that case was always safe.
+            if seen["index_writes"] == 4:
+                raise PermissionError(13, "Access is denied")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(history.os, "replace", replace)
+    for day in range(1, 6):
+        history.record(_run(when=f"2026-08-0{day}T10:00:00Z"), limit=3)
+
+    kept = history.list_runs("/x/demo")
+
+    assert [r.started_at[:10] for r in kept] == ["2026-08-05", "2026-08-04", "2026-08-03"]
+    files = [p for p in history.runs_dir("/x/demo").glob("*.json") if p.name != history.INDEX_FILE]
+    assert len(files) == 3
+
+
+def test_giving_up_leaves_no_temporary_file_behind(monkeypatch, no_waiting):
+    """Otherwise the directory fills with `index.json.<hex>.tmp`, one per denial."""
+    monkeypatch.setattr(history.os, "replace", Sticky(failures=99))
+
+    history.record(_run())
+
+    leftovers = list(history.runs_dir("/x/demo").glob("*.tmp"))
+    assert leftovers == []
 
 
 # ---- forgetting -------------------------------------------------------------------------

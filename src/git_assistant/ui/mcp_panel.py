@@ -43,6 +43,8 @@ WRITE_WARNING = (
     "below to apply it."
 )
 _NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+#: Wide enough for the longest client name, so every row's buttons line up.
+NAME_WIDTH = 170
 #: Long enough for a cold start behind a virus scanner, short enough that a
 #: broken command does not look like a hang.
 TEST_TIMEOUT = 30
@@ -114,26 +116,20 @@ class McpPanel(QWidget):
         integrations = QGroupBox("Integrations")
         grid = QVBoxLayout(integrations)
 
-        self.desktop_status = QLabel("")
-        self.desktop_status.setWordWrap(True)
-        self.desktop_status.setStyleSheet(MUTED_COLOUR)
-        desktop_row = QHBoxLayout()
-        desktop_row.addWidget(QLabel("Claude Desktop:"))
-        self.desktop_add_btn = QPushButton("Register")
-        self.desktop_add_btn.clicked.connect(self._on_register_desktop)
-        self.desktop_remove_btn = QPushButton("Remove")
-        self.desktop_remove_btn.clicked.connect(self._on_unregister_desktop)
-        desktop_row.addWidget(self.desktop_add_btn)
-        desktop_row.addWidget(self.desktop_remove_btn)
-        desktop_row.addStretch(1)
-        grid.addLayout(desktop_row)
-        grid.addWidget(self.desktop_status)
+        # Every client that keeps its servers in a JSON file gets the same three
+        # widgets, so the rows are built from the list rather than repeated.
+        self._json_rows: list[tuple] = []
+        for client in clients.JSON_CLIENTS:
+            self._json_rows.append(self._add_json_row(grid, client))
+        _, self.desktop_status, self.desktop_add_btn, self.desktop_remove_btn = next(
+            row for row in self._json_rows if row[0] is clients.DESKTOP
+        )
 
         self.code_status = QLabel("")
         self.code_status.setWordWrap(True)
         self.code_status.setStyleSheet(MUTED_COLOUR)
         code_row = QHBoxLayout()
-        code_row.addWidget(QLabel("Claude Code:"))
+        code_row.addWidget(self._name_label("Claude Code"))
         self.scope_combo = QComboBox()
         self.scope_combo.addItems(clients.SCOPES)
         self.scope_combo.setCurrentText(settings.mcp_scope or clients.DEFAULT_SCOPE)
@@ -166,6 +162,31 @@ class McpPanel(QWidget):
 
         self.refresh()
 
+    # ---- building --------------------------------------------------------------
+    @staticmethod
+    def _name_label(label: str) -> QLabel:
+        """One width for every client name, so the buttons line up under each other."""
+        widget = QLabel(f"{label}:")
+        widget.setMinimumWidth(NAME_WIDTH)
+        return widget
+
+    def _add_json_row(self, grid: QVBoxLayout, client) -> tuple:
+        status = QLabel("")
+        status.setWordWrap(True)
+        status.setStyleSheet(MUTED_COLOUR)
+        add = QPushButton("Register")
+        add.clicked.connect(lambda _=False, c=client: self._on_register_json(c))
+        remove = QPushButton("Remove")
+        remove.clicked.connect(lambda _=False, c=client: self._on_unregister_json(c))
+        row = QHBoxLayout()
+        row.addWidget(self._name_label(client.label))
+        row.addWidget(add)
+        row.addWidget(remove)
+        row.addStretch(1)
+        grid.addLayout(row)
+        grid.addWidget(status)
+        return client, status, add, remove
+
     # ---- state ---------------------------------------------------------------
     def _command(self) -> list[str] | None:
         return launch.server_command(allow_writes=self.writes_check.isChecked())
@@ -179,8 +200,8 @@ class McpPanel(QWidget):
             self.test_btn,
             self.copy_cmd_btn,
             self.copy_json_btn,
-            self.desktop_add_btn,
             self.code_add_btn,
+            *(add for _, _, add, _ in self._json_rows),
         ):
             button.setEnabled(available)
         if not available:
@@ -214,11 +235,12 @@ class McpPanel(QWidget):
         self._refresh_code_status()
 
     def _refresh_registrations(self) -> None:
-        """The cheap half: reading Claude Desktop's config is one file read."""
+        """The cheap half: each of these clients is one file read."""
         command = self._command()
-        desktop = clients.desktop_status(command)
-        self.desktop_status.setText(f"{desktop.describe(command)}  {desktop.detail}")
-        self.desktop_remove_btn.setEnabled(desktop.present)
+        for client, status, _add, remove in self._json_rows:
+            where = clients.json_status(client, command)
+            status.setText(f"{where.describe(command)}  {where.detail}".strip())
+            remove.setEnabled(where.present)
 
     def _refresh_code_status(self) -> None:
         command = self._command()
@@ -271,26 +293,34 @@ class McpPanel(QWidget):
         self._worker = None
         self._say(message, warn=True)
 
-    def _on_register_desktop(self) -> None:
+    def _on_register_json(self, client) -> None:
         command = self._command()
-        if not command or not self._confirm("Claude Desktop"):
+        if not command or not self._confirm(client.label):
             return
         try:
-            note = clients.register_desktop(command)
+            note = clients.register_json(client, command)
         except clients.ClientError as exc:
             QMessageBox.warning(self, "Could not register", str(exc))
             return
+        # An information box rather than the status line: what the user has to
+        # do next -- restart, or reload -- is the half that gets missed.
         QMessageBox.information(self, "Registered", note)
         self._refresh_registrations()
 
-    def _on_unregister_desktop(self) -> None:
+    def _on_unregister_json(self, client) -> None:
         try:
-            note = clients.unregister_desktop()
+            note = clients.unregister_json(client)
         except clients.ClientError as exc:
             QMessageBox.warning(self, "Could not remove", str(exc))
             return
         self._say(note)
         self._refresh_registrations()
+
+    def _on_register_desktop(self) -> None:
+        self._on_register_json(clients.DESKTOP)
+
+    def _on_unregister_desktop(self) -> None:
+        self._on_unregister_json(clients.DESKTOP)
 
     def _on_register_code(self) -> None:
         command = self._command()

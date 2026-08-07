@@ -22,7 +22,7 @@ enabled in the firmware.)
 
 ## Every time
 
-1. Download `GitAssistant-<version>-noupdate-user-windows-x64-setup.exe` from
+1. Download `GitAssistant-<version>-user-windows-x64-setup.exe` from
    the release and drop it in **this folder**, beside `git-assistant.wsb`.
 2. Double-click `git-assistant.wsb`.
 3. Wait. It installs silently, starts the application, and writes everything

@@ -30,9 +30,11 @@ Dependencies:
 
 MinimumOSVersion: 10.0.17763.0
 InstallerType: nullsoft
-# Per-user only, deliberately: the self-updating build is not published here.
-# winget owns upgrades for anything it installed, and shipping a build that also
-# replaces itself would give one machine two update mechanisms that disagree.
+# Per-user only, deliberately. Two nullsoft installers of one architecture are
+# duplicates to winget-pkgs validation unless each declares its scope, and this
+# is also the package the application's own update check upgrades -- a
+# per-machine install would raise a UAC prompt from a process the user did not
+# start.
 Scope: user
 InstallModes:
   - interactive
@@ -43,7 +45,7 @@ ReleaseDate: 2026-08-07
 
 Installers:
   - Architecture: x64
-    InstallerUrl: https://github.com/ONEoo7/ai_tools_git_assistant/releases/download/v0.3.18/git-assistant-0.3.18-noupdate-user-windows-x64-setup.exe
+    InstallerUrl: https://github.com/ONEoo7/ai_tools_git_assistant/releases/download/v0.3.18/git-assistant-0.3.18-user-windows-x64-setup.exe
     # Taken from the release this URL names, and from nowhere else. Two
     # independently computed values agree on it: `Get-FileHash` on the runner
     # (the release notes table) and the digest GitHub computed on upload.

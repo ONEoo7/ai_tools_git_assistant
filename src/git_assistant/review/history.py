@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 import uuid
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
@@ -240,6 +241,42 @@ def load_run(stored: StoredReview) -> StoredReview | None:
 
 
 # ---- writing ---------------------------------------------------------------------------
+#: `os.replace` onto an existing file fails on Windows while any other process
+#: holds the destination open -- routinely an antivirus or the search indexer,
+#: reading a file written milliseconds earlier. It clears in tens of
+#: milliseconds, and this index is rewritten once per review, so waiting is the
+#: answer rather than treating a scanner's timing as a failed review.
+#:
+#: Measured on one machine: about 0.75% of writes hit it, which is often enough
+#: to have shown up as a flaky test rather than as anything anybody noticed.
+_REPLACE_ATTEMPTS = 5
+_REPLACE_BACKOFF = 0.02  # doubling, so ~0.3s of waiting before giving up
+
+
+def _replace_atomically(tmp: Path, destination: Path) -> None:
+    """`os.replace`, retried while something else has the destination open.
+
+    Raises:
+        OSError: if it never succeeded. The temporary file is removed first --
+            leaving one beside the index every time this loses is how a
+            directory fills up with `index.json.<hex>.tmp`.
+    """
+    delay = _REPLACE_BACKOFF
+    for remaining in range(_REPLACE_ATTEMPTS - 1, -1, -1):
+        try:
+            os.replace(tmp, destination)
+            return
+        except OSError:
+            if not remaining:
+                try:
+                    tmp.unlink(missing_ok=True)
+                except OSError:
+                    pass  # the original failure is the one worth reporting
+                raise
+            time.sleep(delay)
+            delay *= 2
+
+
 def _write_index(directory: Path, runs: list[StoredReview]) -> None:
     """Rewritten on every review, so it is replaced atomically, not truncated."""
     payload = {
@@ -249,7 +286,7 @@ def _write_index(directory: Path, runs: list[StoredReview]) -> None:
     }
     tmp = directory / f"{INDEX_FILE}.{uuid.uuid4().hex[:8]}.tmp"
     tmp.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
-    os.replace(tmp, directory / INDEX_FILE)
+    _replace_atomically(tmp, directory / INDEX_FILE)
 
 
 def record(run: ReviewRun, *, limit: int = DEFAULT_LIMIT) -> tuple[StoredReview | None, str]:
@@ -290,12 +327,38 @@ def record(run: ReviewRun, *, limit: int = DEFAULT_LIMIT) -> tuple[StoredReview 
             json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
             encoding="utf-8",
         )
+    except OSError as exc:
+        return None, str(exc)  # nothing reached the disk; the review really is lost
+
+    # Past this line the run file exists, and the run file is the record. The
+    # index is a cache derived from it, so a failure below is not a lost review
+    # and must not be reported as one.
+    try:
         runs = _dedupe([stored, *existing])
         runs = _prune(directory, runs, limit)
         _write_index(directory, runs)
     except OSError as exc:
-        return None, str(exc)
+        # The index on disk no longer describes the directory: it predates this
+        # review, and `_prune` may already have deleted files it still lists.
+        # Left alone it would hide the review that was just saved -- for good,
+        # since a readable index is never re-derived. Dropping it costs the one
+        # directory listing this module was designed to be able to afford.
+        discarded = _discard_index(directory)
+        return stored, (
+            f"saved, but the history list could not be written ({exc})"
+            if discarded
+            else f"saved, but the history list is out of date ({exc})"
+        )
     return stored, ""
+
+
+def _discard_index(directory: Path) -> bool:
+    """Throw the cache away so the next read rebuilds it from the run files."""
+    try:
+        (directory / INDEX_FILE).unlink(missing_ok=True)
+    except OSError:
+        return False
+    return True
 
 
 def _dedupe(runs: list[StoredReview]) -> list[StoredReview]:
