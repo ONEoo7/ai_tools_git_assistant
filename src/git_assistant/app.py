@@ -8,6 +8,7 @@ from PyQt6.QtCore import QTimer
 from PyQt6.QtNetwork import QLocalServer, QLocalSocket
 from PyQt6.QtWidgets import QApplication, QMessageBox, QSystemTrayIcon
 
+from git_assistant import faults
 from git_assistant.ui.icon import app_icon
 
 APP_ID = "ONEoo7.GitAssistant"
@@ -74,6 +75,10 @@ def _listen_for_other_instances(on_show) -> QLocalServer:
 
 
 def main() -> int:
+    # First, and before QApplication: the failure this guards against happens
+    # inside QApplication's constructor, and Qt aborts the process rather than
+    # raising. See git_assistant.faults.
+    faults.install()
     _set_windows_app_id()
     app = QApplication(sys.argv)
     app.setApplicationName("git-assistant")
@@ -106,9 +111,12 @@ def main() -> int:
     if STARTUP_FLAG not in sys.argv[1:]:
         QTimer.singleShot(0, tray_app.show_main_window)
 
+    faults.write("Started; entering the event loop.")
     exit_code = app.exec()
     server.close()
     del tray_app
+    # A clean exit says so, so a log ending mid-start-up is recognisable as one.
+    faults.write(f"Exited normally ({exit_code}).")
     return exit_code
 
 
