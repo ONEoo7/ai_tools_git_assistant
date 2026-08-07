@@ -348,14 +348,24 @@ class SettingsDialog(QDialog):
         self.review_panel.cancel_running()
         if self._setup_worker is not None:
             self._setup_worker.cancel()
-        # Write any debounced edit that has not landed yet.
-        if self._save_timer.isActive():
-            self._save_timer.stop()
-            self._autosave()
+        self.flush_pending_edits()
         # Push whatever the last run left buffered. Not a shutdown: the tray
         # outlives this window and can start another run from its menu.
         tracing.flush()
         super().closeEvent(event)
+
+    def flush_pending_edits(self) -> None:
+        """Write any debounced edit that has not landed yet.
+
+        Called when this window closes, and by the tray before it hands the
+        installation to winget: the installer force-kills this process rather
+        than asking it to quit (`taskkill /F`, see installer/git-assistant.nsi),
+        and a 400 ms debounce is easily long enough to lose the setting someone
+        changed just before pressing Install now.
+        """
+        if self._save_timer.isActive():
+            self._save_timer.stop()
+            self._autosave()
 
     def _on_tab_changed(self, index: int) -> None:
         # Fires while tabs are still being added, before later tabs' widgets

@@ -262,6 +262,16 @@ class TrayApp:
         if not ask_to_install(result):
             return
 
+        # Write anything still sitting in the window's debounce first. The
+        # installer winget is about to run force-kills this process rather than
+        # asking it to quit -- see StopRunningApp in installer/git-assistant.nsi
+        # -- so this is the last moment settings can be written at all, and a
+        # setting changed just before pressing Install now would otherwise go
+        # with it.
+        window = getattr(self, "_main_window", None)
+        if window is not None:
+            window.flush_pending_edits()
+
         # winget downloads the installer and runs it, so this is a download and
         # an install, off the GUI thread. The tray would otherwise stop
         # responding throughout, which reads as the application hanging on a
@@ -290,15 +300,16 @@ class TrayApp:
     def _on_upgrade_finished(self, note: object) -> None:
         """winget is done. Get out of the way.
 
-        The installer stops this application itself while it replaces the
-        files, so reaching here at all usually means it did not need to -- but
-        quitting is what gets settings written either way, and the new build
-        cannot start while the old one holds its own directory open.
+        Usually unreachable on success, and deliberately so: the installer
+        force-kills this process partway through the upgrade, so the thread
+        waiting on winget dies with it. That is why the notification that says
+        the application is about to close is emitted *before* the worker starts
+        rather than here, and why pending edits are written there too.
 
-        The installer does not start the new version -- see
-        installer/git-assistant.nsi -- so this is the last thing the user is
-        told before the tray icon disappears. It has to say that reopening is
-        theirs to do, or an update looks like a crash.
+        This still runs when the installer did not need to kill us -- and it is
+        what quits, because the new build cannot start while the old one holds
+        its own directory open. The installer does not start the new version
+        (see installer/git-assistant.nsi), so reopening is the user's to do.
         """
         if note is None:
             return  # the error path already said what happened; stay running

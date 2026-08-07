@@ -332,6 +332,50 @@ def test_a_version_already_declined_is_not_offered_again_five_minutes_later(
     assert offered == ["0.4.0"]
 
 
+def test_pending_edits_are_written_before_winget_is_allowed_to_start(
+    qapp, quiet_tray, monkeypatch
+):
+    """The installer force-kills this process; there is no later moment.
+
+    `taskkill /F` in installer/git-assistant.nsi means the thread waiting on
+    winget never comes back, so anything left in the window's 400 ms debounce
+    is gone. Order matters as much as the call: flushing after handing off is
+    a race against the kill.
+    """
+    order: list[str] = []
+
+    class Connectable:
+        """Enough of a signal for the tray to wire itself up to."""
+
+        def connect(self, _slot):
+            return None
+
+    class FakeWorker:
+        finished = Connectable()
+        error = Connectable()
+
+        def __init__(self, _result):
+            order.append("winget")
+
+    monkeypatch.setattr(tray_module, "unavailable_reason", lambda: None)
+    monkeypatch.setattr(tray_module.TrayApp, "_check_for_update", lambda self: None)
+    monkeypatch.setattr(tray_module, "ask_to_install", lambda result: True)
+    monkeypatch.setattr(tray_module.TrayApp, "_notify", lambda self, *a: None)
+    monkeypatch.setattr(tray_module, "UpgradeWorker", FakeWorker)
+    monkeypatch.setattr(tray_module, "run_worker", lambda w: FakeWorker.__new__(FakeWorker))
+
+    app = tray_module.TrayApp(qapp)
+
+    class Window:
+        def flush_pending_edits(self):
+            order.append("flushed")
+
+    app._main_window = Window()
+    app.offer_install(winget.UpdateResult(version="0.4.0", current="0.3.18"))
+
+    assert order == ["flushed", "winget"]
+
+
 def test_declining_the_consent_dialog_runs_no_winget(qapp, quiet_tray, monkeypatch):
     ran: list[object] = []
     monkeypatch.setattr(tray_module, "unavailable_reason", lambda: None)
