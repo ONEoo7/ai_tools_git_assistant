@@ -9,7 +9,7 @@
 #: that against the published release. When the two numbers were written
 #: separately they drifted, and a 0.2.0 build reported 0.1.0, which would have
 #: made it offer itself as an update forever.
-__version__ = "0.3.16"
+__version__ = "0.3.17"
 
 #: Who wrote it and where it lives, shown at the foot of the settings window.
 #:
