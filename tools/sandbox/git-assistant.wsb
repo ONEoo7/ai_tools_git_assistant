@@ -1,0 +1,36 @@
+<Configuration>
+  <!--
+    Reproduce a clean-machine start-up failure, the way winget's validation
+    sees one.
+
+    Windows Sandbox is a fresh Windows every time: no Visual C++ runtime beyond
+    what ships with the OS, no Python, no Qt, nothing this project has ever
+    installed. That is the whole point - the crash reported against 0.3.16
+    (Qt6Core, c0000409 / FAST_FAIL_FATAL_APP_EXIT, i.e. qFatal) did not happen
+    on any developer machine, and would not.
+
+    Usage:
+      1. Put the release's *-noupdate-user-windows-x64-setup.exe in this folder.
+      2. Double-click this file.
+      3. Read results\ when it finishes. Everything lands back here, because
+         the sandbox itself is destroyed on close and anything left inside it
+         goes with it.
+
+    vGPU is off deliberately: software rendering is closer to a validation VM
+    than this machine's graphics card is, and if the fault turns out to be
+    graphics-related that is the configuration that shows it.
+  -->
+  <VGpu>Disable</VGpu>
+  <Networking>Default</Networking>
+  <MappedFolders>
+    <MappedFolder>
+      <HostFolder>.</HostFolder>
+      <SandboxFolder>C:\Users\WDAGUtilityAccount\Desktop\share</SandboxFolder>
+      <!-- Writable: the log has to come back out. -->
+      <ReadOnly>false</ReadOnly>
+    </MappedFolder>
+  </MappedFolders>
+  <LogonCommand>
+    <Command>powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\Users\WDAGUtilityAccount\Desktop\share\run-test.ps1</Command>
+  </LogonCommand>
+</Configuration>

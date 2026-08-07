@@ -225,3 +225,37 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# ---------------------------------------------------------------------------
+# This project's own
+# ---------------------------------------------------------------------------
+
+# Built and downloaded binaries, anywhere in the tree.
+#
+# `dist/` and `build/` above cover what PyInstaller writes, and nothing covered
+# an installer downloaded from a release and left where it was being used --
+# which is how a 49 MB blob ended up staged in the object store: never
+# committed, unreachable, and taking fifty times the size of the entire packed
+# history with it.
+#
+# Repo-wide rather than per-directory. Nothing in this repository is a binary:
+# the icon is a committed `.ico`, everything else executable is produced by a
+# build, and a source tree that needs a checked-in `.exe` is a different
+# project.
+*.exe
+*.msi
+*.dll
+*.pdb
+*.zip
+*.7z
+
+# What the Windows Sandbox harness brings back: a start-up log, crash dumps and
+# WER reports from a throwaway machine. Evidence about one run on one afternoon,
+# useful for exactly as long as it takes to read. The harness itself
+# (`git-assistant.wsb`, `run-test.ps1`) is source and stays.
+tools/sandbox/results/
+
+# The application's own start-up log, if one is ever produced in the tree.
+# `*.log` above already catches it; named here so it is not deleted from that
+# list by someone who thinks it only means Django.
+startup.log

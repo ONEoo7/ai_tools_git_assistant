@@ -44,13 +44,25 @@ def _kill(proc: subprocess.Popen | None) -> None:
 
 
 def _popen(repo: str | Path, args: list[str], **kwargs) -> subprocess.Popen:
-    return subprocess.Popen(
-        ["git", "-C", str(repo), *args],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-        creationflags=_NO_WINDOW,
-        **kwargs,
-    )
+    """Start a git command, or say why not.
+
+    ``GitError`` rather than the raw ``FileNotFoundError``: an agent already
+    handles the first and reports it in the run's warnings, and the second
+    escapes into a Qt slot -- which PyQt turns into ``qFatal()`` and a process
+    abort with nothing to read. See git_ops._cannot_run.
+    """
+    try:
+        return subprocess.Popen(
+            ["git", "-C", str(repo), *args],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            creationflags=_NO_WINDOW,
+            **kwargs,
+        )
+    except OSError as exc:
+        from git_assistant.git_ops import GIT_MISSING, GitError
+
+        raise GitError(f"{GIT_MISSING} [{exc}]") from exc
 
 
 def _lines(stream) -> Iterator[str]:

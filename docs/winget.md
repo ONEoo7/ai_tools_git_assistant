@@ -1,0 +1,78 @@
+# winget manifests
+
+The manifests are in [`installer/winget/`](../installer/winget). They are not
+read by anything at build time. They are the copy **we** control, so that the
+fields winget-pkgs cannot work out for itself are written down, reviewable and
+diffable, instead of living only in a pull request against someone else's
+repository.
+
+This document is *here* and not in that directory because the directory is
+copied wholesale into `manifests/s/StefanGhitescu/GitAssistant/<version>/`, and
+`winget validate` reads every file in it — a README there failed validation on
+a line that started with a backtick.
+
+## Why they exist at all
+
+`vedantmgoyal9/winget-releaser`, which the release workflow runs, calls
+`wingetcreate update`. That regenerates `PackageVersion`, `InstallerUrl` and
+`InstallerSha256` from the release's assets and **carries every other field
+forward from the previously published version**.
+
+Which means:
+
+- anything here has to reach winget-pkgs **once**, by hand;
+- after that, every automatically submitted release inherits it;
+- and `wingetcreate update` cannot add a field that was never there, so
+  forgetting one is not something a later release fixes.
+
+## The one that matters: `Dependencies`
+
+```yaml
+Dependencies:
+  PackageDependencies:
+    - PackageIdentifier: Git.Git
+```
+
+0.3.16 failed winget's manual validation with a crash in `Qt6Core.dll`
+(`c0000409`, subcode 7 — `FAST_FAIL_FATAL_APP_EXIT`, which is `qFatal`).
+Reproduced in Windows Sandbox and read out of the start-up log the build now
+writes:
+
+```
+File "git_assistant\identities.py", line 172, in _from_git
+File "git_assistant\git_ops.py", line 322, in _run_global
+FileNotFoundError: [WinError 2] The system cannot find the file specified
+```
+
+**There is no git on a clean Windows**, and this application is a front end for
+git. Two separate faults, and both needed fixing:
+
+- The code raised. It no longer does — see `git_ops._cannot_run`; a missing git
+  is a failed `GitResult`, and start-up says so in a sentence.
+- The package did not declare that it needs git. That is this file.
+
+An application that installs successfully and then tells you to go and install
+something else is not what anyone wants from a package manager that could have
+installed it.
+
+## Submitting
+
+The identifier is the primary key in winget-pkgs and cannot be changed once
+published, so it must match exactly: `StefanGhitescu.GitAssistant`.
+
+Manifests live at
+`manifests/s/StefanGhitescu/GitAssistant/<version>/` in a fork of
+`microsoft/winget-pkgs`. To validate before opening a PR:
+
+```powershell
+winget validate --manifest .\installer\winget
+winget install --manifest .\installer\winget
+```
+
+`ManifestVersion` here is `1.6.0`. If the open PR uses a different schema
+version, match it rather than this — a mixed set is a validation failure, and
+the version in the PR is the one a reviewer has already looked at.
+
+`ReleaseDate` and the hash are for 0.3.17 and go stale by design; the automation
+replaces both on the next release. They are correct here so this set can be
+submitted as-is if the initial PR is superseded rather than amended.

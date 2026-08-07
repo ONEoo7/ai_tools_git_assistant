@@ -46,22 +46,62 @@ class GitResult:
     returncode: int
 
 
-def _run(repo: str | Path, args: list[str], *, stdin: str | None = None) -> GitResult:
-    proc = subprocess.run(
-        ["git", "-C", str(repo), *args],
-        input=stdin,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        creationflags=_NO_WINDOW,
+#: Said whenever git itself cannot be started. A sentence rather than a
+#: traceback: it is shown to the person who has to fix it, and what they have to
+#: do is install git.
+GIT_MISSING = "Git is not installed, or not on PATH."
+
+#: What a shell reports for a command it cannot find. Used here so a caller
+#: that only looks at `returncode` still sees a failure.
+NOT_INSTALLED = 127
+
+
+def _cannot_run(exc: OSError) -> GitResult:
+    """A missing git as a failed result rather than as an exception.
+
+    Every git call in this application went through the two runners below, and
+    neither caught anything -- so on a machine with no git, the first one raised
+    `FileNotFoundError` from inside a Qt slot, and PyQt turns an exception that
+    escapes a slot into `qFatal()`. That is a process abort with no traceback:
+    the winget validation crash of 0.3.16, reported as `Qt6Core.dll` and
+    `c0000409`, and impossible to recognise as "git is not installed".
+
+    `GitResult` already carries failure. Using it is what makes every caller's
+    existing `if not res.ok` handle this too, without one of them being changed.
+    """
+    return GitResult(
+        ok=False, stdout="", stderr=f"{GIT_MISSING} [{exc}]", returncode=NOT_INSTALLED
     )
+
+
+def _run(repo: str | Path, args: list[str], *, stdin: str | None = None) -> GitResult:
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(repo), *args],
+            input=stdin,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            creationflags=_NO_WINDOW,
+        )
+    except OSError as exc:
+        return _cannot_run(exc)
     return GitResult(
         ok=proc.returncode == 0,
         stdout=proc.stdout or "",
         stderr=proc.stderr or "",
         returncode=proc.returncode,
     )
+
+
+def git_available() -> bool:
+    """Is there a git to run at all?
+
+    Asked once at start-up so the application can say so plainly, instead of
+    every repository silently looking empty.
+    """
+    return _run_global(["--version"]).returncode != NOT_INSTALLED
 
 
 def _diff_args(mode: str) -> list[str]:
@@ -318,15 +358,23 @@ def repo_owner(repo: str | Path) -> str | None:
 
 
 def _run_global(args: list[str]) -> GitResult:
-    """Run a git command not tied to a specific repository (e.g. global config)."""
-    proc = subprocess.run(
-        ["git", *args],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        creationflags=_NO_WINDOW,
-    )
+    """Run a git command not tied to a specific repository (e.g. global config).
+
+    Guarded like `_run`, and for the same reason: this is the one that actually
+    fired on a clean machine, from the identity bootstrap the settings window
+    runs before it draws anything.
+    """
+    try:
+        proc = subprocess.run(
+            ["git", *args],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            creationflags=_NO_WINDOW,
+        )
+    except OSError as exc:
+        return _cannot_run(exc)
     return GitResult(
         ok=proc.returncode == 0,
         stdout=proc.stdout or "",

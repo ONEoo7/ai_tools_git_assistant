@@ -8,7 +8,7 @@ from PyQt6.QtCore import QTimer
 from PyQt6.QtNetwork import QLocalServer, QLocalSocket
 from PyQt6.QtWidgets import QApplication, QMessageBox, QSystemTrayIcon
 
-from git_assistant import faults
+from git_assistant import faults, git_ops
 from git_assistant.ui.icon import app_icon
 
 APP_ID = "ONEoo7.GitAssistant"
@@ -86,6 +86,21 @@ def main() -> int:
     app.setWindowIcon(app_icon())
     # Tray apps must keep running after their dialogs close.
     app.setQuitOnLastWindowClosed(False)
+
+    # Everything this application does is a git command. Without git it is not
+    # degraded, it is inert -- every repository would read as empty and every
+    # tab would show nothing, with no clue why. Said once, plainly, rather than
+    # left to be inferred from a window full of blanks.
+    if not git_ops.git_available():
+        faults.write("Git was not found; refusing to start.")
+        QMessageBox.critical(
+            None,
+            "Git is not installed",
+            "Git Assistant works by running git, and no git was found on this "
+            "machine.\n\nInstall Git for Windows from https://git-scm.com/download/win "
+            "and start Git Assistant again.",
+        )
+        return 1
 
     if not QSystemTrayIcon.isSystemTrayAvailable():
         QMessageBox.critical(
