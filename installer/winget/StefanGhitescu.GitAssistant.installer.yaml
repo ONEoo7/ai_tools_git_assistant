@@ -1,4 +1,4 @@
-# yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.6.0.schema.json
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.12.0.schema.json
 #
 # The installer manifest for winget-pkgs. This copy is the source of truth for
 # the fields winget-pkgs cannot work out on its own -- everything else
@@ -21,7 +21,7 @@
 # After that every auto-submitted release inherits it.
 
 PackageIdentifier: StefanGhitescu.GitAssistant
-PackageVersion: 0.3.17
+PackageVersion: 0.3.18
 
 # Git for Windows, installed first by winget if it is not already there.
 Dependencies:
@@ -43,8 +43,16 @@ ReleaseDate: 2026-08-07
 
 Installers:
   - Architecture: x64
-    InstallerUrl: https://github.com/ONEoo7/ai_tools_git_assistant/releases/download/v0.3.17/git-assistant-0.3.17-noupdate-user-windows-x64-setup.exe
-    InstallerSha256: DF1CD460D051AEADB8E02D01232BFAE28305824273BFC669506637E1E044755E
+    InstallerUrl: https://github.com/ONEoo7/ai_tools_git_assistant/releases/download/v0.3.18/git-assistant-0.3.18-noupdate-user-windows-x64-setup.exe
+    # Taken from the release this URL names, and from nowhere else. Two
+    # independently computed values agree on it: `Get-FileHash` on the runner
+    # (the release notes table) and the digest GitHub computed on upload.
+    #
+    # A digest carried over from the previous release is the failure to avoid
+    # here -- it is well-formed, `winget validate` accepts it, and it is wrong
+    # only at the moment somebody tries to install. So this line moves when the
+    # URL above it moves, never separately.
+    InstallerSha256: E660CE0D847951A427A2F0CD669D409800B099BAA2CC3BFE4DAED23FA8CADA3D
 
 ManifestType: installer
-ManifestVersion: 1.6.0
+ManifestVersion: 1.12.0

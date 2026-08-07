@@ -1,6 +1,6 @@
-# yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.6.0.schema.json
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.12.0.schema.json
 PackageIdentifier: StefanGhitescu.GitAssistant
-PackageVersion: 0.3.17
+PackageVersion: 0.3.18
 PackageLocale: en-US
 
 Publisher: Stefan Ghitescu
@@ -32,11 +32,17 @@ Tags:
   - code-review
   - developer-tools
 
-ReleaseNotesUrl: https://github.com/ONEoo7/ai_tools_git_assistant/releases/tag/v0.3.17
+ReleaseNotesUrl: https://github.com/ONEoo7/ai_tools_git_assistant/releases/tag/v0.3.18
 
-# No `Documentation:` block. It is not in the 1.6.0 schema, and `winget
-# validate` reports it as an unknown field -- which is a warning here and a
-# reason for a reviewer to send the PR back. Raise ManifestVersion if it is
-# wanted, but not in the same change as everything else.
+# No documentation links, for now. An earlier attempt used `Documentation:`
+# and `winget validate` called it an unknown field -- correctly: the field is
+# `Documentations`, plural, and it takes a list, not a URL:
+#
+#   Documentations:
+#     - DocumentLabel: README
+#       DocumentUrl: https://github.com/ONEoo7/ai_tools_git_assistant#readme
+#
+# Left out rather than guessed at, since it is optional and this manifest is
+# being submitted by hand for the first time.
 ManifestType: defaultLocale
-ManifestVersion: 1.6.0
+ManifestVersion: 1.12.0
