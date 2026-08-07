@@ -145,7 +145,20 @@ class TrayApp:
         # Pause watching while the dialog is open so it can't mutate settings.repos
         # underneath the dialog's own edits.
         self.watcher.set_roots([])
-        dialog = SettingsDialog(self.settings)
+        try:
+            dialog = SettingsDialog(self.settings)
+        except BaseException:
+            # A window that could not be built is not a window that is open, and
+            # watching must not stay paused for the rest of the session on
+            # account of one. Resumed here because the resume below it is on the
+            # far side of `dialog.exec()`, which this never reaches.
+            #
+            # BaseException, not Exception: a run started from a terminal is one
+            # Ctrl+C away from arriving here as KeyboardInterrupt, and that is
+            # exactly the case that leaves a tray with no window to explain
+            # itself.
+            self._refresh_watcher()
+            raise
         # Clicking "vX.Y.Z available" in the window lands in the same place as
         # the tray notification.
         dialog.installRequested.connect(self.offer_install)

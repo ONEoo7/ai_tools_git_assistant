@@ -387,3 +387,33 @@ def test_declining_the_consent_dialog_runs_no_winget(qapp, quiet_tray, monkeypat
     app.offer_install(winget.UpdateResult(version="0.4.0", current="0.3.18"))
 
     assert ran == []
+
+
+# ---- opening the window ------------------------------------------------------------
+def test_a_window_that_cannot_be_built_does_not_leave_watching_paused(
+    qapp, quiet_tray, monkeypatch
+):
+    """Ctrl+C during start-up is one Ctrl+C, not a session without a watcher.
+
+    Watching is paused before the window is constructed so the dialog's own
+    edits cannot race it, and resumed after the window closes -- on the far
+    side of a construction that may never return.
+    """
+    monkeypatch.setattr(tray_module, "unavailable_reason", lambda: "a source checkout")
+    app = tray_module.TrayApp(qapp)
+
+    roots: list[list[str]] = []
+    monkeypatch.setattr(app.watcher, "set_roots", roots.append)
+    monkeypatch.setattr(app, "_refresh_watcher", lambda: roots.append(["resumed"]))
+
+    def boom(_settings):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(tray_module, "SettingsDialog", boom)
+
+    with pytest.raises(KeyboardInterrupt):
+        app.show_main_window()
+
+    assert roots == [[], ["resumed"]], "paused, then resumed"
+    # No half-built window is left behind for the next click to raise.
+    assert getattr(app, "_main_window", None) is None
