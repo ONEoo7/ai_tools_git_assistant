@@ -406,6 +406,9 @@ class ReviewPanel(QWidget):
         self.runs_tree.setHeaderLabels(["When", "Result", "Rules"])
         self.runs_tree.setRootIsDecorated(False)
         self.runs_tree.setColumnWidth(0, 120)
+        # Several at once, to delete them. Opening stays a question about one
+        # review, and the button greys out when the answer is ambiguous.
+        self.runs_tree.setSelectionMode(QTreeWidget.SelectionMode.ExtendedSelection)
         self.runs_tree.itemDoubleClicked.connect(lambda *_: self._on_open_run())
         self.runs_tree.itemSelectionChanged.connect(self._on_run_selection)
         self.runs_tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)

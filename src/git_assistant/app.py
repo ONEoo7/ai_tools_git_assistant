@@ -8,7 +8,7 @@ from PyQt6.QtCore import QTimer
 from PyQt6.QtNetwork import QLocalServer, QLocalSocket
 from PyQt6.QtWidgets import QApplication, QMessageBox, QSystemTrayIcon
 
-from git_assistant import faults, git_ops
+from git_assistant import faults, git_ops, repo_config, settings_backup
 from git_assistant.config import Settings
 from git_assistant.ui import theme
 from git_assistant.ui.icon import app_icon
@@ -94,6 +94,15 @@ def main() -> int:
     # thing this needs and it cannot fail the launch: an unknown theme falls
     # back to following the system.
     theme.apply(app, Settings.load().theme)
+
+    # The defaults every repository inherits, written out on first run so they
+    # can be found and read before anyone has changed one. A disk that refuses
+    # costs the file, not the launch: everything falls back to the built-in
+    # values, which are what the file would have said.
+    repo_config.ensure_defaults()
+    # The same, for the settings that are the user's rather than a repository's.
+    # Written once and never rewritten over damage -- see settings_backup.
+    settings_backup.ensure_defaults()
 
     # Everything this application does is a git command. Without git it is not
     # degraded, it is inert -- every repository would read as empty and every

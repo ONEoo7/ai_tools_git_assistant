@@ -884,3 +884,198 @@ def test_declining_an_audit_sends_nothing(qapp, with_repo, monkeypatch):
 
     assert started == []
     assert panel.run_btn.isEnabled()
+
+
+# ---- a repository's own settings, in the Repositories tab ---------------------------
+def _repos_tab(dlg, repo_path: str):
+    """Select one repository in the tree, as clicking it does."""
+    for item in dlg._all_repo_items():
+        if item.data(0, Qt.ItemDataRole.UserRole).path == repo_path:
+            dlg.repo_tree.setCurrentItem(item)
+            return item
+    raise AssertionError(f"{repo_path} is not in the tree")
+
+
+@pytest.fixture
+def config_store(tmp_path, monkeypatch):
+    from git_assistant import repo_config
+
+    monkeypatch.setattr(
+        repo_config, "user_config_dir", lambda *a, **k: str(tmp_path / "config")
+    )
+    return repo_config
+
+
+def test_a_repository_with_no_settings_is_offered_some(qapp, with_repo, config_store, tmp_path):
+    repo = tmp_path / "demo"
+    repo.mkdir()
+    with_repo.repos = [RepoEntry(str(repo))]
+    dlg = SettingsDialog(with_repo)
+
+    _repos_tab(dlg, str(repo))
+
+    assert dlg.repo_config_create_btn.isEnabled()
+    assert not dlg.repo_config_save_btn.isEnabled()
+    assert config_store.DEFAULTS_FILE in dlg.repo_config_note.text()
+
+
+def test_creating_one_shows_it_and_stops_offering(qapp, with_repo, config_store, tmp_path):
+    repo = tmp_path / "demo"
+    repo.mkdir()
+    with_repo.repos = [RepoEntry(str(repo))]
+    dlg = SettingsDialog(with_repo)
+    _repos_tab(dlg, str(repo))
+
+    dlg._on_create_repo_config()
+
+    assert config_store.has_repo_config(repo)
+    assert not dlg.repo_config_create_btn.isEnabled()
+    assert dlg.repo_config_save_btn.isEnabled()
+    assert '"pattern"' in dlg.repo_config_edit.toPlainText()
+
+
+def test_an_existing_file_is_shown_as_it_is_on_disk(qapp, with_repo, config_store, tmp_path):
+    repo = tmp_path / "demo"
+    repo.mkdir()
+    path = config_store.repo_config_path(repo)
+    path.parent.mkdir(parents=True)
+    path.write_text('{"fetch": {"depth": 7}}', encoding="utf-8")
+    with_repo.repos = [RepoEntry(str(repo))]
+    dlg = SettingsDialog(with_repo)
+
+    _repos_tab(dlg, str(repo))
+
+    assert '"depth": 7' in dlg.repo_config_edit.toPlainText()
+    assert str(path) == dlg.repo_config_label.text()
+
+
+def test_saving_broken_json_says_so_and_keeps_what_was_typed(
+    qapp, with_repo, config_store, tmp_path
+):
+    """Reloading over it would throw away the only copy of the edit."""
+    repo = tmp_path / "demo"
+    repo.mkdir()
+    with_repo.repos = [RepoEntry(str(repo))]
+    dlg = SettingsDialog(with_repo)
+    _repos_tab(dlg, str(repo))
+    dlg._on_create_repo_config()
+
+    dlg.repo_config_edit.setPlainText('{"fetch": {,}}')
+    dlg._on_save_repo_config()
+
+    assert "valid JSON" in dlg.repo_config_status.text()
+    assert '{"fetch": {,}}' == dlg.repo_config_edit.toPlainText()
+    assert config_store.resolve(repo).problem == ""  # the file on disk is intact
+
+
+def test_selecting_no_single_repository_says_what_the_pane_is_for(
+    qapp, with_repo, config_store
+):
+    dlg = SettingsDialog(with_repo)
+    dlg.repo_tree.clearSelection()
+    dlg._refresh_repo_config()
+
+    assert not dlg.repo_config_edit.isEnabled()
+    assert not dlg.repo_config_create_btn.isEnabled()
+    assert "Select one repository" in dlg.repo_config_note.text()
+
+
+def test_a_broken_file_on_disk_is_named_when_the_repository_is_selected(
+    qapp, with_repo, config_store, tmp_path
+):
+    repo = tmp_path / "demo"
+    repo.mkdir()
+    path = config_store.repo_config_path(repo)
+    path.parent.mkdir(parents=True)
+    path.write_text("{oops}", encoding="utf-8")
+    with_repo.repos = [RepoEntry(str(repo))]
+    dlg = SettingsDialog(with_repo)
+
+    _repos_tab(dlg, str(repo))
+
+    assert "valid JSON" in dlg.repo_config_status.text()
+
+
+def test_a_mangled_repo_config_can_be_reset_from_the_defaults(
+    qapp, with_repo, config_store, tmp_path, monkeypatch
+):
+    """The point of a backup: a file edited into nonsense has a way back."""
+    from PyQt6.QtWidgets import QMessageBox
+
+    repo = tmp_path / "demo"
+    repo.mkdir()
+    path = config_store.repo_config_path(repo)
+    path.parent.mkdir(parents=True)
+    path.write_text("}{ not json", encoding="utf-8")
+    with_repo.repos = [RepoEntry(str(repo))]
+    dlg = SettingsDialog(with_repo)
+    _repos_tab(dlg, str(repo))
+    assert "valid JSON" in dlg.repo_config_status.text()
+    monkeypatch.setattr(
+        QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes
+    )
+
+    dlg._on_reset_repo_config()
+
+    assert config_store.resolve(repo).problem == ""
+    assert '"pattern"' in dlg.repo_config_edit.toPlainText()
+
+
+def test_removing_a_repo_config_offers_to_create_one_again(
+    qapp, with_repo, config_store, tmp_path, monkeypatch
+):
+    from PyQt6.QtWidgets import QMessageBox
+
+    repo = tmp_path / "demo"
+    repo.mkdir()
+    with_repo.repos = [RepoEntry(str(repo))]
+    dlg = SettingsDialog(with_repo)
+    _repos_tab(dlg, str(repo))
+    dlg._on_create_repo_config()
+    monkeypatch.setattr(
+        QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes
+    )
+
+    dlg._on_remove_repo_config()
+
+    assert not config_store.has_repo_config(repo)
+    assert dlg.repo_config_create_btn.isEnabled()
+    assert not dlg.repo_config_reset_btn.isEnabled()
+
+
+def test_neither_reset_nor_remove_happens_without_being_asked(
+    qapp, with_repo, config_store, tmp_path, monkeypatch
+):
+    """Both replace a file inside the user's repository."""
+    from PyQt6.QtWidgets import QMessageBox
+
+    repo = tmp_path / "demo"
+    repo.mkdir()
+    with_repo.repos = [RepoEntry(str(repo))]
+    dlg = SettingsDialog(with_repo)
+    _repos_tab(dlg, str(repo))
+    dlg._on_create_repo_config()
+    config_store.write_repo_text(repo, '{"fetch": {"depth": 42}}')
+    monkeypatch.setattr(
+        QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Cancel
+    )
+
+    dlg._on_reset_repo_config()
+    dlg._on_remove_repo_config()
+
+    assert config_store.has_repo_config(repo)
+    assert config_store.resolve(repo).fetch.depth == 42
+
+
+def test_open_is_withdrawn_while_more_than_one_audit_run_is_selected(qapp, with_repo):
+    """The same rule as the other two history panes: open one, delete many."""
+    panel = AgentsPanel(with_repo)
+    repo, agent = panel._repo_path(), panel._agent_id()
+    panel._on_finished(_runs(_report_for(repo=repo, agent_id=agent)))
+    panel._on_finished(_runs(_report_for(repo=repo, agent_id=agent)))
+
+    panel.runs_tree.selectAll()
+
+    assert len(panel._selected_runs()) == 2
+    assert not panel.open_run_btn.isEnabled()
+    assert panel.delete_run_btn.isEnabled()

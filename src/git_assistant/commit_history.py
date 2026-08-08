@@ -6,11 +6,19 @@ per repository, with what produced it -- strategy, chunk count, the branch and
 commit it described -- and whether it was the one that became a commit.
 
     <config dir>/commit_runs/<repo key>.json
+    <config dir>/commit_runs/calls/<repo key>/<run id>.json
 
 One file per repository, unlike the audit and review stores. Those split the
 index from the records because a report is tens of kilobytes and drawing a list
 of twenty must not read all twenty. A commit message is a kilobyte; the whole
 history of a repository is smaller than one audit, so the file *is* the index.
+
+The calls are the exception, and are kept in their own file per run for exactly
+the reason above: a map-reduce over a large diff carries that diff through
+fifteen prompts, and a list of twenty messages must not read fifteen prompts
+twenty times to draw itself. They are read when a run is opened and at no other
+time -- and capped, because "every prompt of every run forever" is a way to put
+tens of megabytes a repository somewhere nobody looks.
 """
 
 from __future__ import annotations
@@ -28,10 +36,17 @@ from git_assistant.config import APP_NAME, repo_key
 
 SCHEMA_VERSION = 1
 RUNS_DIR = "commit_runs"
+#: Where one run's exchanges with the model live; see the module docstring.
+CALLS_DIR = "calls"
 #: Newest N kept per repository (0 keeps everything).
 DEFAULT_LIMIT = 20
 #: A message longer than this is not a commit message; refuse to store the rest.
 MAX_MESSAGE = 20_000
+#: The most one run's calls may take on disk. Reached only by a map-reduce over
+#: a diff of some hundreds of kilobytes; everything ordinary fits several times
+#: over. What does not fit is dropped whole and said out loud -- see
+#: `_calls_within_budget`.
+MAX_CALL_BYTES = 512_000
 
 
 def runs_root() -> Path:
@@ -40,6 +55,10 @@ def runs_root() -> Path:
 
 def runs_path(repo_path: str) -> Path:
     return runs_root() / f"{repo_key(repo_path)}.json"
+
+
+def calls_path(repo_path: str, run_id: str) -> Path:
+    return runs_root() / CALLS_DIR / repo_key(repo_path) / f"{run_id}.json"
 
 
 @dataclass
@@ -61,6 +80,10 @@ class StoredMessage:
     provider: str = ""
     committed: bool = False  # this is the message that became a commit
     pinned: bool = False
+    #: How many exchanges with the model this run made. Kept here rather than
+    #: counted from the calls file, so a run whose calls were dropped -- by the
+    #: budget, or by a build that did not keep any -- can still say what it did.
+    num_calls: int = 0
 
     def when(self) -> datetime | None:
         try:
@@ -123,7 +146,112 @@ def _from_dict(data: dict) -> StoredMessage | None:
         provider=str(data.get("provider", "")),
         committed=bool(data.get("committed", False)),
         pinned=bool(data.get("pinned", False)),
+        num_calls=int(data.get("num_calls", 0) or 0),
     )
+
+
+# ---- the calls behind one message --------------------------------------------------
+def _call_to_dict(call) -> dict:
+    return {
+        "index": int(getattr(call, "index", 0) or 0),
+        "phase": str(getattr(call, "phase", "")),
+        "model": str(getattr(call, "model", "")),
+        "system": str(getattr(call, "system", "")),
+        "user": str(getattr(call, "user", "")),
+        "max_tokens": int(getattr(call, "max_tokens", 0) or 0),
+        "response": str(getattr(call, "response", "")),
+        "error": str(getattr(call, "error", "")),
+        "seconds": float(getattr(call, "seconds", 0.0) or 0.0),
+        "started_at": float(getattr(call, "started_at", 0.0) or 0.0),
+    }
+
+
+def _call_from_dict(data: object):
+    from git_assistant.llm_log import LlmCall
+
+    if not isinstance(data, dict):
+        return None
+    return LlmCall(
+        index=int(data.get("index", 0) or 0),
+        phase=str(data.get("phase", "")),
+        model=str(data.get("model", "")),
+        system=str(data.get("system", "")),
+        user=str(data.get("user", "")),
+        max_tokens=int(data.get("max_tokens", 0) or 0),
+        response=str(data.get("response", "")),
+        error=str(data.get("error", "")),
+        seconds=float(data.get("seconds", 0.0) or 0.0),
+        started_at=float(data.get("started_at", 0.0) or 0.0),
+    )
+
+
+def _calls_within_budget(calls: list, budget: int = MAX_CALL_BYTES) -> list[dict]:
+    """As many whole calls as fit, newest first, back in the order they happened.
+
+    Newest first because the last call is the one that wrote the message and the
+    ones before it are the chunk summaries that fed it: given a choice, the
+    answer is worth more than the working. Whole calls only -- half a prompt
+    read as a whole one is worse than a prompt nobody kept.
+    """
+    kept: list[dict] = []
+    spent = 0
+    for call in reversed(calls):
+        entry = _call_to_dict(call)
+        cost = len(json.dumps(entry, ensure_ascii=False))
+        if kept and spent + cost > budget:
+            break
+        kept.append(entry)
+        spent += cost
+    kept.reverse()
+    return kept
+
+
+def _write_calls(repo_path: str, run_id: str, calls: list) -> None:
+    """Never raises: losing the transcript must not lose the message."""
+    if not calls:
+        return
+    path = calls_path(repo_path, run_id)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "version": SCHEMA_VERSION,
+            "run_id": run_id,
+            "made": len(calls),
+            "calls": _calls_within_budget(calls),
+        }
+        tmp = path.with_name(f"{path.name}.{uuid.uuid4().hex[:8]}.tmp")
+        tmp.write_text(
+            json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+        os.replace(tmp, path)
+    except OSError:
+        pass
+
+
+def load_calls(stored: StoredMessage) -> list:
+    """The exchanges behind one stored message, in the order they happened.
+
+    Empty for a message recorded before this build kept them, and for one whose
+    file has since gone. ``StoredMessage.num_calls`` is how many there were, so
+    the difference between "none were kept" and "it made none" is answerable.
+    """
+    try:
+        data = json.loads(
+            calls_path(stored.repo_path, stored.run_id).read_text(encoding="utf-8")
+        )
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError, ValueError):
+        return []
+    entries = data.get("calls") if isinstance(data, dict) else data
+    if not isinstance(entries, list):
+        return []
+    return [c for c in (_call_from_dict(e) for e in entries) if c is not None]
+
+
+def _delete_calls(repo_path: str, run_id: str) -> None:
+    try:
+        calls_path(repo_path, run_id).unlink(missing_ok=True)
+    except OSError:
+        pass  # a transcript left behind costs disk, not correctness
 
 
 # ---- reading --------------------------------------------------------------------
@@ -161,7 +289,11 @@ def _write(repo_path: str, runs: list[StoredMessage]) -> None:
 
 
 def _prune(runs: list[StoredMessage], limit: int) -> list[StoredMessage]:
-    """Drop the oldest beyond the cap. Pinned messages are never dropped."""
+    """Drop the oldest beyond the cap. Pinned messages are never dropped.
+
+    A dropped message takes its transcript with it: a calls file with no message
+    to belong to is unreachable, and only the disk would know it was there.
+    """
     if limit <= 0:
         return runs
     kept: list[StoredMessage] = []
@@ -172,6 +304,8 @@ def _prune(runs: list[StoredMessage], limit: int) -> list[StoredMessage]:
         elif count < limit:
             count += 1
             kept.append(run)
+        else:
+            _delete_calls(run.repo_path, run.run_id)
     return sorted(kept, key=lambda r: r.started_at, reverse=True)
 
 
@@ -209,11 +343,15 @@ def record(
         context_window=getattr(result, "context_window", 0),
         model=model,
         provider=provider,
+        num_calls=len(getattr(result, "calls", None) or []),
     )
     try:
         _write(repo_path, _prune([stored, *_read(runs_path(repo_path))], limit))
     except OSError as exc:
         return None, str(exc)
+    # After the message is safely written, and never in a way that can undo it:
+    # the transcript is what the run *said*, and the message is what it was for.
+    _write_calls(repo_path, stored.run_id, getattr(result, "calls", None) or [])
     return stored, ""
 
 
@@ -246,6 +384,7 @@ def delete_run(stored: StoredMessage) -> bool:
         _write(stored.repo_path, runs)
     except OSError:
         return False
+    _delete_calls(stored.repo_path, stored.run_id)
     return True
 
 
@@ -255,4 +394,13 @@ def clear_repo(repo_path: str) -> bool:
         runs_path(repo_path).unlink(missing_ok=True)
     except OSError:
         return False
+    # "Forget entirely" includes the prompts, which are the part of this store
+    # that actually holds what was in the diff.
+    directory = calls_path(repo_path, "x").parent
+    try:
+        for path in directory.glob("*.json"):
+            path.unlink(missing_ok=True)
+        directory.rmdir()
+    except OSError:
+        pass
     return True

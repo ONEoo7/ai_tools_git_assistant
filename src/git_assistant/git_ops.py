@@ -784,6 +784,223 @@ def push(repo: str | Path, remote: str = "origin") -> GitResult:
     return _run(repo, ["push", "--set-upstream", remote, branch])
 
 
+# ---- branches --------------------------------------------------------------------
+@dataclass
+class BranchInfo:
+    """One local branch, and how it stands against what it tracks."""
+
+    name: str
+    current: bool = False
+    upstream: str = ""  # "origin/main"; "" when it tracks nothing
+    ahead: int = 0  # commits it has that its upstream has not
+    behind: int = 0
+    subject: str = ""  # the tip commit's summary line
+
+    def tracking_label(self) -> str:
+        """What a list shows beside the name. Empty when there is nothing to say."""
+        if not self.upstream:
+            return "no upstream"
+        parts = []
+        if self.ahead:
+            parts.append(f"{self.ahead} ahead")
+        if self.behind:
+            parts.append(f"{self.behind} behind")
+        return ", ".join(parts) or "up to date"
+
+
+def branch_exists(repo: str | Path, name: str) -> bool:
+    res = _run(repo, ["rev-parse", "--verify", "--quiet", f"refs/heads/{name}"])
+    return res.ok and bool(res.stdout.strip())
+
+
+def list_branch_info(repo: str | Path) -> list[BranchInfo]:
+    """Every local branch with its upstream and how far it has drifted.
+
+    One `for-each-ref` rather than a `rev-list` per branch: a repository with
+    forty branches would otherwise be forty processes to draw one list, and on
+    Windows the processes are the cost.
+
+    Recency order, as `list_branches` is, and for the same reason: the branch
+    someone is working on is the one they are looking for.
+    """
+    # %(upstream:track) is "[ahead 2, behind 1]", which is the same two numbers
+    # git would give for two more commands.
+    fields = ("refname:short", "upstream:short", "upstream:track", "HEAD", "subject")
+    separator = "\x1f"
+    res = _run(
+        repo,
+        [
+            "for-each-ref",
+            f"--format={separator.join('%(' + f + ')' for f in fields)}",
+            "--sort=-committerdate",
+            "refs/heads",
+        ],
+    )
+    if not res.ok:
+        return []
+
+    branches: list[BranchInfo] = []
+    for line in res.stdout.splitlines():
+        if not line.strip():
+            continue
+        # Split only as many times as there are fields, so a separator inside
+        # the last one stays in it. The subject is last precisely because it is
+        # the field a commit message gets to choose, and a branch must not
+        # disappear from this list because of what was written about it.
+        parts = line.split(separator, len(fields) - 1)
+        if len(parts) != len(fields):
+            continue
+        name, upstream, track, head, subject = parts
+        ahead = re.search(r"ahead (\d+)", track)
+        behind = re.search(r"behind (\d+)", track)
+        branches.append(
+            BranchInfo(
+                name=name.strip(),
+                current=head.strip() == "*",
+                upstream=upstream.strip(),
+                ahead=int(ahead.group(1)) if ahead else 0,
+                behind=int(behind.group(1)) if behind else 0,
+                subject=subject.strip(),
+            )
+        )
+    return branches
+
+
+def create_branch(
+    repo: str | Path,
+    name: str,
+    *,
+    start_point: str = "",
+    switch: bool = True,
+) -> GitResult:
+    """Create ``name``, from ``start_point`` or from HEAD, and check it out.
+
+    ``git switch -c`` rather than ``branch`` then ``switch``: one command that
+    either does both or does neither, so a failure to check out cannot leave a
+    branch nobody asked for lying around.
+
+    Never ``-C``/``--force``: creating a branch over one that exists is how the
+    branch that was there stops existing, and this is offered from a text field.
+    """
+    if not name:
+        return GitResult(ok=False, stdout="", stderr="No branch name given.", returncode=1)
+    if switch:
+        args = ["switch", "--create", name]
+    else:
+        args = ["branch", name]
+    if start_point:
+        args.append(start_point)
+    return _run(repo, args)
+
+
+def delete_branch(repo: str | Path, name: str, *, force: bool = False) -> GitResult:
+    """Delete a local branch. Does not touch the remote.
+
+    ``-d`` unless ``force``: git refuses to delete a branch whose commits are
+    on no other branch, and that refusal is the last thing standing between a
+    button and somebody's afternoon. The caller that wants it gone anyway has
+    to say so, and should have asked first.
+    """
+    return _run(repo, ["branch", "-D" if force else "-d", name])
+
+
+def delete_remote_branch(
+    repo: str | Path, name: str, remote: str = "origin"
+) -> GitResult:
+    """Delete ``name`` on ``remote``.
+
+    Spelled `--delete <name>` rather than the `:refs/heads/<name>` refspec: the
+    two do the same thing, and only one of them can be read by someone who is
+    about to approve it.
+    """
+    return _run(repo, ["push", remote, "--delete", name])
+
+
+def push_branch(
+    repo: str | Path,
+    name: str,
+    *,
+    remote: str = "origin",
+    set_upstream: bool = True,
+) -> GitResult:
+    """Publish one branch. Never force-pushes.
+
+    ``set_upstream`` is asked of the configuration rather than assumed, but a
+    branch that already tracks something is left tracking it: re-pointing an
+    upstream is a different act from pushing, and not one anybody asked for.
+    """
+    args = ["push"]
+    if set_upstream and not branch_upstream(repo, name):
+        args.append("--set-upstream")
+    args += [remote, name]
+    return _run(repo, args)
+
+
+def branch_upstream(repo: str | Path, name: str) -> str:
+    """What ``name`` tracks, or ``""``. Unlike `get_upstream`, not only HEAD's."""
+    res = _run(
+        repo,
+        ["for-each-ref", "--format=%(upstream:short)", f"refs/heads/{name}"],
+    )
+    return res.stdout.strip() if res.ok else ""
+
+
+# ---- fetching --------------------------------------------------------------------
+def fetch(
+    repo: str | Path,
+    *,
+    remote: str = "",
+    depth: int | None = None,
+    prune: bool = True,
+    tags: bool = True,
+) -> GitResult:
+    """Bring refs up to date without touching the working tree.
+
+    ``depth`` asks for a shallow fetch: that many commits per ref and no more.
+    On a repository that already has its whole history this *deepens nothing*
+    and truncates what it fetches -- see `is_shallow` and `unshallow`, which are
+    how it is undone. It is offered because cloning a large history to read one
+    branch is a wait nobody needs to have.
+
+    ``--no-write-fetch-head``: fetching is something this application does on
+    the user's behalf, and overwriting FETCH_HEAD would quietly change what
+    their next `git merge FETCH_HEAD` means.
+    """
+    args = ["fetch", "--no-write-fetch-head"]
+    if prune:
+        args.append("--prune")
+    args.append("--tags" if tags else "--no-tags")
+    if depth is not None:
+        args.append(f"--depth={max(1, depth)}")
+    if remote:
+        args.append(remote)
+    return _run(repo, args)
+
+
+def is_shallow(repo: str | Path) -> bool:
+    """Whether this repository holds a truncated history."""
+    res = _run(repo, ["rev-parse", "--is-shallow-repository"])
+    return res.ok and res.stdout.strip() == "true"
+
+
+def unshallow(repo: str | Path, remote: str = "origin") -> GitResult:
+    """Fetch the rest of a shallow repository's history.
+
+    Refuses on a repository that is not shallow rather than passing
+    ``--unshallow`` to git, which fails with "--unshallow on a complete
+    repository does not make sense" -- true, and not an answer to give someone
+    who pressed a button offering to do it.
+    """
+    if not is_shallow(repo):
+        return GitResult(
+            ok=False,
+            stdout="",
+            stderr="This repository already has its whole history.",
+            returncode=1,
+        )
+    return _run(repo, ["fetch", "--unshallow", remote])
+
+
 def commit(repo: str | Path, message: str) -> GitResult:
     """Create a commit with the given (multi-line) message.
 

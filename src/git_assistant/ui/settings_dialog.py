@@ -9,7 +9,7 @@ import re
 from pathlib import Path
 
 from PyQt6.QtCore import Qt, QTimer, QUrl, pyqtSignal
-from PyQt6.QtGui import QDesktopServices
+from PyQt6.QtGui import QDesktopServices, QFontDatabase
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -44,6 +44,7 @@ from git_assistant import (
     __version__,
     git_ops,
     lmstudio_setup,
+    repo_config,
 )
 from git_assistant.commit_generator import MIN_PARALLEL_CONTEXT
 from git_assistant.config import (
@@ -58,7 +59,7 @@ from git_assistant.config import (
     build_repo_tree,
     config_path,
 )
-from git_assistant import agent_cli, credentials, providers, tracing
+from git_assistant import agent_cli, credentials, providers, settings_backup, tracing
 from git_assistant.identities import IdentityStore
 from git_assistant.llm import LLMError, ModelInfo, build_client
 from git_assistant.prompts import DEFAULT_TEMPLATE
@@ -72,7 +73,7 @@ from git_assistant.ui.identity_bar import IdentityBar
 from git_assistant.ui.theme_picker import ThemePicker
 from git_assistant.ui.preview_dialog import SECTION_GAP, CommitPanel
 from git_assistant.ui.review_panel import ReviewPanel
-from git_assistant.ui.tags_panel import TagsPanel
+from git_assistant.ui.branches_tags_panel import BranchesTagsPanel
 from git_assistant.ui.usage_pane import UsagePane
 from git_assistant.ui.update_prompt import UpdateCheckWorker
 from git_assistant.updating import (
@@ -189,7 +190,7 @@ class SettingsDialog(QDialog):
         self._ready = False  # set once every tab's widgets exist
         tabs.currentChanged.connect(self._on_tab_changed)
         tabs.addTab(self._build_commit_tab(), "Generate Commit Message")
-        tabs.addTab(self._build_tags_tab(), "Tags")
+        tabs.addTab(self._build_tags_tab(), "Branches && Tags")
         tabs.addTab(self._build_agents_tab(), "Audit")
         tabs.addTab(self._build_review_tab(), "Code Review")
         tabs.addTab(self._build_connection_tab(), "Connection && Model")
@@ -560,7 +561,7 @@ class SettingsDialog(QDialog):
         return self.commit_panel
 
     def _build_tags_tab(self) -> QWidget:
-        self.tags_panel = TagsPanel(self.settings)
+        self.tags_panel = BranchesTagsPanel(self.settings)
         return self.tags_panel
 
     def _build_agents_tab(self) -> QWidget:
@@ -1210,7 +1211,216 @@ class SettingsDialog(QDialog):
         self.scan_status.setStyleSheet("color: #8ab;")
         self.scan_status.setWordWrap(True)
         layout.addWidget(self.scan_status)
+
+        layout.addWidget(self._build_repo_config_pane(), 1)
+        self.repo_tree.itemSelectionChanged.connect(self._refresh_repo_config)
         return w
+
+    # ---- one repository's own settings ---------------------------------------
+    def _build_repo_config_pane(self) -> QWidget:
+        """The selected repository's settings file, as it is on disk.
+
+        Shown as the file rather than as a form: this is the thing a project
+        commits and reviews, and a form would be an opinion about which of its
+        keys matter. See git_assistant.repo_config for what the keys are.
+        """
+        pane = QWidget()
+        box = QVBoxLayout(pane)
+        box.setContentsMargins(0, SECTION_GAP, 0, 0)
+
+        self.repo_config_label = QLabel("")
+        self.repo_config_label.setWordWrap(True)
+        font = self.repo_config_label.font()
+        font.setBold(True)
+        self.repo_config_label.setFont(font)
+        box.addWidget(self.repo_config_label)
+
+        self.repo_config_note = QLabel("")
+        self.repo_config_note.setWordWrap(True)
+        self.repo_config_note.setStyleSheet("color: #888;")
+        box.addWidget(self.repo_config_note)
+
+        self.repo_config_edit = QPlainTextEdit()
+        self.repo_config_edit.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        self.repo_config_edit.setFont(
+            QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont)
+        )
+        box.addWidget(self.repo_config_edit, 1)
+
+        row = QHBoxLayout()
+        self.repo_config_create_btn = QPushButton("Create repository config")
+        self.repo_config_create_btn.clicked.connect(self._on_create_repo_config)
+        self.repo_config_save_btn = QPushButton("Save")
+        self.repo_config_save_btn.clicked.connect(self._on_save_repo_config)
+        self.repo_config_reload_btn = QPushButton("Reload")
+        self.repo_config_reload_btn.clicked.connect(self._refresh_repo_config)
+        self.repo_config_reset_btn = QPushButton("Reset to defaults")
+        self.repo_config_reset_btn.setToolTip(
+            "Replace this file with the defaults. For a file that has been "
+            "edited into something that does not work."
+        )
+        self.repo_config_reset_btn.clicked.connect(self._on_reset_repo_config)
+        self.repo_config_remove_btn = QPushButton("Remove")
+        self.repo_config_remove_btn.setToolTip(
+            "Delete this file, so the repository follows your defaults again -- "
+            "including any later change to them."
+        )
+        self.repo_config_remove_btn.clicked.connect(self._on_remove_repo_config)
+        self.repo_config_open_btn = QPushButton("Open folder")
+        self.repo_config_open_btn.clicked.connect(self._on_open_repo_config_dir)
+        for button in (
+            self.repo_config_create_btn,
+            self.repo_config_save_btn,
+            self.repo_config_reload_btn,
+            self.repo_config_reset_btn,
+            self.repo_config_remove_btn,
+            self.repo_config_open_btn,
+        ):
+            row.addWidget(button)
+        row.addStretch(1)
+        box.addLayout(row)
+
+        self.repo_config_status = QLabel("")
+        self.repo_config_status.setWordWrap(True)
+        self.repo_config_status.setStyleSheet(INFO_COLOUR)
+        box.addWidget(self.repo_config_status)
+        return pane
+
+    def _selected_repo_path(self) -> str:
+        """The one selected repository, or "" when that is not what is selected."""
+        items = [
+            it for it in self.repo_tree.selectedItems() if self._item_kind(it) == "repo"
+        ]
+        if len(items) != 1:
+            return ""
+        return items[0].data(0, Qt.ItemDataRole.UserRole).path
+
+    def _refresh_repo_config(self) -> None:
+        """Show the selected repository's file, or offer to make one."""
+        repo = self._selected_repo_path()
+        self.repo_config_status.setText("")
+        if not repo:
+            self.repo_config_label.setText("Repository settings")
+            self.repo_config_note.setText(
+                "Select one repository above to see the settings it keeps in "
+                f"{repo_config.REPO_DIR}\\{repo_config.REPO_FILE}."
+            )
+            self.repo_config_edit.setPlainText("")
+            self.repo_config_edit.setEnabled(False)
+            for button in self._repo_config_buttons():
+                button.setEnabled(False)
+            return
+
+        exists = repo_config.has_repo_config(repo)
+        self.repo_config_label.setText(str(repo_config.repo_config_path(repo)))
+        self.repo_config_edit.setEnabled(exists)
+        self.repo_config_create_btn.setEnabled(not exists)
+        for button in self._repo_config_buttons():
+            if button is not self.repo_config_create_btn:
+                button.setEnabled(exists)
+
+        if exists:
+            self.repo_config_edit.setPlainText(repo_config.read_repo_text(repo))
+            self.repo_config_note.setText(
+                "This file is inside the repository, so it can be committed and "
+                "shared. Anything it does not set is taken from your defaults in "
+                f"{repo_config.DEFAULTS_FILE}."
+            )
+            problem = repo_config.resolve(repo).problem
+            if problem:
+                self.repo_config_status.setText(problem)
+                self.repo_config_status.setStyleSheet(WARN_COLOUR)
+            else:
+                self.repo_config_status.setStyleSheet(INFO_COLOUR)
+            return
+
+        self.repo_config_edit.setPlainText("")
+        self.repo_config_note.setText(
+            "This repository has no settings of its own, so it uses your "
+            f"defaults from {repo_config.DEFAULTS_FILE}. Creating one writes "
+            "those same values into the repository, where they can be committed "
+            "-- nothing changes until you edit them."
+        )
+
+    def _repo_config_buttons(self) -> tuple:
+        return (
+            self.repo_config_create_btn,
+            self.repo_config_save_btn,
+            self.repo_config_reload_btn,
+            self.repo_config_reset_btn,
+            self.repo_config_remove_btn,
+            self.repo_config_open_btn,
+        )
+
+    def _on_reset_repo_config(self) -> None:
+        repo = self._selected_repo_path()
+        if not repo or not self._confirm_repo_config(
+            "Reset these settings",
+            "Replace this repository's settings with your defaults?\n\n"
+            "What is in the file now is overwritten.",
+        ):
+            return
+        problem = repo_config.reset_repo_config(repo)
+        self._refresh_repo_config()
+        self.repo_config_status.setStyleSheet(WARN_COLOUR if problem else INFO_COLOUR)
+        self.repo_config_status.setText(problem or "Reset to your defaults.")
+
+    def _on_remove_repo_config(self) -> None:
+        repo = self._selected_repo_path()
+        if not repo or not self._confirm_repo_config(
+            "Remove these settings",
+            "Delete this repository's settings file?\n\n"
+            "It will follow your defaults again, including any later change "
+            "to them.",
+        ):
+            return
+        problem = repo_config.remove_repo_config(repo)
+        self._refresh_repo_config()
+        self.repo_config_status.setStyleSheet(WARN_COLOUR if problem else INFO_COLOUR)
+        self.repo_config_status.setText(problem or "Removed; the defaults apply again.")
+
+    def _confirm_repo_config(self, title: str, question: str) -> bool:
+        """Both of these replace a file in the user's repository. Both ask."""
+        return (
+            QMessageBox.question(
+                self,
+                title,
+                question,
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel,
+            )
+            == QMessageBox.StandardButton.Yes
+        )
+
+    def _on_create_repo_config(self) -> None:
+        repo = self._selected_repo_path()
+        if not repo:
+            return
+        problem = repo_config.create_repo_config(repo)
+        self._refresh_repo_config()
+        self.repo_config_status.setStyleSheet(WARN_COLOUR if problem else INFO_COLOUR)
+        self.repo_config_status.setText(
+            problem or f"Created {repo_config.repo_config_path(repo)}"
+        )
+
+    def _on_save_repo_config(self) -> None:
+        repo = self._selected_repo_path()
+        if not repo:
+            return
+        problem = repo_config.write_repo_text(
+            repo, self.repo_config_edit.toPlainText()
+        )
+        self.repo_config_status.setStyleSheet(WARN_COLOUR if problem else INFO_COLOUR)
+        # Not reloaded on failure: what was typed is the only copy of it, and
+        # replacing it with the file on disk would throw the edit away.
+        self.repo_config_status.setText(problem or "Saved.")
+
+    def _on_open_repo_config_dir(self) -> None:
+        repo = self._selected_repo_path()
+        if repo:
+            QDesktopServices.openUrl(
+                QUrl.fromLocalFile(str(repo_config.repo_dir(repo)))
+            )
 
     def _build_template_tab(self) -> QWidget:
         w = QWidget()
@@ -1367,8 +1577,91 @@ class SettingsDialog(QDialog):
         # Pin the form to the top; extra vertical space goes to the stretch below.
         outer.addWidget(form_container)
         outer.addWidget(self._build_langfuse_group())
+        outer.addWidget(self._build_shipped_settings_group())
         outer.addStretch(1)
         return w
+
+    def _build_shipped_settings_group(self) -> QWidget:
+        """Restoring the settings this build ships with; see settings_backup."""
+        group = QGroupBox("Shipped settings")
+        box = QVBoxLayout(group)
+
+        note = QLabel(
+            "A copy of the settings this build ships with, kept beside "
+            "settings.json with a checksum. Restoring puts your provider, "
+            "model, theme and the rest back to them -- your repositories are "
+            "kept."
+        )
+        note.setWordWrap(True)
+        note.setStyleSheet("color: #888;")
+        box.addWidget(note)
+
+        self.shipped_status = QLabel("")
+        self.shipped_status.setWordWrap(True)
+        self.shipped_status.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        box.addWidget(self.shipped_status)
+
+        row = QHBoxLayout()
+        self.shipped_restore_btn = QPushButton("Restore shipped settings")
+        self.shipped_restore_btn.clicked.connect(self._on_restore_shipped)
+        self.shipped_check_btn = QPushButton("Check again")
+        self.shipped_check_btn.clicked.connect(self._refresh_shipped_status)
+        row.addWidget(self.shipped_restore_btn)
+        row.addWidget(self.shipped_check_btn)
+        row.addStretch(1)
+        box.addLayout(row)
+        self._refresh_shipped_status()
+        return group
+
+    def _refresh_shipped_status(self) -> None:
+        result = settings_backup.check()
+        self.shipped_status.setText(
+            result.summary()
+            if not result.needs_reinstall
+            else (
+                f"{result.summary()}\n\nThere is nothing left that knows what "
+                "they should have said, so this installation is damaged. "
+                "Reinstall to put it right:\n"
+                f"    {settings_backup.reinstall_command()}"
+            )
+        )
+        self.shipped_status.setStyleSheet(
+            INFO_COLOUR if result.ok else WARN_COLOUR
+        )
+        # Offered only when there is something trustworthy to restore from.
+        self.shipped_restore_btn.setEnabled(result.ok)
+
+    def _on_restore_shipped(self) -> None:
+        if (
+            QMessageBox.question(
+                self,
+                "Restore shipped settings",
+                "Put the provider, model, theme and every other setting back "
+                "to what this build ships with?\n\n"
+                "Your repositories are kept. This cannot be undone.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel,
+            )
+            != QMessageBox.StandardButton.Yes
+        ):
+            return
+        problem = settings_backup.apply_over(self.settings)
+        if problem:
+            self._refresh_shipped_status()
+            QMessageBox.critical(self, "Nothing to restore from", problem)
+            return
+        # Saved before the widgets are refilled: a window showing the restored
+        # settings over a file still holding the old ones is the worst of both.
+        self.settings.save()
+        self._load_into_widgets()
+        self._refresh_shipped_status()
+        QMessageBox.information(
+            self,
+            "Settings restored",
+            "The shipped settings are back. Your repositories are unchanged.",
+        )
 
     # ---- Langfuse ----------------------------------------------------------
     def _build_langfuse_group(self) -> QWidget:
@@ -1601,6 +1894,9 @@ class SettingsDialog(QDialog):
         self._on_provider_selected()
 
         self._populate_repo_tree(s.repos, s.scan_roots)
+        # Nothing is selected yet, so this says what the pane is for rather
+        # than showing a file.
+        self._refresh_repo_config()
 
         self._reload_templates(select=DEFAULT_TEMPLATE_NAME)
 

@@ -157,3 +157,148 @@ def test_recording_reports_a_problem_instead_of_raising_when_the_disk_refuses(mo
     )
     stored, problem = _record()
     assert stored is None and "full" in problem
+
+
+# ---- the calls behind a message ------------------------------------------------------
+def _call(index=1, phase="single-shot", user="the diff", response="feat: a change"):
+    from git_assistant.llm_log import LlmCall
+
+    return LlmCall(
+        index=index,
+        phase=phase,
+        model="m",
+        system="you are a commit message writer",
+        user=user,
+        max_tokens=512,
+        response=response,
+        seconds=1.5,
+    )
+
+
+def test_the_calls_come_back_with_the_message_they_produced():
+    """Opening a stored run should answer "what was actually sent", too."""
+    result = _result()
+    result.calls = [_call(1), _call(2, phase="writing the message")]
+
+    stored, _ = commit_history.record("/x/demo", result)
+    back = commit_history.list_runs("/x/demo")[0]
+    calls = commit_history.load_calls(back)
+
+    assert back.num_calls == 2
+    assert [c.index for c in calls] == [1, 2]
+    assert [c.phase for c in calls] == ["single-shot", "writing the message"]
+    assert calls[0].user == "the diff"
+    assert calls[0].response == "feat: a change"
+    assert calls[0].seconds == 1.5
+    assert calls[0].transcript()  # the pane renders this and must not fail
+
+
+def test_a_message_with_no_calls_recorded_says_so_rather_than_lying():
+    """A run from a build that kept none is not a run that made none."""
+    stored, _ = _record()
+    back = commit_history.list_runs("/x/demo")[0]
+
+    assert back.num_calls == 0
+    assert commit_history.load_calls(back) == []
+
+
+def test_the_transcript_is_kept_out_of_the_list_of_messages():
+    """The file that draws the list must stay small; see the module docstring."""
+    result = _result()
+    result.calls = [_call(1, user="x" * 50_000)]
+    commit_history.record("/x/demo", result)
+
+    index = commit_history.runs_path("/x/demo").read_text(encoding="utf-8")
+
+    assert "x" * 1_000 not in index
+    assert len(index) < 5_000
+
+
+def test_an_enormous_run_keeps_what_fits_and_the_end_of_it():
+    """The last call is the one that wrote the message; the rest fed it."""
+    result = _result(strategy="map-reduce", chunks=40)
+    result.calls = [
+        _call(i, user="x" * 40_000, response=f"note {i}") for i in range(1, 41)
+    ]
+    result.calls[-1] = _call(40, phase="writing the message", response="feat: it")
+
+    stored, _ = commit_history.record("/x/demo", result)
+    back = commit_history.list_runs("/x/demo")[0]
+    calls = commit_history.load_calls(back)
+
+    assert back.num_calls == 40, "what it did is recorded even when not all is kept"
+    assert 0 < len(calls) < 40
+    assert calls[-1].phase == "writing the message"
+    assert [c.index for c in calls] == sorted(c.index for c in calls)
+    size = commit_history.calls_path("/x/demo", stored.run_id).stat().st_size
+    assert size <= commit_history.MAX_CALL_BYTES * 1.1
+
+
+def test_one_huge_call_is_kept_rather_than_nothing_at_all():
+    result = _result()
+    result.calls = [_call(1, user="x" * (commit_history.MAX_CALL_BYTES * 2))]
+
+    stored, _ = commit_history.record("/x/demo", result)
+
+    assert len(commit_history.load_calls(stored)) == 1
+
+
+def test_deleting_a_message_takes_its_transcript_with_it():
+    result = _result()
+    result.calls = [_call(1)]
+    stored, _ = commit_history.record("/x/demo", result)
+    assert commit_history.calls_path("/x/demo", stored.run_id).exists()
+
+    commit_history.delete_run(stored)
+
+    assert not commit_history.calls_path("/x/demo", stored.run_id).exists()
+
+
+def test_a_message_pruned_by_the_limit_takes_its_transcript_with_it():
+    """Otherwise the prompts of every run ever made stay on disk, unreachable."""
+    kept = []
+    for i in range(4):
+        result = _result(message=f"feat: number {i}")
+        result.calls = [_call(1, user=f"diff {i}")]
+        stored, _ = commit_history.record("/x/demo", result, limit=2)
+        kept.append(stored)
+
+    alive = {r.run_id for r in commit_history.list_runs("/x/demo")}
+    for stored in kept:
+        exists = commit_history.calls_path("/x/demo", stored.run_id).exists()
+        assert exists is (stored.run_id in alive), stored.run_id
+
+
+def test_clearing_a_repository_forgets_the_prompts_too():
+    """They are the part of this store that holds what was in the diff."""
+    result = _result()
+    result.calls = [_call(1, user="a secret in a diff")]
+    stored, _ = commit_history.record("/x/demo", result)
+
+    commit_history.clear_repo("/x/demo")
+
+    assert not commit_history.calls_path("/x/demo", stored.run_id).exists()
+
+
+def test_a_transcript_that_cannot_be_written_does_not_lose_the_message(monkeypatch):
+    """The message is what the run was for; the transcript is what it said.
+
+    `record` promises never to raise -- it is called from a worker thread with a
+    message in hand -- so a disk that refuses the prompts must cost the prompts.
+    """
+    result = _result()
+    result.calls = [_call(1)]
+    real_mkdir = commit_history.Path.mkdir
+
+    def refuse_the_calls_dir(self, *args, **kwargs):
+        if commit_history.CALLS_DIR in self.parts:
+            raise OSError("no room for transcripts")
+        return real_mkdir(self, *args, **kwargs)
+
+    monkeypatch.setattr(commit_history.Path, "mkdir", refuse_the_calls_dir)
+
+    stored, problem = commit_history.record("/x/demo", result)
+
+    assert stored is not None and problem == ""
+    assert commit_history.list_runs("/x/demo")[0].message == result.message
+    assert commit_history.load_calls(stored) == []

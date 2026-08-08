@@ -341,6 +341,10 @@ class CommitPanel(QWidget):
         self.runs_tree.setHeaderLabels(["When", "Message"])
         self.runs_tree.setRootIsDecorated(False)
         self.runs_tree.setColumnWidth(0, 110)
+        # Several at once, because tidying up is the thing anybody does to a
+        # list of twenty. Opening stays a question about one of them, and the
+        # button says so by going grey -- see `_on_run_selection`.
+        self.runs_tree.setSelectionMode(QTreeWidget.SelectionMode.ExtendedSelection)
         self.runs_tree.itemDoubleClicked.connect(lambda *_: self._on_open_run())
         self.runs_tree.itemSelectionChanged.connect(self._on_run_selection)
         self.runs_tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -786,11 +790,53 @@ class CommitPanel(QWidget):
                 return
         self.editor.setPlainText(stored.message)
         self._shown_run = stored
-        self.progress.setText(f"Showing the message generated at {stored.when_label()}.")
+        note = self._show_stored_calls(stored)
+        self.progress.setText(
+            f"Showing the message generated at {stored.when_label()}. {note}".strip()
+        )
+
+    def _show_stored_calls(self, stored) -> str:
+        """Put the opened run's exchanges in the calls pane. Says what it found.
+
+        Without this the pane keeps whatever this session last ran, which is one
+        run's prompts sitting underneath another run's message -- and no way to
+        tell from either of them that they do not belong together.
+        """
+        calls = commit_history.load_calls(stored)
+        self.calls_pane.reset()
+        if not calls:
+            self.calls_pane.say(
+                "This message was recorded before the calls were kept."
+                if not stored.num_calls
+                else f"The {stored.num_calls} call(s) behind this message are "
+                "no longer stored."
+            )
+            return "" if not stored.num_calls else "Its calls are no longer stored."
+        for call in calls:
+            self.calls_pane.add_call(call)
+        if len(calls) < stored.num_calls:
+            # Dropped by the size cap when it was recorded, not lost since.
+            return f"{len(calls)} of its {stored.num_calls} call(s) were kept."
+        return f"{len(calls)} call(s) recorded."
 
     def _on_delete_run(self) -> None:
         chosen = self._selected_runs()
         if not chosen:
+            return
+        # Asked, as the audit and review histories ask. It was survivable while
+        # only one row could be selected at a time; it is not once a stray
+        # Ctrl+A can put twenty behind one click.
+        if (
+            QMessageBox.question(
+                self,
+                "Delete message(s)",
+                f"Delete {len(chosen)} recorded message(s)?\n\n"
+                "The commits they became are not touched.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel,
+            )
+            != QMessageBox.StandardButton.Yes
+        ):
             return
         for stored in chosen:
             commit_history.delete_run(stored)

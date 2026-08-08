@@ -4,7 +4,7 @@ import pytest
 
 pytest.importorskip("PyQt6.QtWidgets")
 
-from PyQt6.QtWidgets import QApplication  # noqa: E402
+from PyQt6.QtWidgets import QApplication, QMessageBox  # noqa: E402
 
 from git_assistant import commit_history  # noqa: E402
 from git_assistant.commit_generator import GenerationResult  # noqa: E402
@@ -690,6 +690,81 @@ def test_opening_an_earlier_message_puts_it_back_in_the_editor(qapp, settings, t
     assert panel.editor.toPlainText() == "feat: the first one"
 
 
+def _with_calls(message, *phases):
+    """A finished run that recorded an exchange per phase."""
+    from git_assistant.llm_log import LlmCall
+
+    result = _result(message)
+    result.calls = [
+        LlmCall(
+            index=i,
+            phase=phase,
+            model="m",
+            system="sys",
+            user=f"the prompt for {phase}",
+            max_tokens=512,
+            response=f"the answer from {phase}",
+        )
+        for i, phase in enumerate(phases, start=1)
+    ]
+    return result
+
+
+def _open_first_run(panel):
+    panel.runs_tree.setCurrentItem(panel.runs_tree.topLevelItem(0))
+    panel._on_open_run()
+
+
+def test_opening_an_earlier_message_shows_the_calls_that_wrote_it(
+    qapp, settings, tmp_path
+):
+    """The reported gap: the message came back but the calls pane did not."""
+    panel = _panel_with_repo(settings, tmp_path)
+    panel._on_finished(_with_calls("feat: the one", "summarizing a chunk", "writing the message"))
+    panel._reset_calls()  # as reopening the window, or running something else, does
+
+    _open_first_run(panel)
+
+    assert panel.calls_list.count() == 2
+    assert [c.phase for c in panel._calls] == [
+        "summarizing a chunk",
+        "writing the message",
+    ]
+    assert "the prompt for writing the message" in panel._calls[1].transcript()
+    assert "2 call(s)" in panel.progress.text()
+
+
+def test_opening_a_run_replaces_the_calls_of_the_one_before_it(qapp, settings, tmp_path):
+    """One run's prompts under another run's message explain nothing."""
+    panel = _panel_with_repo(settings, tmp_path)
+    panel._on_finished(_with_calls("feat: the first", "single-shot"))
+    panel._on_finished(
+        _with_calls("feat: the second", "summarizing a chunk", "writing the message")
+    )
+
+    for i in range(panel.runs_tree.topLevelItemCount()):
+        item = panel.runs_tree.topLevelItem(i)
+        if "the first" in item.text(1):
+            panel.runs_tree.setCurrentItem(item)
+    panel._on_open_run()
+
+    assert panel.editor.toPlainText() == "feat: the first"
+    assert [c.phase for c in panel._calls] == ["single-shot"]
+
+
+def test_opening_a_message_from_before_the_calls_were_kept_says_so(
+    qapp, settings, tmp_path
+):
+    """Silence would read as "this run made no calls", which is a lie."""
+    panel = _panel_with_repo(settings, tmp_path)
+    panel._on_finished(_result("feat: no calls recorded"))  # no calls on the result
+
+    _open_first_run(panel)
+
+    assert panel.calls_list.count() == 0
+    assert "before the calls were kept" in panel.call_view.toPlainText()
+
+
 def test_open_and_delete_are_offered_only_when_a_run_is_selected(qapp, settings, tmp_path):
     panel = _panel_with_repo(settings, tmp_path)
     panel._on_finished(_result())
@@ -765,3 +840,65 @@ def test_declining_sends_nothing(qapp, settings, tmp_path, monkeypatch):
 
     assert started == []
     assert panel.regen_btn.isEnabled(), "the panel is not left looking busy"
+
+
+# ---- selecting several previous messages ------------------------------------------
+def _select_all_runs(panel):
+    panel.runs_tree.selectAll()
+    return panel._selected_runs()
+
+
+def test_several_messages_can_be_selected_at_once(qapp, settings, tmp_path):
+    """Tidying up is the thing anybody does to a list of twenty."""
+    panel = _panel_with_repo(settings, tmp_path)
+    panel._on_finished(_result("feat: one"))
+    panel._on_finished(_result("feat: two"))
+
+    assert len(_select_all_runs(panel)) == 2
+
+
+def test_open_is_withdrawn_while_more_than_one_is_selected(qapp, settings, tmp_path):
+    """Opening is a question about one message; two is not an answer."""
+    panel = _panel_with_repo(settings, tmp_path)
+    panel._on_finished(_result("feat: one"))
+    panel._on_finished(_result("feat: two"))
+
+    _select_all_runs(panel)
+    assert not panel.open_run_btn.isEnabled()
+    assert panel.delete_run_btn.isEnabled()
+
+    panel.runs_tree.setCurrentItem(panel.runs_tree.topLevelItem(0))
+    assert panel.open_run_btn.isEnabled()
+
+
+def test_deleting_removes_every_selected_message(qapp, settings, tmp_path, monkeypatch):
+    panel = _panel_with_repo(settings, tmp_path)
+    for i in range(3):
+        panel._on_finished(_result(f"feat: number {i}"))
+    monkeypatch.setattr(
+        QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes
+    )
+
+    _select_all_runs(panel)
+    panel._on_delete_run()
+
+    assert panel.runs_tree.topLevelItemCount() == 0
+
+
+def test_deleting_several_asks_first_and_says_how_many(qapp, settings, tmp_path, monkeypatch):
+    """A stray Ctrl+A must not put twenty messages behind one click."""
+    panel = _panel_with_repo(settings, tmp_path)
+    for i in range(3):
+        panel._on_finished(_result(f"feat: number {i}"))
+    asked = []
+    monkeypatch.setattr(
+        QMessageBox,
+        "question",
+        lambda *a, **k: asked.append(a[2]) or QMessageBox.StandardButton.Cancel,
+    )
+
+    _select_all_runs(panel)
+    panel._on_delete_run()
+
+    assert asked and "3" in asked[0]
+    assert panel.runs_tree.topLevelItemCount() == 3  # declined, so nothing went

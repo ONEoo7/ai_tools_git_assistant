@@ -656,3 +656,37 @@ def test_the_run_is_given_exactly_the_plan_that_was_shown(qapp, with_repo, stage
     panel._on_review()
 
     assert started[0]._plan is seen[0][0]
+
+
+# ---- selecting several previous reviews ---------------------------------------------
+def test_several_reviews_can_be_selected_and_deleted(qapp, with_repo, staged, monkeypatch):
+    """Open is a question about one review; deleting is a question about a list."""
+    history.record(_run())
+    history.record(_later_run())
+    panel = ReviewPanel(with_repo)
+
+    panel.runs_tree.selectAll()
+
+    assert len(panel._selected_runs()) == 2
+    assert not panel.open_run_btn.isEnabled()
+    assert panel.delete_run_btn.isEnabled()
+
+    monkeypatch.setattr(
+        QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes
+    )
+    panel._on_delete_run()
+
+    assert panel.runs_tree.topLevelItemCount() == 0
+
+
+def test_open_comes_back_when_one_review_is_selected(qapp, with_repo, staged):
+    history.record(_run())
+    history.record(_later_run())
+    panel = ReviewPanel(with_repo)
+
+    panel.runs_tree.selectAll()
+    assert not panel.open_run_btn.isEnabled()
+
+    panel.runs_tree.setCurrentItem(panel.runs_tree.topLevelItem(0))
+
+    assert panel.open_run_btn.isEnabled()
