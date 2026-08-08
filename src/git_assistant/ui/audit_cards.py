@@ -23,7 +23,9 @@ and a description.
 from __future__ import annotations
 
 from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtGui import QColor, QPalette
 from PyQt6.QtWidgets import (
+    QApplication,
     QCheckBox,
     QFrame,
     QLabel,
@@ -34,28 +36,80 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from git_assistant.ui import theme
+
 MUTED_COLOUR = "color: #888;"
 #: How far an audit's own settings sit in from its tick. Enough to read as
 #: "belonging to the line above", which is the whole point of this file.
 INDENT = 22
 
-#: Every audit is a card, drawn as one: a border around what belongs together
-#: says it more plainly than the spacing between groups ever did. The audit
-#: being read differs by colour and by nothing else -- same border width, same
-#: contents, so clicking one moves the highlight and never the layout.
-#:
-#: Palette roles rather than colours: this window follows the system theme, and
-#: a hard-coded grey is either invisible or garish in one of them.
-CARD_STYLE = """
-QFrame#auditCard {
-    border: 1px solid palette(mid);
+#: A card's border must differ from its own fill by at least this much
+#: lightness to be a border at all.
+_BORDER_CONTRAST = 24
+
+#: How far the card being read is tinted towards the highlight colour. Enough
+#: to be unmistakable beside its neighbours, little enough that the text on it
+#: is still ordinary text on an ordinary background.
+_SELECTED_TINT = 0.16
+
+
+def _blend(base: QColor, towards: QColor, weight: float) -> QColor:
+    return QColor(
+        round(base.red() * (1 - weight) + towards.red() * weight),
+        round(base.green() * (1 - weight) + towards.green() * weight),
+        round(base.blue() * (1 - weight) + towards.blue() * weight),
+    )
+
+
+def card_colours(palette: QPalette) -> tuple[QColor, QColor, QColor]:
+    """``(fill, selected fill, border)`` for a card drawn with this palette.
+
+    Worked out here rather than written as ``palette(...)`` in a stylesheet,
+    because two of the roles that read like the obvious answers are not:
+
+    - ``AlternateBase`` is **white** in the Windows 11 dark palette and
+      **black** in its light one -- the opposite extreme from ``Base``, not a
+      near neighbour of it. Used as the selected card's fill it gave white text
+      on white in dark mode and black on black in light.
+    - ``Mid`` is ``#282828`` in that same dark palette, against a ``Base`` of
+      ``#2d2d2d``. A border five points of lightness from its own fill is not a
+      border.
+
+    So the fill is ``Base`` (which is honest everywhere), the selected fill is
+    ``Base`` tinted towards ``Highlight``, and the border is ``Mid`` only where
+    ``Mid`` can be seen -- falling back to ``Base`` mixed with the text colour,
+    which cannot help but contrast with the fill it sits on.
+    """
+    fill = palette.color(QPalette.ColorRole.Base)
+    highlight = palette.color(QPalette.ColorRole.Highlight)
+    mid = palette.color(QPalette.ColorRole.Mid)
+    border = (
+        mid
+        if abs(mid.lightness() - fill.lightness()) >= _BORDER_CONTRAST
+        else _blend(fill, palette.color(QPalette.ColorRole.Text), 0.28)
+    )
+    return fill, _blend(fill, highlight, _SELECTED_TINT), border
+
+
+def card_stylesheet(palette: QPalette) -> str:
+    """A border around what belongs together, and a tint on what is being read.
+
+    The selected card differs by colour and by nothing else -- same border
+    width, same contents -- so clicking one moves the highlight and never the
+    layout.
+    """
+    fill, selected, border = card_colours(palette)
+    highlight = palette.color(QPalette.ColorRole.Highlight).name()
+    return f"""
+QFrame#auditCard {{
+    border: 1px solid {border.name()};
     border-radius: 6px;
-    background-color: palette(base);
-}
-QFrame#auditCard[selected="true"] {
-    border: 1px solid palette(highlight);
-    background-color: palette(alternate-base);
-}
+    background-color: {fill.name()};
+}}
+QFrame#auditCard[selected="true"] {{
+    border: 1px solid {highlight};
+    background-color: {selected.name()};
+}}
 """
 
 
@@ -242,8 +296,11 @@ class AuditCard(QFrame):
         self.info = info
         self.agent_id = info.id
         self.setObjectName("auditCard")
-        self.setStyleSheet(CARD_STYLE)
         self.setProperty("selected", False)
+        self.restyle()
+        # Baked colours cannot follow a palette; being told is the only way.
+        # Held weakly there, so there is nothing to unregister here.
+        theme.on_change(self.restyle)
 
         # The whole card explains itself on hover. In the card body it would be
         # a paragraph per audit -- a wall of prose above the three controls
@@ -308,6 +365,22 @@ class AuditCard(QFrame):
         """
         if self.options is not None:
             self.options.setEnabled(self.check.isChecked())
+
+    # ---- how it is painted --------------------------------------------------
+    def restyle(self) -> None:
+        """Work the card's colours out from the theme in force right now.
+
+        The application's palette, not this widget's. Setting a stylesheet that
+        names a background colour makes Qt pin a palette on the widget to
+        match, and a pinned palette stops following the application's -- so
+        after one restyle ``self.palette()`` reports the colours of the theme
+        the card was *last* painted in, which is the one question it must not
+        be asked.
+        """
+        self.setStyleSheet("")  # drop the pinned palette before reading one
+        palette = QApplication.palette()
+        self.colours = card_colours(palette)
+        self.setStyleSheet(card_stylesheet(palette))
 
     # ---- what is being read -------------------------------------------------
     def set_selected(self, on: bool) -> None:

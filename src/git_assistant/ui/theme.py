@@ -17,6 +17,7 @@ picker changes it. See ``git_assistant.ui.theme_picker``.
 
 from __future__ import annotations
 
+import weakref
 from dataclasses import dataclass
 
 from PyQt6.QtCore import Qt
@@ -226,6 +227,48 @@ QScrollBar::add-page, QScrollBar::sub-page {{
 """
 
 
+# ---- telling the widgets that cannot tell ------------------------------------------
+#: Bound methods to call when the theme changes, held weakly -- see `on_change`.
+_listeners: list[weakref.WeakMethod] = []
+
+
+def on_change(callback) -> None:
+    """Ask to be told when the theme changes.
+
+    For a widget that works its colours out from the palette and bakes them
+    into a stylesheet: a stylesheet cannot follow a palette, and Qt's own
+    ``PaletteChange`` is no help here. With the colour scheme doing the work it
+    reaches neither this application's main window nor anything inside it --
+    measured, not assumed. So the one function that changes the theme says so.
+
+    A plain list of weak references rather than a Qt signal on a module-level
+    ``QObject``: that object is created when this module is imported, which can
+    be before there is a ``QApplication`` and is certainly before the last one
+    is torn down, and calling it afterwards is "wrapped C/C++ object has been
+    deleted" from the middle of a widget's constructor.
+
+    Held weakly, so a window that has been closed is not kept alive by the
+    theme, and takes no part in one either.
+    """
+    _listeners.append(weakref.WeakMethod(callback))
+
+
+def _announce() -> None:
+    alive: list[weakref.WeakMethod] = []
+    for ref in _listeners:
+        callback = ref()
+        if callback is None:
+            continue  # the widget is gone, and so is its interest
+        alive.append(ref)
+        try:
+            callback()
+        except RuntimeError:
+            # The C++ half went first (deleteLater), and the Python half is on
+            # its way. Repainting it is neither possible nor needed.
+            pass
+    _listeners[:] = alive
+
+
 # ---- applying it ------------------------------------------------------------------
 def apply(app, key: str) -> str:
     """Paint ``app`` in the named theme. Returns the key actually used.
@@ -249,4 +292,5 @@ def apply(app, key: str) -> str:
         # 95 regardless of the scheme, and the window comes up as black text on
         # #d4d0c8 with dark-mode chrome drawn over it.
         app.setPalette(QPalette())
+    _announce()
     return theme.key

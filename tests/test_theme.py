@@ -110,6 +110,74 @@ def test_leaving_the_pink_one_takes_the_rainbows_with_it(app):
     assert _brightness(_window(app)) < 100  # dark, not dark-pink
 
 
+# ---- what the audit cards are drawn with ------------------------------------------
+def _lightness(colour) -> int:
+    return colour.lightness()
+
+
+@pytest.mark.parametrize("key", [t.key for t in theme.THEMES])
+def test_an_audit_card_is_readable_in_every_theme(app, settings, key):
+    """The reported bug, in both directions.
+
+    The card being read was filled with `palette(alternate-base)`, which is
+    white in the Windows 11 dark palette and black in its light one -- the
+    opposite extreme from `Base`, not a near neighbour of it. That is white
+    text on white, and black text on black.
+    """
+    from git_assistant.ui.audit_cards import card_colours
+
+    theme.apply(app, key)
+    fill, selected, border = card_colours(app.palette())
+    text = app.palette().color(QPalette.ColorRole.Text)
+
+    for background, what in ((fill, "a card"), (selected, "the selected card")):
+        assert abs(_lightness(background) - _lightness(text)) > 90, (
+            f"{what} in {key}: {background.name()} under text {text.name()}"
+        )
+    # And a border has to be visible against the card it goes round.
+    assert abs(_lightness(border) - _lightness(fill)) >= 20, f"border in {key}"
+
+
+def test_the_cards_follow_a_theme_chosen_while_the_window_is_open(app, settings):
+    """The colours are baked into a stylesheet, so they must be rebaked.
+
+    Qt's own PaletteChange cannot be relied on for this: with the colour scheme
+    doing the work it reaches neither the window nor anything in it, which is
+    why the theme announces itself instead.
+    """
+    from git_assistant.ui.agents_panel import AgentsPanel
+
+    theme.apply(app, theme.DARK)
+    panel = AgentsPanel(settings)
+    dark_fill = panel.cards[0].colours[0].name()
+
+    theme.apply(app, theme.LIGHT)
+    app.processEvents()
+
+    light_fill = panel.cards[0].colours[0].name()
+    assert light_fill != dark_fill
+    assert light_fill.lower() == (
+        app.palette().color(QPalette.ColorRole.Base).name().lower()
+    )
+
+
+def test_a_card_that_is_gone_does_not_keep_the_theme_alive(app, settings):
+    """The cards connect to a module-level signal, which outlives every window."""
+    import gc
+
+    from git_assistant.ui.agents_panel import AgentsPanel
+
+    theme.apply(app, theme.DARK)
+    panel = AgentsPanel(settings)
+    panel.deleteLater()
+    del panel
+    app.processEvents()
+    gc.collect()
+
+    theme.apply(app, theme.LIGHT)  # must not raise on a deleted receiver
+    app.processEvents()
+
+
 def test_a_theme_nobody_recognises_is_not_a_reason_to_refuse_to_start(app):
     """Hand-edited, or written by a newer build."""
     assert theme.apply(app, "spooky") == theme.SYSTEM
