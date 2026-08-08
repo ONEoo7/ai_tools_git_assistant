@@ -283,6 +283,60 @@ def test_a_404_points_at_the_endpoint(monkeypatch):
     assert "endpoint" in str(caught.value)
 
 
+def test_a_stalled_read_says_the_address_was_fine(monkeypatch):
+    """The opposite of unreachable, and it has to read as the opposite.
+
+    httpx's own words for this are "The read operation timed out", which say
+    neither how long it waited nor that the connection itself succeeded -- so
+    it reads like a wrong address, which is the one thing it is not.
+    """
+
+    def handler(request):
+        raise httpx.ReadTimeout("The read operation timed out")
+
+    client = _client_with(monkeypatch, handler, api_key="k", list_timeout=15.0)
+    with pytest.raises(LLMError) as caught:
+        client.list_models()
+
+    message = str(caught.value)
+    assert "accepted the connection" in message
+    assert "15s" in message  # how long it waited, which the user cannot guess
+    assert "try again" in message
+
+
+def test_a_connection_that_never_answers_points_at_the_address(monkeypatch):
+    def handler(request):
+        raise httpx.ConnectTimeout("timed out")
+
+    client = _client_with(monkeypatch, handler, api_key="k")
+    with pytest.raises(LLMError) as caught:
+        client.list_models()
+
+    message = str(caught.value)
+    assert "https://api.example/v1" in message
+    assert "proxy or firewall" in message
+
+
+def test_a_stalled_chat_is_not_quietly_retried(monkeypatch):
+    """A completion that stalled on the read may still have been produced.
+
+    Listing models twice is listing models; asking for a completion twice is a
+    second one, paid for. So neither is retried here, and the message says to
+    try again rather than doing it invisibly.
+    """
+    calls = []
+
+    def handler(request):
+        calls.append(request.url.path)
+        raise httpx.ReadTimeout("x")
+
+    client = _client_with(monkeypatch, handler, api_key="k")
+    with pytest.raises(LLMError):
+        client.chat("gpt-4o", "sys", "user", 100)
+
+    assert len(calls) == 1
+
+
 def test_an_unexpected_body_is_reported_rather_than_indexed(monkeypatch):
     def handler(request):
         return httpx.Response(200, json={"unexpected": True})

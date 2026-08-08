@@ -59,7 +59,7 @@ NO_COMMANDS = (
 class ConsistencyAuditAgent:
     info = AgentInfo(
         id=AGENT_ID,
-        label="Repository consistency audit",
+        label="Consistency",
         description=DESCRIPTION,
         cost_hint=(
             "Seconds for the branches; a second or two per submodule of the "
@@ -69,7 +69,7 @@ class ConsistencyAuditAgent:
 
     def collect(self, ctx: AgentContext) -> Report:
         now = datetime.now(timezone.utc)
-        rules = _rules(ctx.settings)
+        rules = _rules(ctx.settings, ctx.repo)
 
         ctx.say("Reading branches...", 5)
         survey = branches_mod.survey(ctx.repo)
@@ -81,17 +81,21 @@ class ConsistencyAuditAgent:
         return _build(ctx, survey, rules, found, now)
 
 
-def _rules(settings) -> StaleRules:
-    """The configured rules, or the safe defaults. Never raises.
+def _rules(settings, repo: str = "") -> StaleRules:
+    """The rules in force for this repository, or the safe defaults.
+
+    Never raises: an audit runs on whatever can be read, and rules nobody
+    configured are a working configuration on their own.
 
     Accepts a `StaleRules` directly as well, so a test -- or a caller that has
-    already built one -- does not have to go through a dict to get here.
+    already built one -- does not have to go through a settings object.
     """
     raw = getattr(settings, "stale_branch_rules", None)
     if isinstance(raw, StaleRules):
         return raw
-    reader = getattr(settings, "stale_rules", None)
-    return reader() if callable(reader) else StaleRules.from_dict(raw)
+    from git_assistant import repo_config
+
+    return repo_config.for_repo(settings, repo).audit.stale.as_branch_rules()
 
 
 # ---- the report -------------------------------------------------------------------

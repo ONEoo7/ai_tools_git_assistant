@@ -32,7 +32,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from git_assistant import commit_history, commit_style, estimate, git_ops
+from git_assistant import commit_history, commit_style, estimate, git_ops, repo_config
 from git_assistant.commit_generator import FileCoverage, GenerationResult
 from git_assistant.config import DEFAULT_TEMPLATE_NAME, Settings
 from git_assistant.diff_strategy import filter_files, split_diff
@@ -66,14 +66,14 @@ SECTION_GAP = 12
 NO_REPOS_MESSAGE = "No repositories configured - add one in Repositories."
 
 
-def _history_note(repo: str, runs: list, settings) -> str:
+def _history_note(repo: str, runs: list, limit: int) -> str:
     if not repo:
         return ""
     if not runs:
         return "No messages generated for this repository yet."
-    if settings.commit_history_limit <= 0:
+    if limit <= 0:
         return "Keeping every generated message."
-    return f"Keeping the newest {settings.commit_history_limit} message(s)."
+    return f"Keeping the newest {limit} message(s)."
 
 
 def _read_staged(repo: str, mode: str, ignore_globs: list[str]) -> list[FileCoverage]:
@@ -407,6 +407,14 @@ class CommitPanel(QWidget):
             # clobbering a generation result that may be shown here.
             self.status.setText("")
 
+    def bound(self):
+        """The settings as the selected repository sees them.
+
+        Read fresh: the repository can change under this panel, and so can the
+        settings file behind it.
+        """
+        return repo_config.bind(self.settings, self._current_repo_path())
+
     def _current_repo_path(self) -> str:
         return self.repo_picker.current_path()
 
@@ -422,10 +430,9 @@ class CommitPanel(QWidget):
         if not repo:
             self._show_staged([])
             return
+        bound = self.bound()
         try:
-            coverage = _read_staged(
-                repo, self.settings.diff_mode, self.settings.ignore_globs
-            )
+            coverage = _read_staged(repo, bound.diff_mode, bound.ignore_globs)
         except Exception:
             # A repo git cannot read (e.g. blocked by safe.directory) simply
             # shows nothing here; generating surfaces the real error.
@@ -529,7 +536,7 @@ class CommitPanel(QWidget):
         Reported, never enforced: cutting a subject line at 72 characters
         would produce exactly the mangled subject the limit exists to prevent.
         """
-        limits = commit_style.Limits.of(self.settings)
+        limits = commit_style.Limits.of(self.bound())
         if not limits.asks_anything() or not self.editor.toPlainText().strip():
             self.length_label.setText("")
             return
@@ -620,7 +627,7 @@ class CommitPanel(QWidget):
             # Pick up any settings edited in sibling tabs but not yet saved.
             self._before_generate()
         # What this is about to send, while it can still be declined.
-        if not confirm(self, estimate.for_commit(self.settings)):
+        if not confirm(self, estimate.for_commit(self.bound())):
             return
         self._set_busy(True)
         self.regen_btn.setText("Regenerate")
@@ -671,12 +678,12 @@ class CommitPanel(QWidget):
         about its length would be worse than the length.
         """
         measured = commit_style.measure(
-            result.message, commit_style.Limits.of(self.settings)
+            result.message, commit_style.Limits.of(self.bound())
         )
         if not measured.too_long or result.retry is None:
             return
         note = measured.retry_note()
-        priced = estimate.for_retry(self.settings, result.retry, note)
+        priced = estimate.for_retry(self.bound(), result.retry, note)
         # The same window every other spend goes through, so the answer to
         # "what will this cost" is in the place the user already knows.
         priced.problem = ""
@@ -703,7 +710,7 @@ class CommitPanel(QWidget):
         self.editor.setPlainText(message)
         self._set_busy(False)
         measured = commit_style.measure(
-            message, commit_style.Limits.of(self.settings)
+            message, commit_style.Limits.of(self.bound())
         )
         # Not offered a third time: a model that ignored the instruction once
         # will ignore it again, and asking in a loop spends money on that.
@@ -728,7 +735,7 @@ class CommitPanel(QWidget):
             dirty=git_ops.has_uncommitted_changes(repo),
             model=self.settings.active_model(),
             provider=self.settings.provider,
-            limit=self.settings.commit_history_limit,
+            limit=self.bound().commit_history_limit,
         )
         self._shown_run = stored
         if problem:
@@ -752,7 +759,9 @@ class CommitPanel(QWidget):
                 self.runs_tree.setCurrentItem(item)
             self.runs_tree.addTopLevelItem(item)
         self._on_run_selection()
-        self.history_note.setText(_history_note(repo, runs, self.settings))
+        self.history_note.setText(
+            _history_note(repo, runs, self.bound().commit_history_limit)
+        )
 
     def _selected_runs(self) -> list:
         return [

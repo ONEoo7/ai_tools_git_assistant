@@ -102,9 +102,14 @@ def test_an_empty_editor_says_nothing(qapp, settings):
 
 
 def test_turning_the_rules_off_removes_the_readout(qapp, settings):
-    settings.commit_subject_target = 0
-    settings.commit_subject_limit = 0
-    settings.commit_body_limit = 0
+    """The limits live with the repository now; see git_assistant.repo_config."""
+    from git_assistant import repo_config
+
+    repo_config.write_text(
+        repo_config.Tier.USER,
+        "",
+        '{"commit": {"subject_target": 0, "subject_limit": 0, "body_limit": 0}}',
+    )
     panel = CommitPanel(settings, auto_start=False)
 
     panel.editor.setPlainText("feat: " + "x" * 200)
@@ -777,10 +782,15 @@ def test_open_and_delete_are_offered_only_when_a_run_is_selected(qapp, settings,
     assert panel.open_run_btn.isEnabled() and panel.delete_run_btn.isEnabled()
 
 
-def test_deleting_a_message_removes_it_from_the_list(qapp, settings, tmp_path):
+def test_deleting_a_message_removes_it_from_the_list(qapp, settings, tmp_path, monkeypatch):
     panel = _panel_with_repo(settings, tmp_path)
     panel._on_finished(_result())
     panel.runs_tree.setCurrentItem(panel.runs_tree.topLevelItem(0))
+    # Deleting asks; a test that does not answer waits for a dialog nobody can
+    # see, for as long as the run is given.
+    monkeypatch.setattr(
+        QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes
+    )
 
     panel._on_delete_run()
 

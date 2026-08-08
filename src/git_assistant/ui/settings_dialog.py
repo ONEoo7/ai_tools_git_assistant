@@ -59,7 +59,14 @@ from git_assistant.config import (
     build_repo_tree,
     config_path,
 )
-from git_assistant import agent_cli, credentials, providers, settings_backup, tracing
+from git_assistant import (
+    agent_cli,
+    credentials,
+    providers,
+    settings_backup,
+    settings_diff,
+    tracing,
+)
 from git_assistant.identities import IdentityStore
 from git_assistant.llm import LLMError, ModelInfo, build_client
 from git_assistant.prompts import DEFAULT_TEMPLATE
@@ -67,9 +74,12 @@ from git_assistant.providers import PROVIDERS
 from git_assistant.ui.agents_panel import AgentsPanel
 from git_assistant.ui.busy_bar import BusyBar
 from git_assistant.ui.icon import app_icon
+from git_assistant.ui import json_syntax
 from git_assistant.ui.identities_panel import IdentitiesPanel
 from git_assistant.ui.mcp_panel import McpPanel
 from git_assistant.ui.identity_bar import IdentityBar
+from git_assistant.ui.settings_diff_dialog import SettingsDiffDialog
+from git_assistant.ui.settings_merge_dialog import SettingsMergeDialog
 from git_assistant.ui.theme_picker import ThemePicker
 from git_assistant.ui.preview_dialog import SECTION_GAP, CommitPanel
 from git_assistant.ui.review_panel import ReviewPanel
@@ -87,6 +97,24 @@ from git_assistant.ui.workers import FunctionWorker, SetupWorker, run_worker
 
 INFO_COLOUR = "color: #8ab;"
 WARN_COLOUR = "color: #b36b00;"
+
+#: What each tier is, said where the file is shown. One sentence each: the
+#: difference between them is who they belong to, and that is worth stating
+#: every time rather than being learned once.
+_TIER_NOTES = {
+    repo_config.Tier.USER: (
+        "Your answer for every repository that has no settings of its own. "
+        "Editing this changes what those repositories use."
+    ),
+    repo_config.Tier.REPO: (
+        "Inside the repository, so it can be committed and shared with whoever "
+        "else works on it."
+    ),
+    repo_config.Tier.CUSTOM: (
+        "Yours, for this repository only. Kept in your config folder rather "
+        "than in the repository, so it is never committed."
+    ),
+}
 
 # Shown in place of the online version until an update check reports one.
 UNKNOWN_VERSION = "?"
@@ -194,7 +222,7 @@ class SettingsDialog(QDialog):
         tabs.addTab(self._build_agents_tab(), "Audit")
         tabs.addTab(self._build_review_tab(), "Code Review")
         tabs.addTab(self._build_connection_tab(), "Connection && Model")
-        tabs.addTab(self._build_repos_tab(), "Repositories")
+        tabs.addTab(self._build_repos_tab(), "Repositories && Settings")
         # Identities are read from their own file, seeded from git on first run.
         self.identity_store = IdentityStore.bootstrap()
         self.identities_panel = IdentitiesPanel(self.identity_store)
@@ -230,14 +258,6 @@ class SettingsDialog(QDialog):
         open_cfg_btn = QPushButton("Open config folder")
         open_cfg_btn.setToolTip(str(config_path()))
         open_cfg_btn.clicked.connect(self._on_open_config)
-
-        # Its own window, opened from here since the tray menu no longer offers
-        # anything but this window, About and Exit.
-        self.metrics_btn = QPushButton("Metrics...")
-        self.metrics_btn.setToolTip(
-            "Count lines of code across your repositories, by file type."
-        )
-        self.metrics_btn.clicked.connect(self._on_metrics)
 
         self.about_btn = QPushButton("About")
         self.about_btn.setToolTip("Who wrote this, and who helped.")
@@ -292,7 +312,6 @@ class SettingsDialog(QDialog):
         buttons_row = QHBoxLayout()
         buttons_row.addStretch(1)
         buttons_row.addWidget(self.saved_hint)
-        buttons_row.addWidget(self.metrics_btn)
         buttons_row.addWidget(open_cfg_btn)
         buttons_row.addWidget(self.about_btn)
 
@@ -902,7 +921,9 @@ class SettingsDialog(QDialog):
             # there but not yet saved.
             self.ip_edit.setText(self.settings.lmstudio_ip)
             self.port_spin.setValue(self.settings.lmstudio_port)
-            self.ctx_size_spin.setValue(self.settings.context_window)
+            self.ctx_size_spin.setValue(
+                repo_config.defaults().model.context_window
+            )
             self._sync_provider_list()
             self._show_provider_model(providers.get(self.settings.provider))
             self.commit_panel.refresh_provider()
@@ -1228,6 +1249,37 @@ class SettingsDialog(QDialog):
         box = QVBoxLayout(pane)
         box.setContentsMargins(0, SECTION_GAP, 0, 0)
 
+        header = QLabel("Settings")
+        font = header.font()
+        font.setBold(True)
+        header.setFont(font)
+
+        # Which of the three is in force. One is: they are not merged, so this
+        # is the whole answer rather than the top of a stack.
+        self.settings_tier_combo = QComboBox()
+        self.settings_tier_combo.setToolTip(
+            "Which settings this repository uses. They are not combined -- the "
+            "one chosen here is the one that applies."
+        )
+        for tier in repo_config.Tier:
+            self.settings_tier_combo.addItem(tier.label(), tier.value)
+        self.settings_tier_combo.currentIndexChanged.connect(self._on_settings_tier)
+
+        tier_row = QHBoxLayout()
+        tier_row.addWidget(header)
+        tier_row.addSpacing(SECTION_GAP)
+        tier_row.addWidget(QLabel("Active Settings:"))
+        tier_row.addWidget(self.settings_tier_combo)
+        tier_row.addStretch(1)
+        box.addLayout(tier_row)
+
+        # Only ever says one thing, and only when it is true: that a repository
+        # is carrying settings nobody is reading.
+        self.settings_tier_warning = QLabel("")
+        self.settings_tier_warning.setWordWrap(True)
+        self.settings_tier_warning.setStyleSheet(WARN_COLOUR)
+        box.addWidget(self.settings_tier_warning)
+
         self.repo_config_label = QLabel("")
         self.repo_config_label.setWordWrap(True)
         font = self.repo_config_label.font()
@@ -1245,12 +1297,21 @@ class SettingsDialog(QDialog):
         self.repo_config_edit.setFont(
             QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont)
         )
+        # Held on the dialog as well as parented to the document: what is being
+        # read here is a file that has to be edited by hand, and finding the one
+        # line that is wrong in it is the whole job.
+        self.repo_config_syntax = json_syntax.attach(self.repo_config_edit)
         box.addWidget(self.repo_config_edit, 1)
 
         row = QHBoxLayout()
         self.repo_config_create_btn = QPushButton("Create repository config")
         self.repo_config_create_btn.clicked.connect(self._on_create_repo_config)
         self.repo_config_save_btn = QPushButton("Save")
+        self.repo_config_save_btn.setToolTip(
+            "Saves to your Custom settings for this repository, so the User "
+            "and Repo settings -- which other repositories and other people "
+            "share -- are left as they are."
+        )
         self.repo_config_save_btn.clicked.connect(self._on_save_repo_config)
         self.repo_config_reload_btn = QPushButton("Reload")
         self.repo_config_reload_btn.clicked.connect(self._refresh_repo_config)
@@ -1266,6 +1327,12 @@ class SettingsDialog(QDialog):
             "including any later change to them."
         )
         self.repo_config_remove_btn.clicked.connect(self._on_remove_repo_config)
+        self.repo_config_merge_btn = QPushButton("Compare && merge...")
+        self.repo_config_merge_btn.setToolTip(
+            "Compare any two of these settings side by side, take from either, "
+            "and save the result where you choose."
+        )
+        self.repo_config_merge_btn.clicked.connect(self._on_merge_repo_config)
         self.repo_config_open_btn = QPushButton("Open folder")
         self.repo_config_open_btn.clicked.connect(self._on_open_repo_config_dir)
         for button in (
@@ -1274,6 +1341,7 @@ class SettingsDialog(QDialog):
             self.repo_config_reload_btn,
             self.repo_config_reset_btn,
             self.repo_config_remove_btn,
+            self.repo_config_merge_btn,
             self.repo_config_open_btn,
         ):
             row.addWidget(button)
@@ -1295,15 +1363,44 @@ class SettingsDialog(QDialog):
             return ""
         return items[0].data(0, Qt.ItemDataRole.UserRole).path
 
-    def _refresh_repo_config(self) -> None:
-        """Show the selected repository's file, or offer to make one."""
+    def _shown_tier(self) -> "repo_config.Tier":
+        """The tier the editor is showing: what the combo says."""
+        return repo_config.tier_of(self.settings_tier_combo.currentData()) or (
+            repo_config.Tier.USER
+        )
+
+    def _show_settings_tier(self, repo: str) -> None:
+        """Put the combo on the tier in force, without calling that a choice."""
+        tier = repo_config.effective_tier(repo, self.settings.settings_tier(repo))
+        index = self.settings_tier_combo.findData(tier.value)
+        self.settings_tier_combo.blockSignals(True)
+        self.settings_tier_combo.setCurrentIndex(max(0, index))
+        self.settings_tier_combo.blockSignals(False)
+
+    def _on_settings_tier(self, _index: int) -> None:
+        repo = self._selected_repo_path()
+        if not repo:
+            return
+        self.settings.set_settings_tier(repo, self.settings_tier_combo.currentData())
+        self.settings.save()
+        self._refresh_repo_config(keep_tier=True)
+
+    def _refresh_repo_config(self, keep_tier: bool = False) -> None:
+        """Show the settings in force for the selected repository.
+
+        ``keep_tier`` when the combo is what just changed: re-reading the stored
+        choice there would be reading back what was written a line ago, and any
+        disagreement between the two would show up as the combo springing back.
+        """
         repo = self._selected_repo_path()
         self.repo_config_status.setText("")
         if not repo:
-            self.repo_config_label.setText("Repository settings")
+            self.settings_tier_warning.setText("")
+            self.settings_tier_combo.setEnabled(False)
+            self.repo_config_label.setText("")
             self.repo_config_note.setText(
-                "Select one repository above to see the settings it keeps in "
-                f"{repo_config.REPO_DIR}\\{repo_config.REPO_FILE}."
+                "Select one repository above to see and edit the settings it "
+                "uses."
             )
             self.repo_config_edit.setPlainText("")
             self.repo_config_edit.setEnabled(False)
@@ -1311,36 +1408,43 @@ class SettingsDialog(QDialog):
                 button.setEnabled(False)
             return
 
-        exists = repo_config.has_repo_config(repo)
-        self.repo_config_label.setText(str(repo_config.repo_config_path(repo)))
-        self.repo_config_edit.setEnabled(exists)
-        self.repo_config_create_btn.setEnabled(not exists)
+        self.settings_tier_combo.setEnabled(True)
+        if not keep_tier:
+            self._show_settings_tier(repo)
+        tier = self._shown_tier()
+        path = repo_config.path_for(tier, repo)
+        present = repo_config.exists(tier, repo)
+
+        self.repo_config_label.setText(str(path))
+        self.repo_config_edit.setEnabled(present)
+        self.repo_config_create_btn.setEnabled(not present)
+        # The user tier is what everything falls back to, so it is not one of
+        # the ones that can be taken away.
+        removable = present and tier is not repo_config.Tier.USER
         for button in self._repo_config_buttons():
-            if button is not self.repo_config_create_btn:
-                button.setEnabled(exists)
-
-        if exists:
-            self.repo_config_edit.setPlainText(repo_config.read_repo_text(repo))
-            self.repo_config_note.setText(
-                "This file is inside the repository, so it can be committed and "
-                "shared. Anything it does not set is taken from your defaults in "
-                f"{repo_config.DEFAULTS_FILE}."
-            )
-            problem = repo_config.resolve(repo).problem
-            if problem:
-                self.repo_config_status.setText(problem)
-                self.repo_config_status.setStyleSheet(WARN_COLOUR)
+            if button is self.repo_config_create_btn:
+                continue
+            if button is self.repo_config_merge_btn:
+                button.setEnabled(True)  # about two files, not the one on screen
+            elif button is self.repo_config_remove_btn:
+                button.setEnabled(removable)
             else:
-                self.repo_config_status.setStyleSheet(INFO_COLOUR)
-            return
+                button.setEnabled(present)
 
-        self.repo_config_edit.setPlainText("")
-        self.repo_config_note.setText(
-            "This repository has no settings of its own, so it uses your "
-            f"defaults from {repo_config.DEFAULTS_FILE}. Creating one writes "
-            "those same values into the repository, where they can be committed "
-            "-- nothing changes until you edit them."
+        self.repo_config_note.setText(_TIER_NOTES[tier])
+        self.settings_tier_warning.setText(
+            "Not recommended setup, Repo settings exist."
+            if tier is not repo_config.Tier.REPO and repo_config.has_repo_config(repo)
+            else ""
         )
+
+        if not present:
+            self.repo_config_edit.setPlainText("")
+            return
+        self.repo_config_edit.setPlainText(repo_config.read_text(tier, repo))
+        problem = repo_config.resolve(repo, tier.value).problem
+        self.repo_config_status.setStyleSheet(WARN_COLOUR if problem else INFO_COLOUR)
+        self.repo_config_status.setText(problem)
 
     def _repo_config_buttons(self) -> tuple:
         return (
@@ -1349,7 +1453,24 @@ class SettingsDialog(QDialog):
             self.repo_config_reload_btn,
             self.repo_config_reset_btn,
             self.repo_config_remove_btn,
+            self.repo_config_merge_btn,
             self.repo_config_open_btn,
+        )
+
+    def _on_merge_repo_config(self) -> None:
+        """Compare two of the three, and build a third answer out of them."""
+        repo = self._selected_repo_path()
+        if not repo:
+            return
+        dialog = SettingsMergeDialog(self.settings, repo, self)
+        if not dialog.exec():
+            self.repo_config_status.setStyleSheet(INFO_COLOUR)
+            self.repo_config_status.setText("Merge discarded; nothing was written.")
+            return
+        self._refresh_repo_config()
+        self.repo_config_status.setStyleSheet(INFO_COLOUR)
+        self.repo_config_status.setText(
+            f"Merged into the {dialog.saved_to.label()} settings."
         )
 
     def _on_reset_repo_config(self) -> None:
@@ -1360,7 +1481,7 @@ class SettingsDialog(QDialog):
             "What is in the file now is overwritten.",
         ):
             return
-        problem = repo_config.reset_repo_config(repo)
+        problem = repo_config.reset(self._shown_tier(), repo)
         self._refresh_repo_config()
         self.repo_config_status.setStyleSheet(WARN_COLOUR if problem else INFO_COLOUR)
         self.repo_config_status.setText(problem or "Reset to your defaults.")
@@ -1374,7 +1495,7 @@ class SettingsDialog(QDialog):
             "to them.",
         ):
             return
-        problem = repo_config.remove_repo_config(repo)
+        problem = repo_config.remove(self._shown_tier(), repo)
         self._refresh_repo_config()
         self.repo_config_status.setStyleSheet(WARN_COLOUR if problem else INFO_COLOUR)
         self.repo_config_status.setText(problem or "Removed; the defaults apply again.")
@@ -1396,24 +1517,75 @@ class SettingsDialog(QDialog):
         repo = self._selected_repo_path()
         if not repo:
             return
-        problem = repo_config.create_repo_config(repo)
+        problem = repo_config.create(self._shown_tier(), repo)
         self._refresh_repo_config()
         self.repo_config_status.setStyleSheet(WARN_COLOUR if problem else INFO_COLOUR)
         self.repo_config_status.setText(
-            problem or f"Created {repo_config.repo_config_path(repo)}"
+            problem or f"Created {repo_config.path_for(self._shown_tier(), repo)}"
         )
 
     def _on_save_repo_config(self) -> None:
+        """Save the edit -- to Custom, unless Custom is what is being edited.
+
+        Editing the User settings changes every repository that has none of its
+        own; editing the Repo settings changes a file the whole team has. A
+        change made to *this* repository, on *this* machine, is neither of
+        those, so it goes to a file that is exactly that -- and the one being
+        edited is left as it was found.
+        """
         repo = self._selected_repo_path()
         if not repo:
             return
-        problem = repo_config.write_repo_text(
-            repo, self.repo_config_edit.toPlainText()
-        )
+        tier = self._shown_tier()
+        text = self.repo_config_edit.toPlainText()
+
+        if text == repo_config.read_text(tier, repo):
+            # Pressing Save on an untouched file must not fork it: a Custom
+            # file nobody meant to make is one more thing to notice later.
+            self.repo_config_status.setStyleSheet(INFO_COLOUR)
+            self.repo_config_status.setText("No changes.")
+            return
+
+        if tier is not repo_config.Tier.CUSTOM and not self._may_fork(repo, text):
+            return
+
+        target = repo_config.Tier.CUSTOM if tier is not repo_config.Tier.CUSTOM else tier
+        problem = repo_config.write_text(target, repo, text)
         self.repo_config_status.setStyleSheet(WARN_COLOUR if problem else INFO_COLOUR)
-        # Not reloaded on failure: what was typed is the only copy of it, and
-        # replacing it with the file on disk would throw the edit away.
-        self.repo_config_status.setText(problem or "Saved.")
+        if problem:
+            # Not reloaded on failure: what was typed is the only copy of it,
+            # and replacing it with the file on disk would throw the edit away.
+            self.repo_config_status.setText(problem)
+            return
+
+        if target is not tier:
+            self.settings.set_settings_tier(repo, target.value)
+            self.settings.save()
+            self._refresh_repo_config()
+            self.repo_config_status.setStyleSheet(INFO_COLOUR)
+            self.repo_config_status.setText(
+                f"Saved to your Custom settings for this repository. The "
+                f"{tier.label()} settings are unchanged."
+            )
+            return
+        self.repo_config_status.setText("Saved.")
+
+    def _may_fork(self, repo: str, text: str) -> bool:
+        """Ask before a fork would replace a Custom file that already exists."""
+        if not repo_config.exists(repo_config.Tier.CUSTOM, repo):
+            return True  # nothing to lose; the fork is silent, as it should be
+        return SettingsDiffDialog(
+            settings_diff.parse(repo_config.read_text(repo_config.Tier.CUSTOM, repo)),
+            settings_diff.parse(text),
+            title="Replace your Custom settings",
+            question=(
+                "You already have Custom settings for this repository. Saving "
+                "this replaces them:"
+            ),
+            before_label="Custom now",
+            after_label="After saving",
+            parent=self,
+        ).wanted()
 
     def _on_open_repo_config_dir(self) -> None:
         repo = self._selected_repo_path()
@@ -1506,6 +1678,20 @@ class SettingsDialog(QDialog):
     def _build_advanced_tab(self) -> QWidget:
         w = QWidget()
         outer = QVBoxLayout(w)
+
+        # Which answer this tab edits, said once and in the window rather than
+        # only in the code. It is not about the selected repository -- a tab
+        # that silently configured whichever repository happened to be
+        # highlighted would be worse than one that names what it changes.
+        scope = QLabel(
+            "These are the User settings: what every repository without "
+            "settings of its own is configured with. A repository that has "
+            "its own keeps them - see the Repositories and Settings tab."
+        )
+        scope.setWordWrap(True)
+        scope.setStyleSheet(INFO_COLOUR)
+        outer.addWidget(scope)
+
         form_container = QWidget()
         form = QFormLayout(form_container)
 
@@ -1879,7 +2065,8 @@ class SettingsDialog(QDialog):
         s = self.settings
         self.ip_edit.setText(s.lmstudio_ip)
         self.port_spin.setValue(s.lmstudio_port)
-        self.parallel_spin.setValue(s.parallel_calls)
+        shipped = repo_config.defaults()
+        self.parallel_spin.setValue(shipped.model.parallel_calls)
 
         # Selecting the stored provider also fills in the note beside the list.
         # `_ready` is still False here, so this does not count as a user choice.
@@ -1900,14 +2087,14 @@ class SettingsDialog(QDialog):
 
         self._reload_templates(select=DEFAULT_TEMPLATE_NAME)
 
-        idx = self.diff_mode_combo.findData(s.diff_mode)
+        idx = self.diff_mode_combo.findData(shipped.commit.diff_mode)
         self.diff_mode_combo.setCurrentIndex(max(0, idx))
-        self.ctx_size_spin.setValue(s.context_window)
-        self.margin_spin.setValue(s.safety_margin)
-        self.ignore_edit.setPlainText("\n".join(s.ignore_globs))
-        self.subject_target_spin.setValue(s.commit_subject_target)
-        self.subject_limit_spin.setValue(s.commit_subject_limit)
-        self.body_limit_spin.setValue(s.commit_body_limit)
+        self.ctx_size_spin.setValue(shipped.model.context_window)
+        self.margin_spin.setValue(shipped.model.safety_margin)
+        self.ignore_edit.setPlainText("\n".join(shipped.commit.ignore_globs))
+        self.subject_target_spin.setValue(shipped.commit.subject_target)
+        self.subject_limit_spin.setValue(shipped.commit.subject_limit)
+        self.body_limit_spin.setValue(shipped.commit.body_limit)
 
         self.langfuse_check.setChecked(s.langfuse_enabled)
         self.langfuse_host_edit.setText(s.langfuse_host)
@@ -1965,7 +2152,6 @@ class SettingsDialog(QDialog):
         s = self.settings
         s.lmstudio_ip = self.ip_edit.text().strip() or "127.0.0.1"
         s.lmstudio_port = self.port_spin.value()
-        s.parallel_calls = self.parallel_spin.value()
 
         # Model and endpoint belong to the selected provider, so switching does
         # not carry one backend's model name into another's request. The API
@@ -1994,24 +2180,46 @@ class SettingsDialog(QDialog):
 
         # Template bodies are written as they are edited (they belong to
         # whichever template is selected), so nothing to collect here.
-        s.diff_mode = self.diff_mode_combo.currentData()
-
-        # Stored as typed. A value above the model's real maximum is flagged in
-        # the budget label and clamped at generation time - a modal warning here
-        # would fire mid-keystroke now that saving is automatic.
-        s.context_window = self.ctx_size_spin.value()
-
-        s.safety_margin = self.margin_spin.value()
-        s.ignore_globs = [
-            line.strip()
-            for line in self.ignore_edit.toPlainText().splitlines()
-            if line.strip()
-        ]
-        s.commit_subject_target = self.subject_target_spin.value()
-        s.commit_subject_limit = self.subject_limit_spin.value()
-        s.commit_body_limit = self.body_limit_spin.value()
+        self._apply_to_user_tier()
 
         self._apply_langfuse()
+
+    def _apply_to_user_tier(self) -> None:
+        """Write what this tab edits into the User settings.
+
+        This tab is about no repository in particular, so what it edits is the
+        User tier -- the answer every repository without one of its own gets.
+        It does *not* fork to Custom the way the per-repository pane does:
+        there is no repository here to fork for, and an Advanced tab that
+        silently configured whichever repository happened to be selected would
+        be worse than one that says which answer it is editing.
+
+        A repository with Repo or Custom settings of its own is unaffected,
+        which is what the "Not recommended setup" warning on the Repositories &
+        Settings tab is there to point out.
+        """
+        repo_config.set_user_values(
+            commit={
+                "diff_mode": self.diff_mode_combo.currentData(),
+                "subject_target": self.subject_target_spin.value(),
+                "subject_limit": self.subject_limit_spin.value(),
+                "body_limit": self.body_limit_spin.value(),
+                "ignore_globs": [
+                    line.strip()
+                    for line in self.ignore_edit.toPlainText().splitlines()
+                    if line.strip()
+                ],
+            },
+            # Stored as typed. A value above the model's real maximum is
+            # flagged in the budget label and clamped at generation time - a
+            # modal warning here would fire mid-keystroke now that saving is
+            # automatic.
+            model={
+                "context_window": self.ctx_size_spin.value(),
+                "safety_margin": self.margin_spin.value(),
+                "parallel_calls": self.parallel_spin.value(),
+            },
+        )
 
     def _apply_langfuse(self) -> None:
         """The Langfuse fields alone, so the status line can be cheap.
@@ -2701,13 +2909,6 @@ class SettingsDialog(QDialog):
         self.scan_btn.setEnabled(True)
         self.rescan_btn.setEnabled(True)
         self.scan_status.setText(f"Scan failed: {message}")
-
-    def _on_metrics(self) -> None:
-        # Imported here rather than at the top: it is a whole window, and one
-        # nobody opens on most runs.
-        from git_assistant.ui.metrics_dialog import MetricsDialog
-
-        MetricsDialog(self.settings, self).exec()
 
     def _on_about(self) -> None:
         show_about(self)

@@ -81,6 +81,21 @@ class OpenAICompatibleClient:
                 return response.json()
         except httpx.HTTPStatusError as exc:
             raise LLMError(_explain(exc)) from exc
+        except httpx.ConnectTimeout as exc:
+            raise LLMError(
+                f"Could not reach {self.base_url}: nothing answered within "
+                f"{CONNECT_TIMEOUT:.0f}s. Check the address, and whether a "
+                "proxy or firewall is in the way."
+            ) from exc
+        except httpx.ReadTimeout as exc:
+            # Worth telling apart from the above, because it means the opposite:
+            # the address is right and something is listening. httpx's own text
+            # for this is "The read operation timed out", which says neither how
+            # long it waited nor that the connection itself was fine.
+            raise LLMError(
+                f"{self.base_url} accepted the connection but sent nothing back "
+                f"within {timeout:.0f}s. Usually a stalled connection - try again."
+            ) from exc
         except httpx.HTTPError as exc:
             raise LLMError(f"Could not reach {self.base_url}: {exc}") from exc
 

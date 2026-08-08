@@ -314,6 +314,15 @@ class Settings:
     #: git_assistant.ui.theme, which owns the names -- config.py should not
     #: have to know what a palette is. An unknown value falls back rather than
     #: refusing to start.
+    #: Which settings are in force for a repository: ``{repo key: "user" |
+    #: "repo" | "custom"}``. The user's choice, so it is kept in the user's
+    #: file -- a repository cannot decide it is not being read. Absent means
+    #: nobody has chosen; see git_assistant.repo_config.effective_tier.
+    settings_tiers: dict[str, str] = field(default_factory=dict)
+    #: Whether the per-repository settings below have been carried into the
+    #: user tier. See git_assistant.repo_config.migrate_user_settings; the old
+    #: fields are kept so a downgrade still finds them.
+    settings_migrated: bool = False
     theme: str = "system"
     context_window: int = 32768  # total tokens for input+output (0 => auto-detect)
     safety_margin: float = 0.10  # fraction of the window reserved for the model's output
@@ -405,6 +414,21 @@ class Settings:
 
     def set_stale_rules(self, rules) -> None:
         self.stale_branch_rules = rules.to_dict()
+
+    # ---- which settings are in force ---------------------------------------
+    def settings_tier(self, repo_path: str) -> str:
+        """The tier chosen for ``repo_path``, or ``""`` when nobody has chosen."""
+        return self.settings_tiers.get(repo_key(repo_path), "") if repo_path else ""
+
+    def set_settings_tier(self, repo_path: str, tier: str) -> None:
+        """Choose which settings a repository uses. ``""`` forgets the choice."""
+        if not repo_path:
+            return
+        key = repo_key(repo_path)
+        if tier:
+            self.settings_tiers[key] = tier
+        else:
+            self.settings_tiers.pop(key, None)
 
     def active_repo_entry(self) -> RepoEntry | None:
         for r in self.repos:

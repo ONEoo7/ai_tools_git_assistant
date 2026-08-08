@@ -39,6 +39,10 @@ dev = [
     # every core, and a single test being debugged does not want to spawn two
     # dozen workers to run it.
     "pytest-xdist>=3.6",
+    # A Qt test that opens a modal dialog nobody answers waits for it forever,
+    # and a suite that never finishes says nothing about which test did it.
+    # With this, it fails in a minute with the stack it was blocked in.
+    "pytest-timeout>=2.3",
 ]
 build = [
     "pyinstaller>=6.0",
@@ -61,3 +65,9 @@ packages = ["src/git_assistant"]
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
+# A backstop, not the guard: unanswered dialogs are caught in conftest, where
+# the failure names the test and takes a second. This is for the rest -- a git
+# command waiting on a prompt, a worker that never finishes. No test here takes
+# three seconds, so anything approaching a minute is stuck.
+timeout = 60
+timeout_method = "thread"

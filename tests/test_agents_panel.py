@@ -7,7 +7,7 @@ pytest.importorskip("PyQt6.QtWidgets")
 from PyQt6.QtCore import Qt  # noqa: E402
 from PyQt6.QtWidgets import QApplication  # noqa: E402
 
-from git_assistant import agents  # noqa: E402
+from git_assistant import agents, repo_config, settings_diff  # noqa: E402
 from git_assistant.agents import history  # noqa: E402
 from git_assistant.agents.base import Fact, Report, Section, Table  # noqa: E402
 from git_assistant.config import RepoEntry, Settings  # noqa: E402
@@ -76,6 +76,11 @@ def _options(panel, agent_id: str):
     return _card(panel, agent_id).options
 
 
+def _audit(settings, repo="/x/demo"):
+    """The audit settings in force for a repository -- where these now live."""
+    return repo_config.for_repo(settings, repo).audit
+
+
 def _report() -> Report:
     return Report(
         agent_id="size-audit",
@@ -139,11 +144,13 @@ def test_choosing_an_agent_is_remembered(qapp, with_repo):
     panel._select_agent(info.id)
 
     assert panel._agent_id() == info.id
-    assert with_repo.agent_last_id == info.id
+    assert _audit(with_repo).last == info.id
 
 
 def test_the_stored_agent_is_selected_on_open(qapp, with_repo):
-    with_repo.agent_last_id = "config-audit"
+    repo_config.write_text(
+        repo_config.Tier.USER, "", '{"audit": {"last": "config-audit"}}'
+    )
     panel = AgentsPanel(with_repo)
     assert panel._agent_id() == "config-audit"
 
@@ -166,7 +173,7 @@ def test_the_ticked_audits_are_remembered(qapp, with_repo):
     panel = AgentsPanel(with_repo)
     _tick(panel, "size-audit", "consistency-audit")
 
-    assert with_repo.agent_selected_ids == ["size-audit", "consistency-audit"]
+    assert _audit(with_repo).selected == ["size-audit", "consistency-audit"]
     assert _ticked(AgentsPanel(with_repo)) == ["size-audit", "consistency-audit"]
 
 
@@ -282,9 +289,10 @@ def test_each_audits_settings_reach_the_settings_file(qapp, with_repo):
     _options(panel, "config-audit").large_file_spin.setValue(64)
     _options(panel, "consistency-audit").stale_months_spin.setValue(9)
 
-    assert with_repo.agent_fast_mode is True
-    assert with_repo.agent_large_file_mb == 64
-    assert with_repo.stale_rules().months == 9
+    audit = _audit(with_repo)
+    assert audit.fast is True
+    assert audit.large_file_mb == 64
+    assert audit.stale.months == 9
 
 
 def test_an_audits_settings_are_where_it_left_them_next_time(qapp, with_repo):
@@ -302,7 +310,7 @@ def test_an_audits_settings_are_where_it_left_them_next_time(qapp, with_repo):
         "main, release/*, keep-me"
     )
     assert _options(reopened, "config-audit").large_file_spin.value() == 32
-    assert with_repo.stale_rules().protect == ["main", "release/*", "keep-me"]
+    assert _audit(with_repo).stale.protect == ["main", "release/*", "keep-me"]
 
 
 def test_the_provider_can_be_chosen_here_too(qapp, with_repo):
@@ -343,7 +351,7 @@ def test_a_provider_changed_elsewhere_is_picked_up_on_refresh(qapp, with_repo):
 def test_options_are_persisted(qapp, with_repo):
     panel = AgentsPanel(with_repo)
     panel.narrate_check.setChecked(False)
-    assert with_repo.agents_narrate is False
+    assert _audit(with_repo).narrate is False
 
 
 # ---- a finished run -----------------------------------------------------------
@@ -887,6 +895,11 @@ def test_declining_an_audit_sends_nothing(qapp, with_repo, monkeypatch):
 
 
 # ---- a repository's own settings, in the Repositories tab ---------------------------
+def _pick_tier(dlg, tier: str):
+    """Choose which settings the pane is showing, as the dropdown does."""
+    dlg.settings_tier_combo.setCurrentIndex(dlg.settings_tier_combo.findData(tier))
+
+
 def _repos_tab(dlg, repo_path: str):
     """Select one repository in the tree, as clicking it does."""
     for item in dlg._all_repo_items():
@@ -916,7 +929,7 @@ def test_a_repository_with_no_settings_is_offered_some(qapp, with_repo, config_s
 
     assert dlg.repo_config_create_btn.isEnabled()
     assert not dlg.repo_config_save_btn.isEnabled()
-    assert config_store.DEFAULTS_FILE in dlg.repo_config_note.text()
+    assert dlg.settings_tier_combo.currentData() == "user"
 
 
 def test_creating_one_shows_it_and_stops_offering(qapp, with_repo, config_store, tmp_path):
@@ -925,6 +938,7 @@ def test_creating_one_shows_it_and_stops_offering(qapp, with_repo, config_store,
     with_repo.repos = [RepoEntry(str(repo))]
     dlg = SettingsDialog(with_repo)
     _repos_tab(dlg, str(repo))
+    _pick_tier(dlg, "repo")  # which settings are being made
 
     dlg._on_create_repo_config()
 
@@ -1010,6 +1024,7 @@ def test_a_mangled_repo_config_can_be_reset_from_the_defaults(
     with_repo.repos = [RepoEntry(str(repo))]
     dlg = SettingsDialog(with_repo)
     _repos_tab(dlg, str(repo))
+    _pick_tier(dlg, "repo")
     assert "valid JSON" in dlg.repo_config_status.text()
     monkeypatch.setattr(
         QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes
@@ -1031,6 +1046,7 @@ def test_removing_a_repo_config_offers_to_create_one_again(
     with_repo.repos = [RepoEntry(str(repo))]
     dlg = SettingsDialog(with_repo)
     _repos_tab(dlg, str(repo))
+    _pick_tier(dlg, "repo")
     dlg._on_create_repo_config()
     monkeypatch.setattr(
         QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes
@@ -1054,8 +1070,9 @@ def test_neither_reset_nor_remove_happens_without_being_asked(
     with_repo.repos = [RepoEntry(str(repo))]
     dlg = SettingsDialog(with_repo)
     _repos_tab(dlg, str(repo))
+    _pick_tier(dlg, "repo")
     dlg._on_create_repo_config()
-    config_store.write_repo_text(repo, '{"fetch": {"depth": 42}}')
+    config_store.write_text(config_store.Tier.REPO, repo, '{"fetch": {"depth": 42}}')
     monkeypatch.setattr(
         QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Cancel
     )
@@ -1079,3 +1096,349 @@ def test_open_is_withdrawn_while_more_than_one_audit_run_is_selected(qapp, with_
     assert len(panel._selected_runs()) == 2
     assert not panel.open_run_btn.isEnabled()
     assert panel.delete_run_btn.isEnabled()
+
+
+# ---- which settings are in force ---------------------------------------------------
+def _dialog_for(with_repo, repo):
+    with_repo.repos = [RepoEntry(str(repo))]
+    dlg = SettingsDialog(with_repo)
+    _repos_tab(dlg, str(repo))
+    return dlg
+
+
+def test_the_tab_is_named_for_both_things_it_holds(qapp, with_repo, config_store):
+    """`&&` is Qt's escape for a literal ampersand; it renders as one."""
+    dlg = SettingsDialog(with_repo)
+    labels = [dlg.tabs.tabText(i) for i in range(dlg.tabs.count())]
+    assert "Repositories && Settings" in labels
+    assert not any(label == "Repositories" for label in labels)
+
+
+def test_all_three_tiers_are_offered(qapp, with_repo, config_store, tmp_path):
+    repo = tmp_path / "demo"
+    repo.mkdir()
+    dlg = _dialog_for(with_repo, repo)
+
+    offered = [
+        dlg.settings_tier_combo.itemData(i)
+        for i in range(dlg.settings_tier_combo.count())
+    ]
+    assert offered == ["user", "repo", "custom"]
+
+
+def test_the_dropdown_opens_on_what_is_actually_in_force(
+    qapp, with_repo, config_store, tmp_path
+):
+    """A repository with a file of its own uses it, chosen or not."""
+    repo = tmp_path / "demo"
+    repo.mkdir()
+    dlg = _dialog_for(with_repo, repo)
+    assert dlg.settings_tier_combo.currentData() == "user"
+
+    config_store.create(config_store.Tier.REPO, repo)
+    dlg._refresh_repo_config()
+
+    assert dlg.settings_tier_combo.currentData() == "repo"
+
+
+def test_choosing_a_tier_is_remembered_and_shows_that_file(
+    qapp, with_repo, config_store, tmp_path
+):
+    repo = tmp_path / "demo"
+    repo.mkdir()
+    dlg = _dialog_for(with_repo, repo)
+    config_store.create(config_store.Tier.CUSTOM, repo)
+
+    _pick_tier(dlg, "custom")
+
+    assert with_repo.settings_tier(str(repo)) == "custom"
+    assert str(config_store.custom_config_path(repo)) == dlg.repo_config_label.text()
+    assert config_store.resolve(repo, "custom").tier is config_store.Tier.CUSTOM
+
+
+def test_ignoring_a_repositorys_own_settings_is_called_out(
+    qapp, with_repo, config_store, tmp_path
+):
+    """The reason the warning exists: a repository carrying settings nobody reads."""
+    repo = tmp_path / "demo"
+    repo.mkdir()
+    config_store.create(config_store.Tier.REPO, repo)
+    dlg = _dialog_for(with_repo, repo)
+    assert dlg.settings_tier_warning.text() == ""  # Repo is in force; nothing to say
+
+    _pick_tier(dlg, "user")
+
+    assert dlg.settings_tier_warning.text() == (
+        "Not recommended setup, Repo settings exist."
+    )
+
+
+def test_no_warning_when_there_are_no_repo_settings_to_ignore(
+    qapp, with_repo, config_store, tmp_path
+):
+    repo = tmp_path / "demo"
+    repo.mkdir()
+    dlg = _dialog_for(with_repo, repo)
+
+    for tier in ("user", "custom"):
+        _pick_tier(dlg, tier)
+        assert dlg.settings_tier_warning.text() == ""
+
+
+def test_the_user_tier_is_never_the_one_that_gets_removed(
+    qapp, with_repo, config_store, tmp_path
+):
+    """It is what everything falls back to."""
+    repo = tmp_path / "demo"
+    repo.mkdir()
+    config_store.ensure_defaults()
+    dlg = _dialog_for(with_repo, repo)
+    _pick_tier(dlg, "user")
+
+    assert dlg.repo_config_save_btn.isEnabled()
+    assert not dlg.repo_config_remove_btn.isEnabled()
+
+
+# ---- an edit forks rather than changing what is shared -------------------------------
+def _edit_and_save(dlg, text):
+    dlg.repo_config_edit.setPlainText(text)
+    dlg._on_save_repo_config()
+
+
+def test_editing_the_user_settings_saves_to_custom_instead(
+    qapp, with_repo, config_store, tmp_path
+):
+    """Editing User would change every repository that has none of its own."""
+    repo = tmp_path / "demo"
+    repo.mkdir()
+    config_store.ensure_defaults()
+    before = config_store.read_text(config_store.Tier.USER)
+    dlg = _dialog_for(with_repo, repo)
+    _pick_tier(dlg, "user")
+
+    _edit_and_save(dlg, '{"fetch": {"depth": 42}}')
+
+    assert config_store.read_text(config_store.Tier.USER) == before
+    assert config_store.resolve(repo, "custom").fetch.depth == 42
+    assert with_repo.settings_tier(str(repo)) == "custom"
+    assert dlg.settings_tier_combo.currentData() == "custom"
+    assert "Custom" in dlg.repo_config_status.text()
+
+
+def test_editing_the_repo_settings_leaves_the_committed_file_alone(
+    qapp, with_repo, config_store, tmp_path
+):
+    """It is a file the whole team has."""
+    repo = tmp_path / "demo"
+    repo.mkdir()
+    config_store.write_text(
+        config_store.Tier.REPO, repo, '{"branch": {"pattern": "team/{name}"}}'
+    )
+    dlg = _dialog_for(with_repo, repo)
+
+    _edit_and_save(dlg, '{"branch": {"pattern": "mine/{name}"}}')
+
+    assert config_store.resolve(repo, "repo").branch.pattern == "team/{name}"
+    assert config_store.resolve(repo, "custom").branch.pattern == "mine/{name}"
+
+
+def test_editing_custom_settings_saves_them_where_they_are(
+    qapp, with_repo, config_store, tmp_path
+):
+    repo = tmp_path / "demo"
+    repo.mkdir()
+    config_store.create(config_store.Tier.CUSTOM, repo)
+    dlg = _dialog_for(with_repo, repo)
+    _pick_tier(dlg, "custom")
+
+    _edit_and_save(dlg, '{"fetch": {"depth": 7}}')
+
+    assert config_store.resolve(repo, "custom").fetch.depth == 7
+    assert dlg.repo_config_status.text() == "Saved."
+
+
+def test_saving_an_untouched_file_forks_nothing(
+    qapp, with_repo, config_store, tmp_path
+):
+    """A Custom file nobody meant to make is one more thing to notice later."""
+    repo = tmp_path / "demo"
+    repo.mkdir()
+    config_store.ensure_defaults()
+    dlg = _dialog_for(with_repo, repo)
+    _pick_tier(dlg, "user")
+
+    dlg._on_save_repo_config()
+
+    assert not config_store.exists(config_store.Tier.CUSTOM, repo)
+    assert dlg.repo_config_status.text() == "No changes."
+
+
+def test_a_fork_that_would_replace_custom_settings_shows_the_diff_and_asks(
+    qapp, with_repo, config_store, tmp_path, monkeypatch
+):
+    """Overwriting one silently is fine ninety-nine times and unforgivable once."""
+    from git_assistant.ui import settings_dialog as dialog_mod
+
+    repo = tmp_path / "demo"
+    repo.mkdir()
+    config_store.write_text(
+        config_store.Tier.CUSTOM, repo, '{"fetch": {"depth": 5}}'
+    )
+    config_store.ensure_defaults()
+    dlg = _dialog_for(with_repo, repo)
+    _pick_tier(dlg, "user")
+
+    shown = {}
+
+    class _Refused:
+        def __init__(self, before, after, **kw):
+            shown["changes"] = settings_diff.differences(before, after)
+            shown["question"] = kw.get("question", "")
+
+        def wanted(self):
+            return False
+
+    monkeypatch.setattr(dialog_mod, "SettingsDiffDialog", _Refused)
+
+    _edit_and_save(dlg, '{"fetch": {"depth": 99}}')
+
+    assert [c.key for c in shown["changes"]] == ["fetch.depth"]
+    assert (shown["changes"][0].before, shown["changes"][0].after) == (5, 99)
+    assert "replaces them" in shown["question"]
+    # Refused, so the file on disk is the one that was there.
+    assert config_store.resolve(repo, "custom").fetch.depth == 5
+
+
+def test_accepting_the_replacement_writes_it(
+    qapp, with_repo, config_store, tmp_path, monkeypatch
+):
+    from git_assistant.ui import settings_dialog as dialog_mod
+
+    repo = tmp_path / "demo"
+    repo.mkdir()
+    config_store.write_text(config_store.Tier.CUSTOM, repo, '{"fetch": {"depth": 5}}')
+    config_store.ensure_defaults()
+    dlg = _dialog_for(with_repo, repo)
+    _pick_tier(dlg, "user")
+    monkeypatch.setattr(
+        dialog_mod,
+        "SettingsDiffDialog",
+        lambda *a, **k: type("_Ok", (), {"wanted": lambda self: True})(),
+    )
+
+    _edit_and_save(dlg, '{"fetch": {"depth": 99}}')
+
+    assert config_store.resolve(repo, "custom").fetch.depth == 99
+
+
+def test_a_first_fork_is_silent_because_there_is_nothing_to_lose(
+    qapp, with_repo, config_store, tmp_path, monkeypatch
+):
+    from git_assistant.ui import settings_dialog as dialog_mod
+
+    repo = tmp_path / "demo"
+    repo.mkdir()
+    config_store.ensure_defaults()
+    dlg = _dialog_for(with_repo, repo)
+    _pick_tier(dlg, "user")
+    asked = []
+    monkeypatch.setattr(
+        dialog_mod,
+        "SettingsDiffDialog",
+        lambda *a, **k: asked.append(True)
+        or type("_Ok", (), {"wanted": lambda self: True})(),
+    )
+
+    _edit_and_save(dlg, '{"fetch": {"depth": 3}}')
+
+    assert asked == []
+    assert config_store.exists(config_store.Tier.CUSTOM, repo)
+
+
+def test_a_broken_edit_forks_nothing_and_says_why(
+    qapp, with_repo, config_store, tmp_path
+):
+    repo = tmp_path / "demo"
+    repo.mkdir()
+    config_store.ensure_defaults()
+    dlg = _dialog_for(with_repo, repo)
+    _pick_tier(dlg, "user")
+
+    _edit_and_save(dlg, '{"fetch": {,}}')
+
+    assert "valid JSON" in dlg.repo_config_status.text()
+    assert not config_store.exists(config_store.Tier.CUSTOM, repo)
+
+
+# ---- the Advanced tab edits the defaults, not one repository ------------------------
+def test_the_advanced_tab_shows_the_defaults_not_the_selected_repository(
+    qapp, with_repo, tmp_path
+):
+    """It is about no repository, so it must not show one repository's answer."""
+    from git_assistant import repo_config
+
+    repo = tmp_path / "demo"
+    repo.mkdir()
+    with_repo.repos = [RepoEntry(str(repo))]
+    with_repo.active_repo = str(repo)
+    repo_config.write_text(
+        repo_config.Tier.USER, "", '{"commit": {"diff_mode": "cached"}}'
+    )
+    repo_config.write_text(
+        repo_config.Tier.REPO, str(repo), '{"commit": {"diff_mode": "working"}}'
+    )
+
+    dlg = SettingsDialog(with_repo)
+
+    assert dlg.diff_mode_combo.currentData() == "cached"
+
+
+def test_the_advanced_tab_writes_the_user_tier(qapp, with_repo):
+    from git_assistant import repo_config
+
+    dlg = SettingsDialog(with_repo)
+    dlg.diff_mode_combo.setCurrentIndex(dlg.diff_mode_combo.findData("working"))
+    dlg.ctx_size_spin.setValue(4096)
+    dlg.margin_spin.setValue(0.3)
+    dlg.parallel_spin.setValue(7)
+    dlg.subject_target_spin.setValue(40)
+    dlg.ignore_edit.setPlainText("*.lock\n\n  *.min.js  ")
+
+    dlg._apply_to_settings()
+
+    written = repo_config.defaults()
+    assert written.commit.diff_mode == "working"
+    assert written.commit.subject_target == 40
+    assert written.commit.ignore_globs == ["*.lock", "*.min.js"]
+    assert (written.model.context_window, written.model.parallel_calls) == (4096, 7)
+    assert written.model.safety_margin == pytest.approx(0.3)
+
+
+def test_the_advanced_tab_leaves_a_repositorys_own_answer_alone(
+    qapp, with_repo, tmp_path
+):
+    """A repository that has said otherwise keeps what it said."""
+    from git_assistant import repo_config
+
+    repo = tmp_path / "demo"
+    repo.mkdir()
+    with_repo.repos = [RepoEntry(str(repo))]
+    with_repo.active_repo = str(repo)
+    repo_config.write_text(
+        repo_config.Tier.REPO, str(repo), '{"commit": {"diff_mode": "working"}}'
+    )
+    dlg = SettingsDialog(with_repo)
+
+    dlg.diff_mode_combo.setCurrentIndex(dlg.diff_mode_combo.findData("cached"))
+    dlg._apply_to_settings()
+
+    assert repo_config.resolve(repo).commit.diff_mode == "working"
+
+
+def test_opening_the_dialog_writes_no_settings(qapp, with_repo):
+    """Reading a tab is not a change, and must not create a file."""
+    from git_assistant import repo_config
+
+    SettingsDialog(with_repo)
+
+    assert not repo_config.exists(repo_config.Tier.USER)

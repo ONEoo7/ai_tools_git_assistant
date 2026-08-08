@@ -229,3 +229,37 @@ def test_a_tool_error_becomes_a_failed_result(ctx):
     )
     assert result["isError"] is True
     assert "list_agent_runs" in body(result)
+
+
+# ---- which diff a tool reads -------------------------------------------------------
+def test_get_diff_without_a_mode_uses_the_repositorys_own_answer(ctx, repo):
+    from git_assistant import repo_config
+
+    (repo / "a.txt").write_text("two\n", encoding="utf-8")  # unstaged only
+    repo_config.write_text(
+        repo_config.Tier.REPO, str(repo), '{"commit": {"diff_mode": "working"}}'
+    )
+
+    # Reading `settings.diff_mode` instead would say "cached" and find nothing.
+    assert "a.txt" in body(call("get_diff", ctx))
+
+
+def test_a_mode_passed_for_one_call_is_not_written_down(ctx, repo, monkeypatch):
+    """One client asking for the working tree must not reconfigure the repo."""
+    from git_assistant import repo_config
+    from git_assistant.commit_generator import CommitGenerator
+
+    seen = []
+
+    def fake_generate(self, **_kw):
+        seen.append(self.settings.diff_mode)
+        raise ToolError("stopping here: the mode is what was being checked")
+
+    monkeypatch.setattr(CommitGenerator, "generate", fake_generate)
+    monkeypatch.setattr("git_assistant.llm.build_client", lambda *a, **k: object())
+
+    call("generate_commit_message", ctx, mode="working")
+
+    assert seen == ["working"]
+    assert not repo_config.exists(repo_config.Tier.REPO, str(repo))
+    assert not repo_config.exists(repo_config.Tier.CUSTOM, str(repo))

@@ -35,7 +35,8 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from git_assistant.review import builtin, languages, profiles as profiles_mod
+from git_assistant.review import builtin, languages, rule_files
+from git_assistant.review import profiles as profiles_mod
 from git_assistant.review.profiles import LanguageRules, Profile, Selection
 
 MUTED = "color: #888;"
@@ -232,7 +233,7 @@ class ProfileTab(QWidget):
         version = self._version_of(entry)
         if selection.is_builtin:
             wanted = selection.target
-            return builtin.table_for(
+            return rule_files.table_for(
                 entry.language if wanted == languages.ANY else wanted, version
             )
         return self._store.find(selection.target) if self._store else None

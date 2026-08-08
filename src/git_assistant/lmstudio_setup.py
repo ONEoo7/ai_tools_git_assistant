@@ -28,6 +28,8 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from git_assistant import repo_config
+
 #: The package as the official publisher lists it.
 WINGET_PACKAGE = "ElementLabs.LMStudio"
 #: Publisher/repository on Hugging Face, and the quantization to fetch.
@@ -336,8 +338,12 @@ def point_app_at_it(ctx: SetupContext, settings) -> str:
     settings.lmstudio_ip = "127.0.0.1"
     settings.lmstudio_port = 1234
     settings.set_provider_model("lmstudio", "qwen3.5-4b")
-    settings.context_window = CONTEXT_LENGTH
     settings.save()
+    # The window belongs to the model, not to a repository, so it goes in the
+    # User tier -- the answer every repository without one of its own gets. A
+    # repository that has said otherwise keeps what it said: silently
+    # overwriting it would undo a deliberate choice.
+    repo_config.set_user_values(model={"context_window": CONTEXT_LENGTH})
     return "provider, model and context window set"
 
 

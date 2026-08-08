@@ -35,10 +35,17 @@ DESCRIPTION = (
 _FINDINGS = "2"
 
 
+def _large_mb(ctx: AgentContext) -> int:
+    """What counts as a large file here, from the settings in force."""
+    from git_assistant import repo_config
+
+    return repo_config.for_repo(ctx.settings, ctx.repo).audit.large_file_mb
+
+
 class ConfigAuditAgent:
     info = AgentInfo(
         id="config-audit",
-        label="Repository configuration audit",
+        label="Configuration",
         description=DESCRIPTION,
         cost_hint="Seconds. Reads the index and config; changes nothing.",
     )
@@ -47,9 +54,7 @@ class ConfigAuditAgent:
         probe = probe_mod.collect(ctx)
         ctx.check_cancel()
         ctx.say("Running checks...")
-        results = checks.run_all(
-            probe, large_mb=getattr(ctx.settings, "agent_large_file_mb", 5)
-        )
+        results = checks.run_all(probe, large_mb=_large_mb(ctx))
         results.sort(key=lambda r: r.sort_key())
         return _build(ctx, probe, results)
 

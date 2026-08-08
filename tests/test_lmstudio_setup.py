@@ -10,6 +10,7 @@ import sys
 import pytest
 
 from git_assistant import lmstudio_setup as setup
+from git_assistant import repo_config
 from git_assistant.config import Settings
 
 pytestmark = pytest.mark.skipif(
@@ -199,8 +200,39 @@ def test_the_app_is_pointed_at_what_was_just_installed(home):
 
     assert settings.provider == "lmstudio"
     assert settings.active_model() == "qwen3.5-4b"
-    assert settings.context_window == 32768
     assert settings.lmstudio_port == 1234
+    # The window belongs to the model, so it lands in the User tier -- where
+    # every run reads it from. Setting the field on `settings` would leave it
+    # somewhere nothing reads.
+    assert repo_config.defaults().model.context_window == setup.CONTEXT_LENGTH
+
+
+def test_pointing_the_app_at_it_leaves_a_repositorys_own_window_alone(home, tmp_path):
+    repo = tmp_path / "demo"
+    repo.mkdir()
+    repo_config.write_text(
+        repo_config.Tier.REPO, str(repo), '{"model": {"context_window": 8000}}'
+    )
+    settings = Settings()
+    settings.save = lambda: None
+
+    setup.point_app_at_it(_ctx(), settings)
+
+    assert repo_config.resolve(repo).model.context_window == 8000
+
+
+def test_pointing_the_app_at_it_keeps_the_rest_of_the_user_tier(home):
+    repo_config.write_text(
+        repo_config.Tier.USER, "", '{"commit": {"diff_mode": "working"}}'
+    )
+    settings = Settings()
+    settings.save = lambda: None
+
+    setup.point_app_at_it(_ctx(), settings)
+
+    written = repo_config.defaults()
+    assert written.model.context_window == setup.CONTEXT_LENGTH
+    assert written.commit.diff_mode == "working"  # not erased by the write
 
 
 # ---- the whole sequence -----------------------------------------------------------

@@ -94,13 +94,14 @@ def test_the_projects_pattern_is_what_the_name_is_built_from(panel, repo):
     assert "dev/rem/{user}/{name}" in panel.branch_pattern_note.text()
 
 
-def test_the_note_says_which_file_the_pattern_came_from(panel, repo):
-    assert repo_config.DEFAULTS_FILE in panel.branch_pattern_note.text()
+def test_the_note_says_which_settings_the_pattern_came_from(panel, repo):
+    """Named by tier: which settings are in force is what the user chose."""
+    assert "User settings" in panel.branch_pattern_note.text()
 
     _set_repo_config(repo, {"branch": {"pattern": "x/{name}"}})
     panel._reload_config()
 
-    assert "this repository's settings" in panel.branch_pattern_note.text()
+    assert "Repo settings" in panel.branch_pattern_note.text()
 
 
 def test_the_user_comes_from_git_when_the_project_does_not_name_one(panel, repo):

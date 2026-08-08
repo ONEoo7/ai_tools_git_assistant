@@ -116,19 +116,43 @@ QFrame#auditCard[selected="true"] {{
 class AuditOptions(QWidget):
     """The settings one audit reads.
 
-    Subclasses build their widgets, load them from ``settings`` and write back
-    on every change -- there is no Apply, because there is no dialog: what is
-    on screen is what the next run will use.
+    Subclasses build their widgets, fill them from the settings in force for
+    the selected repository, and write back on every change -- there is no
+    Apply, because there is no dialog: what is on screen is what the next run
+    will use.
+
+    Writing goes through ``host.write_audit``, so a tick box here obeys the
+    same rule the settings editor does: the change lands in this repository's
+    Custom settings and leaves the shared ones alone.
     """
 
     changed = pyqtSignal()
 
-    def __init__(self, settings, parent=None) -> None:
+    def __init__(self, host, parent=None) -> None:
         super().__init__(parent)
-        self.settings = settings
+        self.host = host
+        self._loading = False
         self.box = QVBoxLayout(self)
         self.box.setContentsMargins(INDENT, 0, 0, 0)
         self.box.setSpacing(4)
+
+    def show_rules(self, audit) -> None:
+        """Put ``audit`` (a repo_config.AuditRules) on screen. Not a change."""
+        self._loading = True
+        try:
+            self.fill(audit)
+        finally:
+            self._loading = False
+
+    def fill(self, audit) -> None:
+        raise NotImplementedError
+
+    def _write(self, mutate) -> None:
+        """One change to the audit section, unless we are only filling in."""
+        if self._loading:
+            return
+        self.host.write_audit(mutate)
+        self.changed.emit()
 
     def _caption(self, text: str) -> None:
         """A label for the widget about to be added below it."""
@@ -144,20 +168,22 @@ class AuditOptions(QWidget):
 class SizeOptions(AuditOptions):
     """The one shortcut the size audit has: skip the per-path history scan."""
 
-    def __init__(self, settings, parent=None) -> None:
-        super().__init__(settings, parent)
+    def __init__(self, host, parent=None) -> None:
+        super().__init__(host, parent)
         self.fast_check = QCheckBox("Fast mode (totals only)")
         self.fast_check.setToolTip(
             "Skips the per-file breakdown of history, which is the slow part on "
             "a large repository. The totals are still measured."
         )
-        self.fast_check.setChecked(settings.agent_fast_mode)
         self.fast_check.toggled.connect(self._store)
         self.box.addWidget(self.fast_check)
 
+    def fill(self, audit) -> None:
+        self.fast_check.setChecked(audit.fast)
+
     def _store(self, *_args) -> None:
-        self.settings.agent_fast_mode = self.fast_check.isChecked()
-        self.changed.emit()
+        on = self.fast_check.isChecked()
+        self._write(lambda data: data.setdefault("audit", {}).update({"fast": on}))
 
 
 class ConfigOptions(AuditOptions):
@@ -167,8 +193,8 @@ class ConfigOptions(AuditOptions):
     with no way to reach it, which is a default rather than a setting.
     """
 
-    def __init__(self, settings, parent=None) -> None:
-        super().__init__(settings, parent)
+    def __init__(self, host, parent=None) -> None:
+        super().__init__(host, parent)
         self.large_file_spin = QSpinBox()
         self.large_file_spin.setRange(1, 4096)
         self.large_file_spin.setSuffix(" MB")
@@ -176,14 +202,20 @@ class ConfigOptions(AuditOptions):
             "A tracked binary at least this large is reported as one Git LFS "
             "would normally hold. Nothing is moved or changed either way."
         )
-        self.large_file_spin.setValue(settings.agent_large_file_mb)
         self.large_file_spin.valueChanged.connect(self._store)
         self._caption("Flag binaries larger than:")
         self.box.addWidget(self.large_file_spin)
 
+    def fill(self, audit) -> None:
+        self.large_file_spin.setValue(audit.large_file_mb)
+
     def _store(self, *_args) -> None:
-        self.settings.agent_large_file_mb = self.large_file_spin.value()
-        self.changed.emit()
+        megabytes = self.large_file_spin.value()
+        self._write(
+            lambda data: data.setdefault("audit", {}).update(
+                {"large_file_mb": megabytes}
+            )
+        )
 
 
 class ConsistencyOptions(AuditOptions):
@@ -195,8 +227,8 @@ class ConsistencyOptions(AuditOptions):
     work until someone hand-edited that file.
     """
 
-    def __init__(self, settings, parent=None) -> None:
-        super().__init__(settings, parent)
+    def __init__(self, host, parent=None) -> None:
+        super().__init__(host, parent)
         self.stale_months_spin = QSpinBox()
         self.stale_months_spin.setRange(0, 120)
         self.stale_months_spin.setSuffix(" months")
@@ -234,9 +266,11 @@ class ConsistencyOptions(AuditOptions):
         self.box.addWidget(self.keep_unpushed_check)
         self._caption("Never delete:")
         self.box.addWidget(self.protect_edit)
-        self.show_rules(settings.stale_rules())
 
-    def show_rules(self, rules) -> None:
+    def fill(self, audit) -> None:
+        self._show(audit.stale)
+
+    def _show(self, rules) -> None:
         for widget, value in (
             (self.merged_only_check, rules.merged_only),
             (self.keep_unpushed_check, rules.keep_unpushed),
@@ -250,21 +284,19 @@ class ConsistencyOptions(AuditOptions):
         self.protect_edit.setText(", ".join(rules.protect))
 
     def _store(self, *_args) -> None:
-        from git_assistant.agents.branches import StaleRules
-
-        self.settings.set_stale_rules(
-            StaleRules(
-                months=self.stale_months_spin.value(),
-                protect=[
-                    part.strip()
-                    for part in self.protect_edit.text().split(",")
-                    if part.strip()
-                ],
-                merged_only=self.merged_only_check.isChecked(),
-                keep_unpushed=self.keep_unpushed_check.isChecked(),
-            )
+        rules = {
+            "months": self.stale_months_spin.value(),
+            "protect": [
+                part.strip()
+                for part in self.protect_edit.text().split(",")
+                if part.strip()
+            ],
+            "merged_only": self.merged_only_check.isChecked(),
+            "keep_unpushed": self.keep_unpushed_check.isChecked(),
+        }
+        self._write(
+            lambda data: data.setdefault("audit", {}).__setitem__("stale", rules)
         )
-        self.changed.emit()
 
 
 #: Which audit configures what. An audit missing from here has nothing to set.
@@ -275,9 +307,9 @@ OPTIONS = {
 }
 
 
-def options_for(agent_id: str, settings, parent=None) -> AuditOptions | None:
+def options_for(agent_id: str, host, parent=None) -> AuditOptions | None:
     builder = OPTIONS.get(agent_id)
-    return builder(settings, parent) if builder else None
+    return builder(host, parent) if builder else None
 
 
 class AuditCard(QFrame):
@@ -291,7 +323,7 @@ class AuditCard(QFrame):
     ticked = pyqtSignal()
     picked = pyqtSignal()
 
-    def __init__(self, info, settings, parent=None) -> None:
+    def __init__(self, info, host, parent=None) -> None:
         super().__init__(parent)
         self.info = info
         self.agent_id = info.id
@@ -337,7 +369,7 @@ class AuditCard(QFrame):
         )
         box.addWidget(self.hint)
 
-        self.options = options_for(info.id, settings, self)
+        self.options = options_for(info.id, host, self)
         if self.options is not None:
             box.addWidget(self.options)
         self._sync_options()

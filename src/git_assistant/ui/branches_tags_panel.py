@@ -280,7 +280,7 @@ class BranchesTagsPanel(QWidget):
     def _reload_config(self) -> None:
         """Re-read this repository's rules, and who git thinks we are."""
         repo = self._repo_path()
-        self._config = repo_config.resolve(repo)
+        self._config = repo_config.resolve(repo, self.settings.settings_tier(repo))
         # `{user}` blank in the config means "ask git", and this is the caller
         # that can: repo_config runs none of it.
         self._git_user = git_ops.get_identity(repo)[0] if repo else ""
@@ -296,12 +296,12 @@ class BranchesTagsPanel(QWidget):
         typed = self.branch_name_edit.text().strip()
         full = self._full_branch_name()
         self.branch_preview.setText(f"Will create:  {full}" if full else "")
-        source = (
-            "this repository's settings"
-            if repo_config.has_repo_config(self._repo_path())
-            else f"your defaults ({repo_config.DEFAULTS_FILE})"
+        # Named by tier rather than by file: which settings are in force is the
+        # thing the user chose, and the thing they would change.
+        tier = self._config.tier or repo_config.Tier.USER
+        self.branch_pattern_note.setText(
+            f"Pattern {pattern} - from the {tier.label()} settings."
         )
-        self.branch_pattern_note.setText(f"Pattern {pattern} - from {source}.")
         self.create_branch_btn.setEnabled(bool(full) and bool(typed))
 
     # ---- state -------------------------------------------------------------

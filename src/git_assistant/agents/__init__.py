@@ -29,6 +29,7 @@ from git_assistant.agents.base import (
 )
 from git_assistant.agents.config_audit import ConfigAuditAgent
 from git_assistant.agents.consistency_audit import ConsistencyAuditAgent
+from git_assistant.agents.metrics_audit import MetricsAgent
 from git_assistant.model_runtime import ModelRuntime
 from git_assistant.agents.size_audit import SizeAuditAgent
 from git_assistant import llm_log, tracing, usage
@@ -41,6 +42,7 @@ AGENTS: tuple[Agent, ...] = (
     SizeAuditAgent(),
     ConfigAuditAgent(),
     ConsistencyAuditAgent(),
+    MetricsAgent(),
 )
 
 __all__ = [

@@ -23,7 +23,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from git_assistant.review import builtin, languages
+from git_assistant.review import builtin, languages, rule_files
 from git_assistant.review.rules import Rule, RuleStore, RuleTable, normalize_id
 
 #: The profile every repository starts with: the shipped rules for whatever
@@ -241,7 +241,11 @@ def _table_of(
     if selection.is_builtin:
         # `builtin:*` means "whichever language this file turned out to be".
         wanted = selection.target
-        return builtin.table_for(language if wanted == languages.ANY else wanted, version)
+        # The files, not the shipped rules: `builtin:` names *which* table,
+        # and what that table says is whatever the user's file for it says.
+        return rule_files.table_for(
+            language if wanted == languages.ANY else wanted, version
+        )
     return store.find(selection.target)
 
 

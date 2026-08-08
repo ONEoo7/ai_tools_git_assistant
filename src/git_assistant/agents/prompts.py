@@ -185,4 +185,28 @@ OUTLINES: dict[str, dict[str, Outline]] = {
             ),
         ),
     },
+    "metrics": {
+        "metrics_summary": Outline(
+            "Executive summary of a repository's line counts",
+            "90-130 words, one or two paragraphs",
+            (
+                "how many lines this repository tracks, and across how many "
+                "files",
+                "how many of those lines are blank",
+                "that only tracked files are counted, so build output and "
+                "anything ignored is not in these numbers",
+                "say nothing about whether the amount is good or bad: more "
+                "code is not better code and less is not worse",
+            ),
+        ),
+        "metrics_types": Outline(
+            "What the repository is written in",
+            "60-90 words, one paragraph",
+            (
+                "which file type holds the most lines, and how many",
+                "what that says about what this repository mostly is",
+                "if the table names a share, quote it exactly as it appears",
+            ),
+        ),
+    },
 }

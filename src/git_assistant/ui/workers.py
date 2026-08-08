@@ -23,6 +23,7 @@ from git_assistant.commit_generator import (
     CommitGenerator,
     GenerationResult,
 )
+from git_assistant import repo_config
 from git_assistant.config import Settings
 from git_assistant import llm_log, tracing, usage
 from git_assistant.llm import build_client
@@ -44,7 +45,9 @@ class GeneratorWorker(QObject):
 
     def __init__(self, settings: Settings) -> None:
         super().__init__()
-        self._settings = settings
+        # What to send is the repository's answer; who to send it to is the
+        # user's. See git_assistant.repo_config.Bound.
+        self._settings = repo_config.bind(settings, settings.active_repo)
         self._cancelled = False
 
     def cancel(self) -> None:
@@ -96,7 +99,7 @@ class RetryWorker(QObject):
 
     def __init__(self, settings: Settings, retry, note: str = "") -> None:
         super().__init__()
-        self._settings = settings
+        self._settings = repo_config.bind(settings, settings.active_repo)
         self._retry = retry
         self._note = note
         self._cancelled = False
@@ -144,7 +147,7 @@ class ReviewWorker(QObject):
 
     def __init__(self, settings: Settings, plan) -> None:
         super().__init__()
-        self._settings = settings
+        self._settings = repo_config.bind(settings, getattr(plan, "repo", ""))
         #: A review.plan.ReviewPlan: which files, in which language, against
         #: which rules. Decided before the dialog that asked to run it.
         self._plan = plan
@@ -207,7 +210,7 @@ class AgentWorker(QObject):
         narrate: bool,
     ) -> None:
         super().__init__()
-        self._settings = settings
+        self._settings = repo_config.bind(settings, repo)
         self._agent_ids = list(agent_ids)
         self._repo = repo
         self._fast = fast

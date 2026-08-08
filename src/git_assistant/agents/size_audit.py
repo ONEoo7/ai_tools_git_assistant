@@ -91,7 +91,7 @@ class HistoryScan:
 class SizeAuditAgent:
     info = AgentInfo(
         id="size-audit",
-        label="Repository size audit",
+        label="Size",
         description=DESCRIPTION,
         cost_hint="Seconds on a small repository; minutes on a large one.",
     )

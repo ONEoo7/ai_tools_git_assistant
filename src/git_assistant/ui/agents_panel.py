@@ -47,7 +47,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from git_assistant import agents
+from git_assistant import agents, repo_config
 from git_assistant.agents import compare, history
 from git_assistant.agents import report as report_mod
 from git_assistant import estimate
@@ -55,6 +55,7 @@ from git_assistant.config import Settings, norm_path
 from git_assistant.providers import PROVIDERS
 from git_assistant.ui.audit_cards import AuditCard
 from git_assistant.ui.estimate_dialog import confirm
+from git_assistant.ui.settings_diff_dialog import SettingsDiffDialog
 from git_assistant.ui.preview_dialog import SECTION_GAP
 from git_assistant.ui.repo_picker import RepoPicker
 from git_assistant.ui.side_panel import SidePanel
@@ -107,13 +108,13 @@ def _run_tooltip(run) -> str:
     return "\n".join(bits)
 
 
-def _history_note(repo: str, runs: list, settings) -> str:
+def _history_note(repo: str, runs: list, limit: int) -> str:
     if not repo:
         return ""
     if not runs:
         return "No previous runs for this repository yet."
-    note = f"Keeping the newest {settings.agent_history_limit} run(s) per agent."
-    if settings.agent_history_limit <= 0:
+    note = f"Keeping the newest {limit} run(s) per agent."
+    if limit <= 0:
         note = "Keeping every run."
     unreadable = history.unreadable_count(repo)
     if unreadable:
@@ -143,9 +144,14 @@ class AgentsPanel(QWidget):
         #: with the flags that produced it, not with whatever is ticked by the
         #: time it comes back.
         self._fast_used = False
-        self._narrated = settings.agents_narrate
+        self._narrated = True  # replaced from the settings in force
         #: The audit being read. Not the ticked ones -- see the module docstring.
         self._selected = ""
+        #: True while the controls are being filled from the settings. Every
+        #: write goes through `write_audit`, and putting a stored value on
+        #: screen must not be mistaken for somebody choosing it -- opening a
+        #: tab is not a change, and a change forks a settings file.
+        self._loading = False
 
         self.repo_picker = RepoPicker(settings)
         self.repo_picker.repoChanged.connect(self._on_repo_changed)
@@ -154,11 +160,11 @@ class AgentsPanel(QWidget):
         # git_assistant.ui.audit_cards for why they are not in one column.
         self.cards = []
         for info in agents.infos():
-            card = AuditCard(info, settings)
+            card = AuditCard(info, self)
             card.ticked.connect(self._on_ticks_changed)
             card.picked.connect(lambda c=card: self._select_agent(c.agent_id))
             if card.options is not None:
-                card.options.changed.connect(self.settings.save)
+                card.options.changed.connect(self._on_audit_written)
             self.cards.append(card)
 
         # Applies to every audit, so it belongs to none of them: it is the
@@ -170,7 +176,6 @@ class AgentsPanel(QWidget):
             "configured provider writes the prose around them - and any figure "
             "it invents is rejected."
         )
-        self.narrate_check.setChecked(settings.agents_narrate)
         self.narrate_check.toggled.connect(self._on_options_changed)
 
         # The same application-wide setting the Generate tab exposes, offered
@@ -290,8 +295,7 @@ class AgentsPanel(QWidget):
         outer = QVBoxLayout(self)
         outer.addWidget(splitter)
 
-        self._select_stored_agent()
-        self._restore_ticks()
+        self._reload_from_settings()
         self.refresh_repos()
 
     #: The calls half of the side pane, which is what a run talks to.
@@ -299,6 +303,73 @@ class AgentsPanel(QWidget):
 
     #: The size audit's own option, reached often enough to name here.
     fast_check = property(lambda self: self._options("size-audit").fast_check)
+
+    # ---- the settings in force for this repository ---------------------------
+    def audit_rules(self):
+        """What the audits are configured with here. Read, never held."""
+        return repo_config.for_repo(self.settings, self._repo_path()).audit
+
+    def write_audit(self, mutate) -> None:
+        """One change to this repository's audit settings; see repo_config.change.
+
+        Forks to Custom exactly as the settings editor does, so a tick box here
+        cannot edit the file a team shares. The prompt is only reached when the
+        fork would replace Custom settings that already exist -- once per
+        repository, not once per tick.
+        """
+        if self._loading:
+            return
+        problem = repo_config.change(
+            self.settings,
+            self._repo_path(),
+            mutate,
+            may_replace_custom=self._may_replace_custom,
+        )
+        if problem:
+            self.status.setText(problem)
+
+    def _may_replace_custom(self, before: dict, after: dict) -> bool:
+        return SettingsDiffDialog(
+            before,
+            after,
+            title="Replace your Custom settings",
+            question=(
+                "You already have Custom settings for this repository. Changing "
+                "this here replaces them:"
+            ),
+            before_label="Custom now",
+            after_label="After this change",
+            parent=self,
+        ).wanted()
+
+    def _on_audit_written(self) -> None:
+        """A card wrote something; the rest of the tab may be showing the old it."""
+        self._refresh_history()
+
+    def _reload_from_settings(self) -> None:
+        """Put the settings in force for this repository onto every control.
+
+        Called when the repository changes, because every one of these is that
+        repository's answer and not the application's.
+        """
+        self._loading = True
+        try:
+            rules = self.audit_rules()
+            self.narrate_check.blockSignals(True)
+            self.narrate_check.setChecked(rules.narrate)
+            self.narrate_check.blockSignals(False)
+            self._reload_audit_options()
+            self._select_stored_agent()
+            self._restore_ticks()
+        finally:
+            self._loading = False
+
+    def _reload_audit_options(self) -> None:
+        """Put the settings in force onto every card. Never a change."""
+        rules = self.audit_rules()
+        for card in self.cards:
+            if card.options is not None:
+                card.options.show_rules(rules)
 
     def _options(self, agent_id: str):
         """One audit's settings widget, or ``None`` if it has none."""
@@ -404,7 +475,7 @@ class AgentsPanel(QWidget):
         return any(card.agent_id == agent_id for card in self.cards)
 
     def _select_stored_agent(self) -> None:
-        stored = self.settings.agent_last_id
+        stored = self.audit_rules().last
         first = self.cards[0].agent_id if self.cards else ""
         self._select_agent(stored if self._known(stored) else first)
 
@@ -416,7 +487,7 @@ class AgentsPanel(QWidget):
         """
         wanted = [
             agent_id
-            for agent_id in self.settings.agent_selected_ids
+            for agent_id in self.audit_rules().selected
             if self._known(agent_id)
         ]
         self._set_ticks(wanted or [self._agent_id()])
@@ -429,8 +500,10 @@ class AgentsPanel(QWidget):
 
     def _on_ticks_changed(self) -> None:
         chosen = self._checked_ids()
-        self.settings.agent_selected_ids = chosen
-        self.settings.save()
+        if chosen != self.audit_rules().selected:
+            self.write_audit(
+                lambda data: data.setdefault("audit", {}).update({"selected": chosen})
+            )
         self.run_btn.setText(f"Run {len(chosen)} audits" if len(chosen) > 1 else "Run")
         self.run_btn.setToolTip(
             "Runs: " + ", ".join(self._label_of(a) for a in chosen)
@@ -503,6 +576,7 @@ class AgentsPanel(QWidget):
         self.header.setText(f"{title} — {name}{suffix}")
 
     def _on_repo_changed(self, _path: str = "") -> None:
+        self._reload_from_settings()
         self._refresh_header()
         self._sync_shown_report()
         self._refresh_history()
@@ -524,8 +598,10 @@ class AgentsPanel(QWidget):
             # it is no use below the fold.
             if card.agent_id == agent_id:
                 self.audits_scroll.ensureWidgetVisible(card)
-        self.settings.agent_last_id = agent_id
-        self.settings.save()
+        if self.audit_rules().last != agent_id:
+            self.write_audit(
+                lambda data: data.setdefault("audit", {}).update({"last": agent_id})
+            )
         self._refresh_header()
         self._sync_shown_report()
         self._refresh_history()
@@ -576,8 +652,11 @@ class AgentsPanel(QWidget):
 
     def _on_options_changed(self, _checked: bool = False) -> None:
         """The one option that is about the run rather than about one audit."""
-        self.settings.agents_narrate = self.narrate_check.isChecked()
-        self.settings.save()
+        on = self.narrate_check.isChecked()
+        if on != self.audit_rules().narrate:
+            self.write_audit(
+                lambda data: data.setdefault("audit", {}).update({"narrate": on})
+            )
 
     # ---- running ------------------------------------------------------------
     def _on_run(self) -> None:
@@ -688,7 +767,7 @@ class AgentsPanel(QWidget):
                 report,
                 narrated=self._narrated,
                 fast=self._fast_used and report.agent_id == SIZE_AUDIT,
-                limit=self.settings.agent_history_limit,
+                limit=self.audit_rules().history_limit,
             )
             stored_runs[outcome.agent_id] = stored
             if problem:
@@ -799,7 +878,7 @@ class AgentsPanel(QWidget):
                 self.runs_tree.setCurrentItem(item)
             self.runs_tree.addTopLevelItem(item)
         self._on_run_selection()
-        self.history_note.setText(_history_note(repo, runs, self.settings))
+        self.history_note.setText(_history_note(repo, runs, self.audit_rules().history_limit))
 
     def _selected_runs(self) -> list:
         return [

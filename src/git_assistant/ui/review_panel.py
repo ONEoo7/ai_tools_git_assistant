@@ -16,8 +16,8 @@ import html
 from datetime import date
 from pathlib import Path
 
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QColor, QGuiApplication
+from PyQt6.QtCore import Qt, QUrl
+from PyQt6.QtGui import QColor, QDesktopServices, QGuiApplication
 from PyQt6.QtWidgets import (
     QComboBox,
     QFileDialog,
@@ -42,10 +42,10 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from git_assistant import estimate
+from git_assistant import estimate, repo_config
 from git_assistant.config import Settings, norm_path
 from git_assistant.providers import PROVIDERS
-from git_assistant.review import history, languages
+from git_assistant.review import history, languages, rule_files
 from git_assistant.review import report as report_mod
 from git_assistant.review import xlsx
 from git_assistant.review import profiles as profiles_mod
@@ -65,6 +65,7 @@ NO_REPOS_MESSAGE = "No repositories configured - add one in Repositories."
 NO_RULES_MESSAGE = "No rule table yet - import a spreadsheet under Rules."
 INFO_COLOUR = "color: #8ab;"
 MUTED_COLOUR = "color: #888;"
+WARN_COLOUR = "color: #b36b00;"
 
 #: Said in the calls pane when a stored review is opened; its calls are not kept.
 STORED_CALLS_NOTE = (
@@ -355,9 +356,49 @@ class ReviewPanel(QWidget):
         self._refresh_tables()
         self.status.setText(f"Copied {', '.join(added)} into your rule tables.")
 
+    def _refresh_shipped_rules_note(self) -> None:
+        broken = [
+            language
+            for language in rule_files.languages_covered()
+            if rule_files.problem_with(language)
+        ]
+        covered = len(rule_files.languages_covered())
+        self.shipped_rules_note.setText(
+            f"Per-language rules: {covered} file(s) in {rule_files.rules_dir()}."
+            + (
+                f"  {len(broken)} could not be read and the shipped rules are "
+                f"being used instead: {', '.join(broken)}."
+                if broken
+                else ""
+            )
+        )
+        self.shipped_rules_note.setStyleSheet(WARN_COLOUR if broken else MUTED_COLOUR)
+
+    def _on_open_rules_folder(self) -> None:
+        rule_files.ensure_files()  # nothing to open until they exist
+        self._refresh_shipped_rules_note()
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(rule_files.rules_dir())))
+
     def _build_rules_tab(self) -> QWidget:
         tab = QWidget()
         box = QVBoxLayout(tab)
+
+        # The shipped rules are files now, and files are the thing to say so
+        # about: a rule set nobody can find is one nobody can correct.
+        shipped_row = QHBoxLayout()
+        self.shipped_rules_note = QLabel("")
+        self.shipped_rules_note.setWordWrap(True)
+        self.shipped_rules_note.setStyleSheet(MUTED_COLOUR)
+        self.open_rules_btn = QPushButton("Open rules folder")
+        self.open_rules_btn.setToolTip(
+            "One file per language, with the versions each rule applies to. "
+            "Editing one changes what the next review checks."
+        )
+        self.open_rules_btn.clicked.connect(self._on_open_rules_folder)
+        shipped_row.addWidget(self.shipped_rules_note, 1)
+        shipped_row.addWidget(self.open_rules_btn)
+        box.addLayout(shipped_row)
+        self._refresh_shipped_rules_note()
 
         self.rules_table = QTableWidget(0, 2)
         self.rules_table.setHorizontalHeaderLabels(["ruleID", "ruleDetails"])
@@ -471,6 +512,10 @@ class ReviewPanel(QWidget):
         return row
 
     # ---- state ---------------------------------------------------------------
+    def bound(self):
+        """The settings as the selected repository sees them; see repo_config."""
+        return repo_config.bind(self.settings, self._repo_path())
+
     def _repo_path(self) -> str:
         return self.repo_picker.current_path()
 
@@ -828,9 +873,10 @@ class ReviewPanel(QWidget):
         repo = self._repo_path()
         self._candidates = []
         if repo:
+            bound = self.bound()
             try:
                 self._candidates = staged_files(
-                    repo, self.settings.diff_mode, self.settings.ignore_globs
+                    repo, bound.diff_mode, bound.ignore_globs
                 )
             except Exception:
                 # A repo git cannot read shows nothing here; running surfaces
@@ -954,11 +1000,11 @@ class ReviewPanel(QWidget):
         if not confirm_plan(
             self,
             plan,
-            estimate.for_review(self.settings, plan),
+            estimate.for_review(self.bound(), plan),
             rules_for=profiles_mod.rules_for(
                 profile, self._store, inlined=self._inlined()
             ),
-            price=lambda p: estimate.for_review(self.settings, p),
+            price=lambda p: estimate.for_review(self.bound(), p),
         ):
             return
         self._remember_languages(plan)
@@ -1039,7 +1085,9 @@ class ReviewPanel(QWidget):
         self._show_run(run)
 
         parts = [run.summary() + "."]
-        stored, problem = history.record(run, limit=self.settings.review_history_limit)
+        stored, problem = history.record(
+            run, limit=self.bound().review_history_limit
+        )
         if problem and stored is None:
             parts.append(f"(Not saved to history: {problem})")
         elif problem:
@@ -1171,7 +1219,9 @@ class ReviewPanel(QWidget):
                 self.runs_tree.setCurrentItem(item)
             self.runs_tree.addTopLevelItem(item)
         self._on_run_selection()
-        self.history_note.setText(_history_note(repo, runs, self.settings))
+        self.history_note.setText(
+            _history_note(repo, runs, self.bound().review_history_limit)
+        )
 
     def _selected_runs(self) -> list:
         return [
@@ -1327,14 +1377,14 @@ def _run_tooltip(stored) -> str:
     return "\n".join(bits)
 
 
-def _history_note(repo: str, runs: list, settings) -> str:
+def _history_note(repo: str, runs: list, limit: int) -> str:
     if not repo:
         return ""
     if not runs:
         return "No reviews recorded for this repository yet."
-    if settings.review_history_limit <= 0:
+    if limit <= 0:
         return "Keeping every review."
-    return f"Keeping the newest {settings.review_history_limit} review(s)."
+    return f"Keeping the newest {limit} review(s)."
 
 
 class _StoreView:

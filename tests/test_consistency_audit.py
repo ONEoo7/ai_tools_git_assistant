@@ -123,7 +123,7 @@ def test_the_rules_that_spared_something_are_shown(settings, repo):
 
 
 def test_the_threshold_decides_what_is_stale(settings, repo):
-    settings.stale_branch_rules = StaleRules(months=99).to_dict()
+    settings.stale_branch_rules = StaleRules(months=99)
     report = _run(settings, repo)
 
     assert report.facts_by_key()["stale_total"].raw == 0
@@ -131,7 +131,7 @@ def test_the_threshold_decides_what_is_stale(settings, repo):
 
 
 def test_turning_the_merged_rule_off_is_what_it_takes(settings, repo):
-    settings.stale_branch_rules = StaleRules(merged_only=False).to_dict()
+    settings.stale_branch_rules = StaleRules(merged_only=False)
     block = _section(_run(settings, repo), "2.1").commands[0][1]
     assert "half-finished" in block
 

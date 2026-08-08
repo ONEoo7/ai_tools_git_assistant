@@ -103,6 +103,19 @@ METRICS: dict[str, dict[str, Metric]] = {
         # (`Metric()` rather than `_NEUTRAL`, which is defined below this.)
         "submodules_used": Metric(),
     },
+    # Deliberately unscored, all of it. More code is not better code and less
+    # code is not worse code, and a report that put an arrow beside either
+    # would be making a claim this application cannot support. Reported when it
+    # changes, which is the useful part: a thousand lines nobody remembers
+    # writing is worth seeing.
+    "metrics": {
+        "lines": Metric(headline=True),
+        "code_lines": Metric(headline=True),
+        "files": Metric(headline=True),
+        "blank_lines": Metric(),
+        "file_types": Metric(),
+        "largest_type_lines": Metric(),
+    },
 }
 
 #: Everything else -- commits, branches, tags, tracked files, submodules -- is

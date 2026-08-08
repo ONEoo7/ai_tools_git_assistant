@@ -16,7 +16,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Callable
 
-from git_assistant import git_ops
+from git_assistant import git_ops, repo_config
 from git_assistant.mcp import schema
 from git_assistant.mcp.context import NO_REPOSITORIES, ToolContext, ToolError
 
@@ -146,7 +146,7 @@ def _repo_status(ctx: ToolContext, args: dict, **_kw) -> dict:
 def _get_diff(ctx: ToolContext, args: dict, **_kw) -> dict:
     settings = ctx.settings()
     repo = ctx.resolve(settings, args.get("repo"))
-    mode = args.get("mode") or settings.diff_mode
+    mode = args.get("mode") or repo_config.bind(settings, repo).diff_mode
     cap = int(args.get("max_bytes") or DEFAULT_DIFF_BYTES)
     diff = git_ops.get_diff(repo, mode)
     if not diff.strip():
@@ -197,16 +197,23 @@ def _generate_commit_message(ctx: ToolContext, args: dict, *, progress, is_cance
 
     settings = ctx.settings()  # a private copy: the generator reads these
     settings.active_repo = ctx.resolve(settings, args.get("repo"))
-    if args.get("mode"):
-        settings.diff_mode = args["mode"]
     if args.get("template"):
         settings.set_repo_template(settings.active_repo, args["template"])
+    # What to send is the repository's answer, who to send it to is the user's.
+    # A `mode` in the arguments answers for this call and is written nowhere:
+    # one client asking for the working tree must not reconfigure the
+    # repository for the window.
+    bound = repo_config.bind(
+        settings,
+        settings.active_repo,
+        **({"diff_mode": args["mode"]} if args.get("mode") else {}),
+    )
 
     from git_assistant import tracing
 
-    client = build_client(settings, feature=usage.COMMIT)
+    client = build_client(bound, feature=usage.COMMIT)
     try:
-        result = CommitGenerator(settings, client).generate(
+        result = CommitGenerator(bound, client).generate(
             progress=progress, is_cancelled=is_cancelled
         )
     finally:
@@ -215,7 +222,7 @@ def _generate_commit_message(ctx: ToolContext, args: dict, *, progress, is_cance
     # produced is in the structured half for a caller that wants it.
     from git_assistant import commit_style
 
-    measured = commit_style.measure(result.message, commit_style.Limits.of(settings))
+    measured = commit_style.measure(result.message, commit_style.Limits.of(bound))
     return text(
         result.message,
         {
