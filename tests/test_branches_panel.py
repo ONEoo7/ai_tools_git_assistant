@@ -139,18 +139,34 @@ def test_the_projects_own_pattern_is_offered_first(panel, repo):
     assert "dev/rem/sg/new-thing" in panel.branch_preview.text()
 
 
-def test_nothing_is_said_about_where_the_patterns_came_from(panel, repo):
-    """Which settings are in force is in the bar above the tabs, said once."""
+def test_nothing_is_written_under_the_cards_until_a_name_is_typed(panel, repo):
+    """The button sits under the card, not under two empty lines.
+
+    Which settings are in force is in the bar above the tabs, and what each
+    card does is on the card. Both were said again here, above the button, in
+    a place that was permanently one or two lines tall either way.
+    """
     _set_repo_config(repo, {"branch": {"patterns": ["x/{name}"]}})
     panel._reload_config()
-
     _use_pattern(panel)
 
-    assert panel.branch_pattern_note.text() == ""
+    assert not panel.branch_preview.isVisibleTo(panel)
+    assert not panel.branch_conflict.isVisibleTo(panel)
 
 
-def test_the_plain_card_says_it_adds_nothing(panel):
-    assert "what you type" in panel.branch_pattern_note.text()
+def test_the_preview_appears_as_the_name_is_typed(panel):
+    panel.plain_card.name_edit.setText("thing")
+
+    assert panel.branch_preview.isVisibleTo(panel)
+    assert "thing" in panel.branch_preview.text()
+
+
+def test_the_preview_goes_away_again_when_the_name_is_cleared(panel):
+    panel.plain_card.name_edit.setText("thing")
+
+    panel.plain_card.name_edit.setText("")
+
+    assert not panel.branch_preview.isVisibleTo(panel)
 
 
 def test_the_user_comes_from_git_when_nobody_names_one(panel, repo):

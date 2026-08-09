@@ -243,11 +243,6 @@ class BranchesTagsPanel(QWidget):
         self.branch_conflict.setStyleSheet(WARN_COLOUR)
         new_layout.addWidget(self.branch_conflict)
 
-        self.branch_pattern_note = QLabel("")
-        self.branch_pattern_note.setWordWrap(True)
-        self.branch_pattern_note.setStyleSheet(MUTED_COLOUR)
-        new_layout.addWidget(self.branch_pattern_note)
-
         self.create_branch_btn = QPushButton("Create branch")
         self.create_branch_btn.setToolTip(
             "Create it from the current commit and switch to it."
@@ -430,15 +425,14 @@ class BranchesTagsPanel(QWidget):
         card = self._card()
         full = self._full_branch_name()
         self.branch_preview.setText(f"Will create:  {full}" if full else "")
-        # Nothing said about where the patterns came from. Which settings are in
-        # force is on screen already, in the bar above the tabs, and a second
-        # copy of it under the preview was one more line between the name being
-        # typed and the button that creates it.
-        self.branch_pattern_note.setText(
-            "" if card is self.pattern_card else "No pattern: the name is what you type."
-        )
         blocking = git_ops.blocking_branch(self._branch_names, full)
         self.branch_conflict.setText(_conflict_note(full, blocking))
+        # Hidden rather than left blank, so the button sits under the card
+        # instead of under two empty lines. Both of these appear as the name is
+        # typed, and the button is dead until then -- so it can only move
+        # downwards, and never out from under a click that was about to land.
+        for label in (self.branch_preview, self.branch_conflict):
+            label.setVisible(bool(label.text()))
         self.create_branch_btn.setEnabled(
             bool(full) and bool(card.typed()) and not blocking
         )
