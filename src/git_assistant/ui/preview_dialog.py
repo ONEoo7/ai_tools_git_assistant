@@ -525,7 +525,7 @@ class CommitPanel(QWidget):
                 assigned = r.template
         self.template_combo.blockSignals(True)
         self.template_combo.clear()
-        self.template_combo.addItems(self.settings.template_names())
+        self.template_combo.addItems(self.bound().template_names())
         idx = self.template_combo.findText(assigned)
         self.template_combo.setCurrentIndex(idx if idx >= 0 else 0)
         self.template_combo.blockSignals(False)

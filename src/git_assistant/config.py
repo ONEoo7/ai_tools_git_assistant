@@ -1,4 +1,27 @@
-"""User settings: dataclass model + JSON persistence in the platform config dir.
+"""What belongs to the person rather than to any repository.
+
+Written to ``static_user_settings.json``. The two files beside it --
+``user_settings.json`` and a repository's own ``repo_settings.json`` -- carry
+the same keys as each other and none of the keys in this one; see
+git_assistant.repo_config.
+
+One question decides which file a new value goes in:
+
+    Does it change what a run does?
+
+Yes -- the diff mode, a branch pattern, when a branch counts as stale -- and it
+is a *setting*. It goes in the shared schema, so a project can ship its answer
+and a person can override it for themselves.
+
+No -- which audits are ticked, which report is on screen, which repository is
+active -- and it is a *selection*. It changes what is on screen and nothing
+else, so it belongs here. Alongside it live the things that were never about a
+repository at all: the account to call, the libraries to pick from, and which
+repositories this person has.
+
+Getting it wrong is not a crash, which is why tests/test_settings_split.py
+enforces it. A setting kept here cannot be shared with a team; a selection kept
+per repository forks the settings to Custom the first time a box is ticked.
 
 JSON (not TOML) is used for on-disk storage so the editable multi-line prompt
 template round-trips losslessly without a third-party TOML writer.
@@ -16,6 +39,7 @@ from pathlib import Path
 
 from platformdirs import user_config_dir
 
+from git_assistant import jsonc
 from git_assistant.providers import DEFAULT_PROVIDER, is_known
 from git_assistant.prompts import DEFAULT_TEMPLATE
 
@@ -63,7 +87,17 @@ DEFAULT_IGNORE_GLOBS: list[str] = [
 
 
 def config_path() -> Path:
-    """Return the path to the settings JSON file (directory may not yet exist)."""
+    """The user's own settings: everything that is not about a repository.
+
+    Named for what it holds. The two files beside it -- ``user_settings.json``
+    and a repository's ``repo_settings.json`` -- carry the same keys as each
+    other, and none of the keys in this one. See git_assistant.repo_config.
+    """
+    return Path(user_config_dir(APP_NAME, appauthor=False)) / "static_user_settings.json"
+
+
+def old_config_path() -> Path:
+    """The single file that held both halves, before they were split."""
     return Path(user_config_dir(APP_NAME, appauthor=False)) / "settings.json"
 
 
@@ -71,6 +105,62 @@ def _legacy_config_path() -> Path:
     """Path to the pre-rename settings, read once to migrate existing users."""
     return Path(user_config_dir(LEGACY_APP_NAME, appauthor=False)) / "settings.json"
 
+
+# ---- what the file says about itself -------------------------------------------------
+#: The first line of the file, answering the question somebody has when they
+#: open it: why is this one not overridden like the others.
+HEADER = "These settings are not overridden by repo_settings.json"
+
+#: One sentence per key, written above it in the file. See
+#: git_assistant.jsonc for how, and git_assistant.repo_config.FIELD_COMMENTS
+#: for the other half of the schema.
+FIELD_COMMENTS = {
+    "provider": "Which backend generates text. See the Connection tab.",
+    "provider_models": (
+        "Model per provider, so switching provider does not carry a model "
+        "name the new one has never heard of."
+    ),
+    "provider_temperatures": (
+        "How adventurous each model may be, by provider and then by model. "
+        "It is a property of the weights, not of the backend."
+    ),
+    "azure_api_version": "The api-version Azure pins its contract with.",
+    "selected_model": (
+        "LM Studio's model. Kept under its original name so settings files "
+        "written by older versions still load."
+    ),
+    "repos": "The repositories this application manages.",
+    "active_repo": "Path of the repository the window is working in.",
+    "recent_repos": "Recently used repository paths, most recent first.",
+    "scan_roots": "Folders scanned for repositories.",
+    "watched_roots": "Folders watched, so a repository added there is noticed.",
+    "mcp_allow_writes": (
+        "Whether the command registered with a client offers the write tools. "
+        "The flag lives in that command line; this only remembers what the "
+        "tab last showed."
+    ),
+    "mcp_scope": "Which Claude Code scope the MCP server is registered in.",
+    "theme": "How the window is painted: system, light, dark or pony.",
+    "settings_tiers": (
+        "Which settings each repository uses: user, repo or custom. The "
+        "user's choice, so a repository cannot decide it is not being read."
+    ),
+    "audit_selected": (
+        "Which audits are ticked, per repository. A selection: it changes "
+        'what is on screen and nothing about what an audit does. "" is the '
+        "answer for a repository nobody has ticked anything for yet."
+    ),
+    "audit_last": "Whose audit report is on screen, per repository.",
+    "branch_pattern": (
+        "Which branch naming convention is selected, per repository. Blank, "
+        "and the name is what you type. The conventions themselves are a "
+        "repository's setting, not this."
+    ),
+    "branch_user": (
+        "A {user} typed in by hand, per repository. Blank asks git for the "
+        "committer name."
+    ),
+}
 
 DEFAULT_TEMPLATE_NAME = "Default"
 
@@ -224,11 +314,6 @@ class Settings:
 
     #: Which backend generates the message. See git_assistant.providers.
     provider: str = DEFAULT_PROVIDER
-    #: Per-provider endpoint, keyed by provider key. Only for providers whose
-    #: address the user supplies (Azure, a proxy); the rest have a fixed one.
-    #: API keys are NOT here -- they live in the Windows Credential Manager,
-    #: see git_assistant.credentials.
-    provider_endpoints: dict[str, str] = field(default_factory=dict)
     #: Per-provider model, so switching provider does not carry a model name
     #: the new one has never heard of into its request.
     provider_models: dict[str, str] = field(default_factory=dict)
@@ -242,74 +327,23 @@ class Settings:
     #: Azure pins its contract with this; a mismatch is a 404 that says
     #: nothing about the version.
     azure_api_version: str = "2024-10-21"
-    lmstudio_ip: str = "127.0.0.1"
-    lmstudio_port: int = 1234
     selected_model: str = ""
-    parallel_calls: int = 4  # concurrent LLM requests during map-reduce
     repos: list[RepoEntry] = field(default_factory=list)
     active_repo: str = ""  # path of the active RepoEntry
     recent_repos: list[str] = field(default_factory=list)  # paths, most-recent first
     scan_roots: list[str] = field(default_factory=list)  # folders scanned for repos
     watched_roots: list[str] = field(default_factory=list)  # roots auto-watched for new repos
-    diff_mode: str = "cached"  # "cached" (git diff --cached) | "working" (git diff HEAD)
-    # The default template, used by any repo without one of its own. Kept under
-    # its original name so existing settings files load unchanged.
-    prompt_template: str = DEFAULT_TEMPLATE
-    templates: list[Template] = field(default_factory=list)  # named extras
-    # ---- how long a commit message may be ----------------------------------
-    #: Asked of the model and checked afterwards; 0 turns a rule off entirely.
-    #: See git_assistant.commit_style for what the numbers mean.
-    commit_subject_target: int = 50
-    commit_subject_limit: int = 72
-    commit_body_limit: int = 1000
     # Committer identities live in committer_identities.json, not here -- see
     # git_assistant.identities. An older build wrote them into this file; that
     # key is migrated and removed on first run.
     # ---- Audit tab ---------------------------------------------------------
-    agents_narrate: bool = True  # let the provider write the report's prose
-    agent_last_id: str = ""  # the audit whose report and history are on screen
-    #: The audits ticked to run. Separate from `agent_last_id`, which is the one
-    #: being *read*: a run of three leaves three reports, and the tab can only
-    #: show one of them at a time.
-    agent_selected_ids: list[str] = field(default_factory=list)
-    agent_fast_mode: bool = False  # skip the per-file history breakdown
-    agent_large_file_mb: int = 5  # a binary this size is worth flagging
-    #: When a branch counts as stale, and when the consistency audit may
-    #: propose deleting one. A handful of values, so they live here rather than
-    #: in a store of their own. See git_assistant.agents.branches.StaleRules --
-    #: which owns the shape, because config.py should not have to know it.
-    stale_branch_rules: dict = field(default_factory=dict)
-    #: Recorded runs kept per repository and agent (0 keeps everything). The
-    #: runs themselves live beside this file; see git_assistant.agents.history.
-    agent_history_limit: int = 20
-    #: Generated commit messages kept per repository (0 keeps everything).
-    #: They live beside this file; see git_assistant.commit_history.
-    commit_history_limit: int = 20
     # ---- Code Review tab ---------------------------------------------------
-    #: Recorded reviews kept per repository (0 keeps everything). Like the agent
-    #: runs, the reviews live beside this file; see git_assistant.review.history.
-    review_history_limit: int = 20
-    #: Review profiles, as prompt templates are: a few hundred bytes of
-    #: pointers, so they belong in this file rather than in a store of their
-    #: own. The rules they point at do not; see git_assistant.review.rules.
-    review_profiles: list = field(default_factory=list)
     # ---- MCP server --------------------------------------------------------
     #: Whether the command registered with a client offers the write tools.
     #: The flag lives in that command line, not here -- this only remembers
     #: what the tab last showed. See git_assistant.mcp.launch.
     mcp_allow_writes: bool = False
     mcp_scope: str = "user"  # which Claude Code scope to register in
-    # ---- Langfuse tracing --------------------------------------------------
-    #: Off until the user turns it on and says where. Neither key is here and
-    #: neither may ever be written here -- both are in the Windows Credential
-    #: Manager, see git_assistant.tracing.settings.
-    langfuse_enabled: bool = False
-    langfuse_host: str = ""
-    langfuse_environment: str = "development"
-    langfuse_release: str = ""  # blank => this build's version
-    #: Whether the prompt and the reply travel with the trace. Off, a trace
-    #: still carries the model, the timings, the tokens and any error.
-    langfuse_send_prompts: bool = True
     #: How the window is painted: follow the system, light, dark, or pink. See
     #: git_assistant.ui.theme, which owns the names -- config.py should not
     #: have to know what a palette is. An unknown value falls back rather than
@@ -319,32 +353,21 @@ class Settings:
     #: file -- a repository cannot decide it is not being read. Absent means
     #: nobody has chosen; see git_assistant.repo_config.effective_tier.
     settings_tiers: dict[str, str] = field(default_factory=dict)
-    #: Whether the per-repository settings below have been carried into the
-    #: user tier. See git_assistant.repo_config.migrate_user_settings; the old
-    #: fields are kept so a downgrade still finds them.
-    settings_migrated: bool = False
+    #: What is ticked and what is being read on the Audit tab, per repo key.
+    #: Selections, so they are here and not in the settings a repository can
+    #: carry -- see `audits_selected`.
+    audit_selected: dict[str, list[str]] = field(default_factory=dict)
+    audit_last: dict[str, str] = field(default_factory=dict)
+    #: How a new branch is named on the Branches tab, per repo key: ``""`` for
+    #: the plain name and a pattern string for one of the offered conventions.
+    #: The patterns themselves are a repository's; which one is selected is not.
+    branch_pattern: dict[str, str] = field(default_factory=dict)
+    #: A `{user}` typed in by hand, per repo key. Blank -- the usual case -- is
+    #: whatever git says the committer is called here.
+    branch_user: dict[str, str] = field(default_factory=dict)
     theme: str = "system"
-    context_window: int = 32768  # total tokens for input+output (0 => auto-detect)
-    safety_margin: float = 0.10  # fraction of the window reserved for the model's output
-    ignore_globs: list[str] = field(default_factory=lambda: list(DEFAULT_IGNORE_GLOBS))
-
-    # ---- URL helpers -------------------------------------------------------
-    @property
-    def base_url(self) -> str:
-        """LM Studio's address. Other providers use `provider_endpoint`."""
-        return f"http://{self.lmstudio_ip}:{self.lmstudio_port}"
 
     # ---- per-provider settings ---------------------------------------------
-    def provider_endpoint(self, key: str) -> str:
-        return (self.provider_endpoints.get(key) or "").strip()
-
-    def set_provider_endpoint(self, key: str, value: str) -> None:
-        value = (value or "").strip()
-        if value:
-            self.provider_endpoints[key] = value
-        else:
-            self.provider_endpoints.pop(key, None)
-
     def provider_model(self, key: str) -> str:
         """The model chosen for a provider.
 
@@ -400,20 +423,70 @@ class Settings:
     def active_temperature(self) -> float:
         return self.temperature_for(self.provider, self.active_model())
 
-    # ---- stale branches ----------------------------------------------------
-    def stale_rules(self):
-        """The stale-branch rules, as an object rather than a dict.
+    # ---- what is selected in the window ------------------------------------
+    # Selections, not settings: they change what is on screen and nothing about
+    # what a run does, so they are the user's and are not shared with anybody's
+    # repository. Per repository all the same -- ticking three audits in one
+    # project is not a statement about the next one.
+    #
+    # The entry under "" is the answer for a repository nobody has chosen for
+    # yet. It is also where the single global list from before this split
+    # lands, so an upgrade opens on the audits that were already ticked.
+    def audits_selected(self, repo_path: str) -> list[str]:
+        """Which audits are ticked here, or the last answer given anywhere."""
+        chosen = self.audit_selected.get(repo_key(repo_path)) if repo_path else None
+        return list(chosen if chosen is not None else self.audit_selected.get("", []))
 
-        Rebuilt on each read rather than held: it is asked for once per audit,
-        and a hand-edited settings file must not be able to put something
-        unusable into a long-lived attribute.
+    def set_audits_selected(self, repo_path: str, agent_ids) -> None:
+        if not repo_path:
+            return
+        self.audit_selected[repo_key(repo_path)] = list(agent_ids)
+        # Kept as the answer for the next repository too, so a habit does not
+        # have to be re-entered once per project.
+        self.audit_selected[""] = list(agent_ids)
+
+    def audit_shown(self, repo_path: str) -> str:
+        """Whose report is on screen here, or the last one read anywhere."""
+        shown = self.audit_last.get(repo_key(repo_path)) if repo_path else ""
+        return shown or self.audit_last.get("", "")
+
+    def set_audit_shown(self, repo_path: str, agent_id: str) -> None:
+        if not repo_path:
+            return
+        self.audit_last[repo_key(repo_path)] = agent_id
+        self.audit_last[""] = agent_id
+
+    def branch_pattern_for(self, repo_path: str) -> str:
+        """The pattern selected here, or ``""`` for the plain name.
+
+        Not carried between repositories, unlike the ticked audits: the plain
+        name is the default and it is the answer for most repositories, so a
+        convention chosen for one must not quietly become the answer for the
+        next one cloned.
         """
-        from git_assistant.agents.branches import StaleRules
+        return self.branch_pattern.get(repo_key(repo_path), "") if repo_path else ""
 
-        return StaleRules.from_dict(self.stale_branch_rules)
+    def set_branch_pattern(self, repo_path: str, pattern: str) -> None:
+        if not repo_path:
+            return
+        key = repo_key(repo_path)
+        if pattern:
+            self.branch_pattern[key] = pattern
+        else:
+            self.branch_pattern.pop(key, None)  # back to the default; say nothing
 
-    def set_stale_rules(self, rules) -> None:
-        self.stale_branch_rules = rules.to_dict()
+    def branch_user_for(self, repo_path: str) -> str:
+        """The ``{user}`` typed in here, or ``""`` to let git answer."""
+        return self.branch_user.get(repo_key(repo_path), "") if repo_path else ""
+
+    def set_branch_user(self, repo_path: str, user: str) -> None:
+        if not repo_path:
+            return
+        key = repo_key(repo_path)
+        if (user or "").strip():
+            self.branch_user[key] = user.strip()
+        else:
+            self.branch_user.pop(key, None)
 
     # ---- which settings are in force ---------------------------------------
     def settings_tier(self, repo_path: str) -> str:
@@ -437,24 +510,16 @@ class Settings:
         return self.repos[0] if self.repos else None
 
     # ---- templates ---------------------------------------------------------
-    def template_names(self) -> list[str]:
-        """Every selectable template, the default first."""
-        return [DEFAULT_TEMPLATE_NAME, *(t.name for t in self.templates)]
-
-    def template_text(self, name: str) -> str:
-        """Body of a named template, falling back to the default."""
-        if name and name != DEFAULT_TEMPLATE_NAME:
-            for t in self.templates:
-                if t.name == name:
-                    return t.text
-        return self.prompt_template or DEFAULT_TEMPLATE
-
-    def template_for_repo(self, repo_path: str) -> str:
-        """The template a repository should be described with."""
+    # Which template a repository uses is a selection and lives here. The
+    # templates themselves decide what is sent, so they are a setting and live
+    # in the shared schema -- see repo_config.PromptRules and the readers on
+    # repo_config.Bound, which is what every consumer is handed.
+    def repo_template(self, repo_path: str) -> str:
+        """The name of the template chosen for a repository, or ``""``."""
         for r in self.repos:
             if r.path == repo_path:
-                return self.template_text(r.template)
-        return self.template_text("")
+                return r.template
+        return ""
 
     def set_repo_template(self, repo_path: str, name: str) -> None:
         """Assign a template to a repository ("" or the default clears it)."""
@@ -463,21 +528,16 @@ class Settings:
                 r.template = "" if name == DEFAULT_TEMPLATE_NAME else name
                 return
 
-    def rename_template(self, old: str, new: str) -> None:
-        """Rename a template and repoint the repositories that referenced it."""
-        for t in self.templates:
-            if t.name == old:
-                t.name = new
+    def repoint_template(self, old: str, new: str) -> None:
+        """Follow a rename, or a removal when ``new`` is ``""``.
+
+        Only the pointers. The templates themselves are in the shared settings,
+        and the caller that renames one there calls this so the repositories
+        that named it do not quietly fall back to the default.
+        """
         for r in self.repos:
             if r.template == old:
                 r.template = new
-
-    def remove_template(self, name: str) -> None:
-        """Delete a template; repositories using it fall back to the default."""
-        self.templates = [t for t in self.templates if t.name != name]
-        for r in self.repos:
-            if r.template == name:
-                r.template = ""
 
     # ---- code-review rule tables -------------------------------------------
     # Only the *assignment* lives here. The tables are in their own file, so
@@ -494,10 +554,6 @@ class Settings:
             if r.path == repo_path:
                 r.review_profile = name or ""
                 return
-
-    def review_profile(self, name: str):
-        """A profile by name, or ``None``."""
-        return next((p for p in self.review_profiles if p.name == name), None)
 
     def review_table_for_repo(self, repo_path: str) -> str:
         """Name of the rule table this repository is reviewed against."""
@@ -551,10 +607,6 @@ class Settings:
     def to_dict(self) -> dict:
         data = asdict(self)
         data["repos"] = [asdict(r) for r in self.repos]
-        data["templates"] = [asdict(t) for t in self.templates]
-        # Written by the profile itself: its shape is nested, and config.py
-        # should not have to know it.
-        data["review_profiles"] = [p.to_dict() for p in self.review_profiles]
         return data
 
     @classmethod
@@ -567,7 +619,7 @@ class Settings:
             clean["provider"] = DEFAULT_PROVIDER
         # Hand-edited files can put anything here; a non-dict would crash on
         # first use rather than at load, far from the cause.
-        for name in ("provider_endpoints", "provider_models"):
+        for name in ("provider_models",):
             value = clean.get(name)
             clean[name] = (
                 {str(k): str(v) for k, v in value.items()}
@@ -592,12 +644,6 @@ class Settings:
             for r in repos
             if isinstance(r, dict) and r.get("path")
         ]
-        clean["templates"] = [
-            Template(name=t.get("name", ""), text=t.get("text", ""))
-            for t in (clean.get("templates") or [])
-            if isinstance(t, dict) and t.get("name")
-        ]
-        clean["review_profiles"] = _profiles_from(clean.get("review_profiles"))
         return cls(**clean)
 
     # ---- load / save -------------------------------------------------------
@@ -612,7 +658,7 @@ class Settings:
             else:
                 return cls()
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
+            data = jsonc.loads(path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
             return cls()
         return cls.from_dict(data)
@@ -621,6 +667,6 @@ class Settings:
         path = config_path()
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(
-            json.dumps(self.to_dict(), indent=2, ensure_ascii=False),
+            jsonc.dumps(self.to_dict(), FIELD_COMMENTS, HEADER),
             encoding="utf-8",
         )

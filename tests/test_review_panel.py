@@ -7,6 +7,7 @@ pytest.importorskip("PyQt6.QtWidgets")
 from PyQt6.QtCore import Qt  # noqa: E402
 from PyQt6.QtWidgets import QApplication, QMessageBox  # noqa: E402
 
+from git_assistant import repo_config
 from git_assistant import git_ops  # noqa: E402
 from git_assistant.config import RepoEntry, Settings  # noqa: E402
 from git_assistant.review import history  # noqa: E402
@@ -223,10 +224,10 @@ def test_the_profile_a_repository_is_assigned_is_the_one_selected(
     from git_assistant.review.profiles import LanguageRules, Profile, Selection
 
     monkeypatch.setattr(RuleStore, "load", staticmethod(_with_table))
-    with_repo.review_profiles = [
+    _set_profiles(with_repo, [
         Profile("Mine", [LanguageRules("python", selections=[Selection("builtin:python")])]),
         Profile("Theirs", [LanguageRules("rust", selections=[Selection("builtin:rust")])]),
-    ]
+    ])
     with_repo.repos[0].review_profile = "Theirs"
 
     panel = ReviewPanel(with_repo)
@@ -240,9 +241,9 @@ def test_choosing_a_profile_is_remembered_for_that_repository_only(
     from git_assistant.review.profiles import LanguageRules, Profile, Selection
 
     monkeypatch.setattr(RuleStore, "load", staticmethod(_with_table))
-    with_repo.review_profiles = [
+    _set_profiles(with_repo, [
         Profile("Mine", [LanguageRules("python", selections=[Selection("builtin:python")])])
-    ]
+    ])
     panel = ReviewPanel(with_repo)
 
     panel.profile_combo.setCurrentIndex(panel.profile_combo.findData("Mine"))
@@ -251,14 +252,26 @@ def test_choosing_a_profile_is_remembered_for_that_repository_only(
     assert with_repo.review_profile_for_repo("/x/other") == ""
 
 
+# ---- the profile library ----------------------------------------------------------
+# It lives in the settings a repository carries now: a profile decides which
+# rules a review runs against, which is what a project would want to standardise.
+# Which one a repository uses stays a selection, on the repo entry.
+def _set_profiles(settings, profiles):
+    repo_config.save_user_profiles(profiles)
+
+
+def _profiles(settings):
+    return repo_config.bind(settings).review_profiles_built()
+
+
 # ---- reading a profile is not choosing one ---------------------------------------
 def _two_profiles(settings):
     from git_assistant.review.profiles import LanguageRules, Profile, Selection
 
-    settings.review_profiles = [
+    _set_profiles(settings, [
         Profile("Mine", [LanguageRules("python", selections=[Selection("builtin:python")])]),
         Profile("Theirs", [LanguageRules("rust", selections=[Selection("builtin:rust")])]),
-    ]
+    ])
     settings.repos[0].review_profile = "Mine"
 
 
@@ -317,7 +330,7 @@ def test_editing_a_profile_that_is_not_under_review_leaves_the_review_alone(
     entry = panel.profile_tab.profile().languages[0]
     panel.profile_tab._on_version_changed(entry, "rust2018")
 
-    assert with_repo.review_profiles[1].languages[0].version == "rust2018"
+    assert _profiles(with_repo)[1].languages[0].version == "rust2018"
     assert panel.profile_combo.currentData() == "Mine"
 
 
@@ -329,7 +342,7 @@ def test_editing_the_shipped_rules_keeps_the_edit_in_the_copy(qapp, with_repo, s
     entry = [e for e in panel.profile_tab.profile().languages if e.language == "python"][0]
     panel.profile_tab._on_version_changed(entry, "py38")
 
-    copies = [p for p in with_repo.review_profiles if p.name == "Built-in defaults (edited)"]
+    copies = [p for p in _profiles(with_repo) if p.name == "Built-in defaults (edited)"]
     assert len(copies) == 1
     assert copies[0].version_for("python") == "py38"
 
@@ -362,7 +375,7 @@ def test_editing_the_shipped_rules_twice_does_not_make_two_of_one_name(
         ][0]
         panel.profile_tab._on_version_changed(entry, "py38")
 
-    names = [p.name for p in with_repo.review_profiles]
+    names = [p.name for p in _profiles(with_repo)]
     assert names == ["Built-in defaults (edited)", "Built-in defaults (edited) 2"]
 
 
@@ -384,7 +397,7 @@ def test_renaming_a_table_repoints_the_repositories_that_used_it(
     # And every profile that named it, or its next review runs against nothing.
     refs = [
         s.ref
-        for p in with_repo.review_profiles
+        for p in _profiles(with_repo)
         for e in p.languages
         for s in e.selections
     ]
@@ -405,7 +418,7 @@ def test_deleting_a_table_leaves_its_repositories_without_one(
     # tab says "no rules for python" rather than silently checking nothing.
     refs = [
         s.ref
-        for p in with_repo.review_profiles
+        for p in _profiles(with_repo)
         for e in p.languages
         for s in e.selections
     ]

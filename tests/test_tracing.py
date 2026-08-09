@@ -18,6 +18,7 @@ from pathlib import Path
 
 import pytest
 
+from conftest import settings_with, user_tier
 from git_assistant import llm, usage
 from git_assistant import tracing
 from git_assistant.config import Settings
@@ -155,12 +156,17 @@ def sdk(monkeypatch):
 
 @pytest.fixture
 def configured():
-    s = Settings()
-    s.save = lambda: None
-    s.langfuse_enabled = True
-    s.langfuse_host = "https://langfuse.example"
-    s.active_repo = "D:/work/acme-corp/widget"
-    return s
+    """Settings with tracing on, as a run is handed them.
+
+    Bound, because where a trace goes is a setting a repository carries now --
+    `tracing.wrap` reads it off whatever it is given, and what production gives
+    it is the bound view. See git_assistant.repo_config.
+    """
+    return settings_with(
+        langfuse_enabled=True,
+        langfuse_host="https://langfuse.example",
+        active_repo="D:/work/acme-corp/widget",
+    )
 
 
 def _traced(settings, feature="Code review", reply="ok", fail=None):
@@ -194,9 +200,11 @@ def test_a_configuration_that_is_ready_says_nothing_is_missing(configured):
     assert trace_settings.from_settings(configured).missing() == ""
 
 
-def test_the_host_is_taken_as_typed_without_its_trailing_slash(configured):
-    configured.langfuse_host = "https://langfuse.example/"
-    assert trace_settings.from_settings(configured).host == "https://langfuse.example"
+def test_the_host_is_taken_as_typed_without_its_trailing_slash():
+    settings = settings_with(
+        langfuse_enabled=True, langfuse_host="https://langfuse.example/"
+    )
+    assert trace_settings.from_settings(settings).host == "https://langfuse.example"
 
 
 def test_a_credential_store_that_refuses_reads_as_no_key(monkeypatch, configured):
@@ -373,10 +381,15 @@ def test_a_generation_carries_the_model_the_prompt_and_the_reply(sdk, configured
     assert span.ended
 
 
-def test_withholding_prompts_omits_them_rather_than_blanking_them(sdk, configured):
+def test_withholding_prompts_omits_them_rather_than_blanking_them(sdk):
     """An empty prompt in Langfuse reads as a call made with an empty prompt."""
-    configured.langfuse_send_prompts = False
-    _, wrapped = _traced(configured)
+    quiet = settings_with(
+        langfuse_enabled=True,
+        langfuse_host="https://langfuse.example",
+        langfuse_send_prompts=False,
+        active_repo="D:/work/acme-corp/widget",
+    )
+    _, wrapped = _traced(quiet)
 
     wrapped.chat("m", "be brief", "review this", 512)
 
@@ -533,8 +546,12 @@ def test_pointing_it_somewhere_else_replaces_the_client(sdk, configured):
     tracer.client(trace_settings.from_settings(configured))
     first = FakeLangfuse.instances[0]
 
-    configured.langfuse_host = "https://elsewhere.example"
-    tracer.client(trace_settings.from_settings(configured))
+    # A new object, because the settings a run holds are resolved once when it
+    # is bound: this is the next run, reading the file after it changed.
+    elsewhere = settings_with(
+        langfuse_enabled=True, langfuse_host="https://elsewhere.example"
+    )
+    tracer.client(trace_settings.from_settings(elsewhere))
 
     assert first.shut_down
     assert len(FakeLangfuse.instances) == 2
@@ -547,9 +564,11 @@ def test_the_same_configuration_keeps_the_same_client(sdk, configured):
 
 def test_turning_it_off_shuts_the_client_down(sdk, configured):
     tracer.client(trace_settings.from_settings(configured))
-    configured.langfuse_enabled = False
+    off = settings_with(
+        langfuse_enabled=False, langfuse_host="https://langfuse.example"
+    )
 
-    assert tracer.client(trace_settings.from_settings(configured)) is None
+    assert tracer.client(trace_settings.from_settings(off)) is None
     assert FakeLangfuse.instances[0].shut_down
 
 

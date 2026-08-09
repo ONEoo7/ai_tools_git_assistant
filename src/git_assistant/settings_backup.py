@@ -34,7 +34,17 @@ from pathlib import Path
 
 from platformdirs import user_config_dir
 
+from git_assistant import config, jsonc
 from git_assistant.config import APP_NAME, Settings
+
+#: What this file is, said in the file, because it is a file a user finds
+#: rather than one they go looking for.
+_HEADER = (
+    "The settings this build ships with, kept so they can be restored.\n"
+    "Not read at start-up and not written again: edit static_user_settings.json\n"
+    "instead. A change here is a change to what Restore restores, and the\n"
+    "checksum beside it will no longer match."
+)
 
 DEFAULTS_FILE = "default_settings.json"
 CHECKSUM_SUFFIX = ".sha256"
@@ -101,7 +111,11 @@ def _shipped_text() -> str:
     # would be a factory file with somebody's folders in it.
     for key in KEPT:
         data.pop(key, None)
-    return json.dumps(data, indent=2, ensure_ascii=False, sort_keys=True)
+    # Sorted, so the checksum is of the settings and not of the order a
+    # dataclass happened to declare them in. Commented like the live file,
+    # because this is a file a user is invited to open and compare.
+    ordered = {key: data[key] for key in sorted(data)}
+    return jsonc.dumps(ordered, config.FIELD_COMMENTS, _HEADER)
 
 
 def write_defaults() -> str:
@@ -164,7 +178,7 @@ def shipped() -> Settings | None:
     if not check().ok:
         return None
     try:
-        data = json.loads(defaults_path().read_text(encoding="utf-8"))
+        data = jsonc.loads(defaults_path().read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError, UnicodeDecodeError, ValueError):
         return None
     return Settings.from_dict(data) if isinstance(data, dict) else None

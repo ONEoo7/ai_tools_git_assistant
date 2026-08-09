@@ -8,6 +8,7 @@ pytest.importorskip("PyQt6.QtWidgets")
 
 from PyQt6.QtWidgets import QApplication  # noqa: E402
 
+from git_assistant import jsonc
 from git_assistant import repo_config, settings_diff  # noqa: E402
 from git_assistant.config import RepoEntry, Settings  # noqa: E402
 from git_assistant.ui.settings_merge_dialog import (  # noqa: E402
@@ -225,7 +226,7 @@ def test_what_is_written_is_a_settings_file_this_build_would_have_written(
 
     dialog._on_save()
 
-    written = json.loads(repo_config.read_text(repo_config.Tier.CUSTOM, repo))
+    written = jsonc.loads(repo_config.read_text(repo_config.Tier.CUSTOM, repo))
     assert written["version"] == repo_config.SCHEMA_VERSION
     assert repo_config.resolve(repo, "custom").problem == ""
 

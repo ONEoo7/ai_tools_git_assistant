@@ -88,7 +88,14 @@ PROVIDERS: tuple[Provider, ...] = (
         "lmstudio",
         "LM Studio",
         implemented=True,
+        # An address like the other two local servers, rather than an IP and a
+        # port of its own. Three self-hosted backends asking the same question
+        # three different ways was three places to look when one of them was
+        # on a different machine.
+        needs_endpoint=True,
+        base_url="http://127.0.0.1:1234",
         key_help="Runs locally; no API key required.",
+        endpoint_hint="http://127.0.0.1:1234",
     ),
     Provider(
         "claude",

@@ -4,6 +4,7 @@ import json
 
 import pytest
 
+from git_assistant import jsonc
 from git_assistant import settings_backup
 from git_assistant.config import RepoEntry, Settings
 
@@ -51,7 +52,7 @@ def test_the_factory_file_holds_nobodys_folders():
     """A shipped file carrying someone's repository list is not a shipped file."""
     settings_backup.write_defaults()
 
-    data = json.loads(settings_backup.defaults_path().read_text(encoding="utf-8"))
+    data = jsonc.loads(settings_backup.defaults_path().read_text(encoding="utf-8"))
 
     for key in settings_backup.KEPT:
         assert key not in data
@@ -131,7 +132,6 @@ def _lived_in(**changes) -> Settings:
         provider="claude",
         selected_model="opus",
         theme="pony",
-        langfuse_enabled=True,
         repos=[RepoEntry("/x/one"), RepoEntry("/x/two")],
         active_repo="/x/two",
         scan_roots=["/x"],
@@ -150,7 +150,6 @@ def test_restoring_puts_the_settings_back_and_keeps_the_repositories():
 
     assert current.provider == Settings().provider
     assert current.theme == Settings().theme
-    assert current.langfuse_enabled is Settings().langfuse_enabled
     assert [r.path for r in current.repos] == ["/x/one", "/x/two"]
     assert current.active_repo == "/x/two"
     assert current.scan_roots == ["/x"]
@@ -160,15 +159,15 @@ def test_the_app_level_settings_are_the_ones_that_come_back():
     """Theme, Langfuse, MCP and the provider endpoints live in user settings."""
     settings_backup.ensure_defaults()
     current = _lived_in()
-    current.provider_endpoints = {"openai": "https://example.invalid"}
+    current.provider_models = {"openai": "gpt-4o"}
     current.mcp_allow_writes = True
-    current.lmstudio_port = 9999
+    current.azure_api_version = "1999-01-01"
 
     settings_backup.apply_over(current)
 
-    assert current.provider_endpoints == {}
+    assert current.provider_models == {}
     assert current.mcp_allow_writes is False
-    assert current.lmstudio_port == Settings().lmstudio_port
+    assert current.azure_api_version == Settings().azure_api_version
 
 
 def test_nothing_is_restored_from_a_file_that_cannot_be_trusted():
@@ -217,6 +216,7 @@ def test_the_reinstall_command_names_this_package():
 # ---- what the window does with all of that ------------------------------------------
 pytest.importorskip("PyQt6.QtWidgets")
 
+from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import QApplication, QMessageBox  # noqa: E402
 
 from git_assistant.ui.settings_dialog import SettingsDialog  # noqa: E402
@@ -289,10 +289,12 @@ def test_the_window_shows_the_restored_settings(dialog, monkeypatch):
         QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes
     )
     monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: None)
-    dialog.settings.lmstudio_port = 9999
+    dialog.settings.provider = "claude"
     dialog._load_into_widgets()
-    assert dialog.port_spin.value() == 9999
+    assert dialog.provider_list.currentItem().data(Qt.ItemDataRole.UserRole) == "claude"
 
     dialog._on_restore_shipped()
 
-    assert dialog.port_spin.value() == Settings().lmstudio_port
+    assert dialog.provider_list.currentItem().data(Qt.ItemDataRole.UserRole) == (
+        Settings().provider
+    )

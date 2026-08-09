@@ -61,6 +61,18 @@ class ChatClient(Protocol):
     def ping(self) -> list[ModelInfo]: ...
 
 
+def _endpoint(settings, provider) -> str:
+    """Where this backend is: what the settings say, else the provider's own.
+
+    The settings are the repository's -- a project can pin the address of the
+    server it is meant to be generated against. ``settings`` here is always a
+    ``repo_config.Bound``; see git_assistant.ui.workers.
+    """
+    chosen = getattr(settings, "provider_endpoint", None)
+    chosen = chosen(provider.key) if callable(chosen) else ""
+    return (chosen or provider.base_url).strip()
+
+
 def build_client(settings, feature: str = "") -> ChatClient:
     """The client for the provider the user selected.
 
@@ -108,7 +120,7 @@ def _provider_client(settings, provider, feature: str) -> ChatClient:
         from git_assistant.lmstudio_client import LMStudioClient
 
         return LMStudioClient(
-            settings.base_url,
+            _endpoint(settings, provider),
             provider_key=provider.key,
             feature=feature,
             temperature=warmth,
@@ -178,7 +190,7 @@ def _require_key(provider) -> str:
 
 
 def _require_endpoint(settings, provider) -> str:
-    endpoint = (settings.provider_endpoint(provider.key) or provider.base_url).strip()
+    endpoint = _endpoint(settings, provider)
     if not endpoint:
         raise LLMError(
             f"No endpoint is configured for {provider.label}. Enter the one "

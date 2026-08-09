@@ -813,6 +813,38 @@ def branch_exists(repo: str | Path, name: str) -> bool:
     return res.ok and bool(res.stdout.strip())
 
 
+def blocking_branch(existing, name: str) -> str:
+    """The branch that makes ``name`` impossible to create, or ``""``.
+
+    Git keeps refs as paths, so ``dev`` is a file and ``dev/rem/x`` needs
+    ``dev`` to be a directory. The two cannot both exist, in either order::
+
+        fatal: cannot lock ref 'refs/heads/dev/rem/x': 'refs/heads/dev' exists
+        fatal: cannot lock ref 'refs/heads/dev': 'refs/heads/dev/rem/x' exists
+
+    Which is a perfectly clear message arriving at the worst moment: after the
+    window has offered the name as the one that will be created, and after the
+    button has been pressed. Asked here from a list already on screen, so it
+    costs no git call and can be answered while the name is being typed.
+
+    Takes the names rather than a repository for the same reason: this is
+    called on every keystroke.
+    """
+    if not name:
+        return ""
+    names = set(existing)
+    # Something above it is a branch, so there is no directory to put it in.
+    parts = name.split("/")
+    for depth in range(1, len(parts)):
+        prefix = "/".join(parts[:depth])
+        if prefix in names:
+            return prefix
+    # Or something below it is, so the name is already a directory. Sorted, so
+    # a repository with several of them names the same one twice running.
+    below = f"{name}/"
+    return next((one for one in sorted(names) if one.startswith(below)), "")
+
+
 def list_branch_info(repo: str | Path) -> list[BranchInfo]:
     """Every local branch with its upstream and how far it has drifted.
 

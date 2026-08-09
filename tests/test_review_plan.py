@@ -2,6 +2,7 @@
 
 import pytest
 
+from conftest import settings_with
 from git_assistant import git_ops
 from git_assistant.config import Settings
 from git_assistant.review import builtin, languages
@@ -18,8 +19,7 @@ def _diff(path, body="+one line\n"):
 
 @pytest.fixture
 def settings():
-    s = Settings(selected_model="m")
-    s.save = lambda: None
+    s = settings_with(selected_model="m")
     s.active_repo = "/x/demo"
     return s
 
@@ -59,7 +59,8 @@ def test_a_file_that_was_not_marked_is_not_in_the_plan(settings, staged):
 
 
 def test_a_file_filtered_as_noise_is_listed_and_not_reviewable(settings, staged):
-    settings.ignore_globs = ["*.lock"]
+    settings = settings_with(selected_model="m", ignore_globs=["*.lock"],
+                             active_repo=settings.active_repo, repos=settings.repos)
     plan = build(settings, "/x/demo", ["app.py", "uv.lock"], lambda lang, v: TABLE)
 
     lock = [f for f in plan.files if f.path == "uv.lock"][0]

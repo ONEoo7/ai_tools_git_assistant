@@ -1,0 +1,139 @@
+{
+  // These settings override user_settings.json for this repository.
+  // This file is in the repository, so it is shared with everyone who clones it.
+
+  // Schema version of this file. Written by the application.
+  "version": 1,
+
+  // Where a new branch's name comes from.
+  "branch": {
+    // This repository's own naming convention. {user} and {name} are filled in; anything else is left as typed.
+    "pattern": "{name}",
+
+    // The conventions offered in the Branches tab. This repository's own, above, is offered first.
+    "patterns": [
+      "dev/rem/{user}/{name}",
+      "test/rem/{user}/{name}"
+    ],
+
+    // Who {user} is. Blank asks git for the committer name in this repository.
+    "user": "",
+
+    // Set the upstream when a branch is pushed for the first time.
+    "push_sets_upstream": true
+  },
+
+  // How much a fetch brings back.
+  "fetch": {
+    // Fetch recent history only, instead of all of it.
+    "shallow": false,
+
+    // Commits per ref a shallow fetch asks for. Kept when shallow is off, so turning it back on restores this number.
+    "depth": 1,
+
+    // Delete local copies of branches that are gone from the remote.
+    "prune": true,
+
+    // Bring tags along with the fetch.
+    "tags": true
+  },
+
+  // What the repository audits do, and how much of them is kept.
+  "audit": {
+    // Let the model write the report's prose. Off, the report is the measurements alone and no request is made.
+    "narrate": true,
+
+    // Skip the per-file history breakdown, which is the slow part on a large repository.
+    "fast": false,
+
+    // A file at least this many megabytes is worth flagging.
+    "large_file_mb": 5,
+
+    // Audit runs kept per repository. 0 keeps every one.
+    "history_limit": 20,
+
+    // When a branch counts as stale, and when deleting one may be proposed.
+    "stale": {
+      // A branch untouched for this many months counts as stale.
+      "months": 6,
+
+      // Branch name patterns that are never proposed for deletion. * matches anything.
+      "protect": [
+        "main",
+        "master",
+        "develop",
+        "trunk",
+        "release/*",
+        "hotfix/*"
+      ],
+
+      // Only propose deleting a branch whose commits are already on another one.
+      "merged_only": true,
+
+      // Never propose deleting a branch that was never pushed.
+      "keep_unpushed": true
+    }
+  },
+
+  // What a generated commit message is made from, and how long it may be.
+  "commit": {
+    // Which diff is described: "cached" for what is staged, "working" for everything uncommitted.
+    "diff_mode": "cached",
+
+    // Soft target for the first line. Exceeding it is reported, not refused. 0 says nothing about it.
+    "subject_target": 50,
+
+    // Hard cap for the first line -- past it, tools that show a subject cut it without saying so. 0 for no cap.
+    "subject_limit": 72,
+
+    // Total length of the body. 0 for no cap.
+    "body_limit": 1000,
+
+    // Generated messages kept per repository. 0 keeps every one.
+    "history_limit": 20,
+
+    // Files matching any of these never reach the model. Lock files and minified bundles are noise that costs tokens.
+    "ignore_globs": [
+      "*.lock",
+      "uv.lock",
+      "poetry.lock",
+      "package-lock.json",
+      "yarn.lock",
+      "pnpm-lock.yaml",
+      "Cargo.lock",
+      "composer.lock",
+      "Gemfile.lock",
+      "*.min.js",
+      "*.min.css",
+      "*.map",
+      "*.svg",
+      "*.png",
+      "*.jpg",
+      "*.jpeg",
+      "*.gif",
+      "*.ico",
+      "*.pdf",
+      "*.woff",
+      "*.woff2",
+      "*.ttf"
+    ]
+  },
+
+  // Code review.
+  "review": {
+    // Reviews kept per repository. 0 keeps every one.
+    "history_limit": 20
+  },
+
+  // How much of the model one run of this repository may use.
+  "model": {
+    // Total tokens per request, input and output together. 0 asks the provider. Set it to match how the model is actually loaded.
+    "context_window": 4096,
+
+    // Fraction of the window reserved for the model's answer. The rest is available for the diff.
+    "safety_margin": 0.1,
+
+    // How many requests may be in flight at once. The provider's own limit still applies.
+    "parallel_calls": 4
+  }
+}

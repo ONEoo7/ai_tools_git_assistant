@@ -2,7 +2,7 @@
 
 Three of them, and exactly one is in force:
 
-    user     <config dir>/default_repo_settings.json          every repository
+    user     <config dir>/user_settings.json                  every repository
     repo     <repo>/.git_assistant/repo_settings.json         this project
     custom   <config dir>/custom/<repo key>/custom_repo_settings.json   this one, mine
 
@@ -48,6 +48,7 @@ from pathlib import Path
 
 from platformdirs import user_config_dir
 
+from git_assistant import jsonc
 from git_assistant.config import APP_NAME, DEFAULT_IGNORE_GLOBS, repo_key
 
 SCHEMA_VERSION = 1
@@ -60,7 +61,9 @@ REPO_DIR = ".git_assistant"
 REPO_FILE = "repo_settings.json"
 
 #: The user's answer for repositories that do not have one.
-DEFAULTS_FILE = "default_repo_settings.json"
+DEFAULTS_FILE = "user_settings.json"
+#: What it was called before the three files were named for what they are.
+LEGACY_DEFAULTS_FILE = "default_repo_settings.json"
 
 #: One person's answer for one repository. Under a directory named by
 #: `config.repo_key` -- readable name, then the hash that makes it this
@@ -88,6 +91,150 @@ def tier_of(name: str) -> Tier | None:
         return None
 
 
+# ---- what the file says about itself -------------------------------------------------
+#: The first line of each file: which of the three it is, and what that means
+#: for it. One sentence, because it is answering the question somebody has when
+#: they open a file they did not expect to find.
+HEADERS = {
+    Tier.USER: "These settings are overridden by repo_settings.json",
+    Tier.REPO: (
+        "These settings override user_settings.json for this repository.\n"
+        "This file is in the repository, so it is shared with everyone who "
+        "clones it."
+    ),
+    Tier.CUSTOM: (
+        "These settings override user_settings.json and repo_settings.json for "
+        "one repository.\nYours alone: this file is not in the repository and "
+        "is not shared."
+    ),
+}
+
+#: One sentence per key, above it in the file. Keyed by dotted path, so a
+#: nested key is named the way it is spoken about.
+#:
+#: Here rather than beside each dataclass field, because this is the text a
+#: person reads in the file and the docstrings are the text a person reads in
+#: the code -- and the two want different words. A key without a line here is
+#: written without a comment, which tests/test_settings_split.py refuses.
+FIELD_COMMENTS = {
+    "version": "Schema version of this file. Written by the application.",
+    "branch": "Where a new branch's name comes from.",
+    "branch.pattern": (
+        "This repository's own naming convention. {user} and {name} are "
+        "filled in; anything else is left as typed."
+    ),
+    "branch.patterns": (
+        "The conventions offered in the Branches tab. This repository's own, "
+        "above, is offered first."
+    ),
+    "branch.user": (
+        "Who {user} is. Blank asks git for the committer name in this "
+        "repository."
+    ),
+    "branch.push_sets_upstream": (
+        "Set the upstream when a branch is pushed for the first time."
+    ),
+    "fetch": "How much a fetch brings back.",
+    "fetch.shallow": "Fetch recent history only, instead of all of it.",
+    "fetch.depth": (
+        "Commits per ref a shallow fetch asks for. Kept when shallow is off, "
+        "so turning it back on restores this number."
+    ),
+    "fetch.prune": "Delete local copies of branches that are gone from the remote.",
+    "fetch.tags": "Bring tags along with the fetch.",
+    "audit": "What the repository audits do, and how much of them is kept.",
+    "audit.narrate": (
+        "Let the model write the report's prose. Off, the report is the "
+        "measurements alone and no request is made."
+    ),
+    "audit.fast": (
+        "Skip the per-file history breakdown, which is the slow part on a "
+        "large repository."
+    ),
+    "audit.large_file_mb": "A file at least this many megabytes is worth flagging.",
+    "audit.history_limit": "Audit runs kept per repository. 0 keeps every one.",
+    "audit.stale": "When a branch counts as stale, and when deleting one may be proposed.",
+    "audit.stale.months": "A branch untouched for this many months counts as stale.",
+    "audit.stale.protect": (
+        "Branch name patterns that are never proposed for deletion. "
+        "* matches anything."
+    ),
+    "audit.stale.merged_only": (
+        "Only propose deleting a branch whose commits are already on another one."
+    ),
+    "audit.stale.keep_unpushed": "Never propose deleting a branch that was never pushed.",
+    "commit": "What a generated commit message is made from, and how long it may be.",
+    "commit.diff_mode": (
+        'Which diff is described: "cached" for what is staged, "working" for '
+        "everything uncommitted."
+    ),
+    "commit.subject_target": (
+        "Soft target for the first line. Exceeding it is reported, not "
+        "refused. 0 says nothing about it."
+    ),
+    "commit.subject_limit": (
+        "Hard cap for the first line -- past it, tools that show a subject cut "
+        "it without saying so. 0 for no cap."
+    ),
+    "commit.body_limit": "Total length of the body. 0 for no cap.",
+    "commit.history_limit": (
+        "Generated messages kept per repository. 0 keeps every one."
+    ),
+    "commit.ignore_globs": (
+        "Files matching any of these never reach the model. Lock files and "
+        "minified bundles are noise that costs tokens."
+    ),
+    "review": "Code review.",
+    "review.history_limit": "Reviews kept per repository. 0 keeps every one.",
+    "model": "How much of the model one run of this repository may use.",
+    "model.context_window": (
+        "Total tokens per request, input and output together. 0 asks the "
+        "provider. Set it to match how the model is actually loaded."
+    ),
+    "model.safety_margin": (
+        "Fraction of the window reserved for the model's answer. The rest is "
+        "available for the diff."
+    ),
+    "model.parallel_calls": (
+        "How many requests may be in flight at once. The provider's own limit "
+        "still applies."
+    ),
+    "model.endpoints": (
+        "Where each backend is, by provider key. Only the ones whose address "
+        "is yours to give -- a hosted provider has one and it is not a "
+        "setting.\nAPI keys are NOT here and must never be: they are in the "
+        "Windows Credential Manager."
+    ),
+    "prompt": "What the model is asked for a commit message.",
+    "prompt.template": (
+        "Used by any repository that has not named one of the templates below. "
+        "Blank means the one this build ships with."
+    ),
+    "prompt.templates": (
+        'Named templates, as [{"name": ..., "text": ...}]. Which one a '
+        "repository uses is chosen in the window and kept with your own "
+        "settings, not here."
+    ),
+    "review.profiles": (
+        "Named review profiles: which rules apply to which language at which "
+        "version. The rules themselves are files under code_review/."
+    ),
+    "tracing": (
+        "Where a run's trace goes. Neither Langfuse key is here and neither "
+        "may ever be -- both are in the Windows Credential Manager."
+    ),
+    "tracing.enabled": "Send traces at all.",
+    "tracing.host": "The Langfuse instance to send them to.",
+    "tracing.environment": "The environment name traces are filed under.",
+    "tracing.release": (
+        "The release traces are filed under. Blank means this build's version."
+    ),
+    "tracing.send_prompts": (
+        "Whether the prompt and the reply travel with the trace. Off, a trace "
+        "still carries the model, the timings, the tokens and any error."
+    ),
+}
+
 # ---- branch names ------------------------------------------------------------------
 #: Characters a branch name may keep. Git's rules are longer than this (see
 #: git-check-ref-format) and are enforced by git itself when the branch is
@@ -107,29 +254,102 @@ def slug(text: str) -> str:
     return cleaned.strip("-./")
 
 
+def _component(part: str) -> str:
+    """One slash-separated piece of a ref, as git will accept it.
+
+    Two of git's rules are about the piece rather than the whole name, and
+    ``slug`` cannot see them because it is handed the whole thing: a piece may
+    not begin with a dot, and may not end with ``.lock``. Both come up in
+    practice -- ``.hidden`` and ``index.lock`` are things people type -- and
+    both are a refusal from ``git branch`` several seconds after the name was
+    offered on screen as the one that would be created.
+
+    A trailing dot goes too. Git only refuses one at the very end of the name,
+    but ``release.`` is a typo wherever it appears.
+    """
+    part = part.lstrip(".")
+    while part.endswith(".lock"):
+        part = part[: -len(".lock")]
+    return part.strip("-.")
+
+
+#: Where LM Studio listens when nobody has said otherwise. Written out here
+#: rather than imported from `providers` because this module depends on nothing
+#: else in the application -- and asserted equal to the provider table's own
+#: default by a test.
+LMSTUDIO_ENDPOINT = "http://127.0.0.1:1234"
+
+#: The pattern that adds nothing: the name is what was typed and no more.
+PLAIN = "{name}"
+
+#: Offered for a new branch when nobody has said otherwise. A convention, not a
+#: rule -- the window still offers the plain name first, and this is the list
+#: beside it.
+DEFAULT_PATTERNS = ["dev/rem/{user}/{name}", "test/rem/{user}/{name}"]
+
+
 @dataclass
 class BranchRules:
     """Where a new branch's name comes from.
 
-    ``pattern`` carries ``{user}`` and ``{name}``. Anything else is left where
-    it is rather than blanked, so a mistyped placeholder shows up in the name
-    the window offers instead of quietly disappearing from it.
+    A pattern carries ``{user}`` and ``{name}``. Anything else is left where it
+    is rather than blanked, so a mistyped placeholder shows up in the name the
+    window offers instead of quietly disappearing from it.
+
+    ``patterns`` are the ones offered; ``pattern`` is this repository's own, and
+    is offered first when it says anything. Two fields rather than one because
+    they answer different questions: a project can add a convention to the list
+    without deciding that the list is now only that.
     """
 
-    pattern: str = "{name}"
+    pattern: str = PLAIN
+    patterns: list[str] = field(default_factory=lambda: list(DEFAULT_PATTERNS))
     #: Who ``{user}`` is. Blank means "ask git", which the caller does -- this
     #: file does not run git.
     user: str = ""
     push_sets_upstream: bool = True
 
-    def render(self, name: str, *, user: str = "") -> str:
-        """The full branch name for ``name``. Empty when nothing is left of it."""
-        rendered = self.pattern.replace("{user}", slug(self.user or user)).replace(
-            "{name}", slug(name)
+    def offered(self) -> list[str]:
+        """The patterns to choose from, this repository's own first.
+
+        The plain name is not one of them. It is not a pattern -- it is the
+        absence of one, and the window offers it as its own thing.
+        """
+        out: list[str] = []
+        for candidate in [self.pattern, *self.patterns]:
+            if candidate and candidate != PLAIN and candidate not in out:
+                out.append(candidate)
+        return out
+
+    def user_for(self, typed: str = "", git: str = "") -> str:
+        """Who ``{user}`` is, in the order the answers beat each other.
+
+        Typed into the window now, else configured for this repository, else
+        whatever git says the committer is called here. Separate from
+        ``render`` so that the precedence is one readable line rather than an
+        argument order nobody can remember at the call site.
+        """
+        return typed or self.user or git
+
+    def render(self, name: str, *, pattern: str = "", user: str = "") -> str:
+        """The full branch name for ``name``. Empty when nothing is left of it.
+
+        ``pattern`` is what the window has selected; blank falls back to this
+        repository's own. ``user`` is already decided -- see ``user_for``.
+        """
+        chosen = pattern or self.pattern
+        typed = slug(name)
+        # A pattern is a prefix and a name. Nothing surviving of what was typed
+        # -- "///", or a word made only of punctuation -- leaves the prefix,
+        # and creating `dev/rem/<who>` as a branch is not what was asked for.
+        if "{name}" in chosen and not typed:
+            return ""
+        rendered = chosen.replace("{user}", slug(user or self.user)).replace(
+            "{name}", typed
         )
         # A pattern whose {user} resolved to nothing leaves "dev//thing", which
         # git refuses. Dropping the empty piece is what was meant.
-        parts = [part for part in rendered.split("/") if part]
+        parts = [piece for piece in map(_component, rendered.split("/")) if piece]
         return "/".join(parts)
 
 
@@ -202,10 +422,14 @@ class AuditRules:
     fast: bool = False
     large_file_mb: int = 5
     history_limit: int = 20
-    #: Which audits a run carries out, and which one's report is on screen.
-    selected: list[str] = field(default_factory=list)
-    last: str = ""
     stale: StaleRules = field(default_factory=StaleRules)
+
+    # Which audits are ticked, and whose report is on screen, are deliberately
+    # not here. They alter nothing about what an audit does -- they are what is
+    # selected in the window -- so they belong to the person looking at it and
+    # not to the repository. See config.Settings.audits_selected. Keeping them
+    # here also meant ticking a box forked the settings to Custom, which is a
+    # file nobody meant to make.
 
 
 @dataclass
@@ -226,10 +450,45 @@ class CommitRules:
 
 
 @dataclass
+class PromptRules:
+    """The commit-message prompt, and the named ones to pick from.
+
+    Here rather than in the user's own settings because it decides what is
+    sent: a project whose commits follow a house style is a project that can
+    ship the prompt producing it. Which of the named ones a repository uses is
+    a selection and stays with the user; see `config.RepoEntry.template`.
+    """
+
+    template: str = ""  # blank means the built-in one; see prompts.DEFAULT_TEMPLATE
+    #: ``[{"name": ..., "text": ...}]``. Plain dicts rather than a dataclass:
+    #: this module owns no shape it does not have to, and `config.Template` is
+    #: what the window builds from these.
+    templates: list = field(default_factory=list)
+
+
+@dataclass
+class TracingRules:
+    """Where a run's trace goes. Neither key is here and neither may ever be.
+
+    Both are in the Windows Credential Manager; see git_assistant.tracing.
+    """
+
+    enabled: bool = False
+    host: str = ""
+    environment: str = "development"
+    release: str = ""  # blank means this build's version
+    send_prompts: bool = True
+
+
+@dataclass
 class ReviewRules:
     """What is kept from reviewing this repository."""
 
     history_limit: int = 20
+    #: Named review profiles: which rules apply to which language at which
+    #: version. The rules themselves are files under code_review/; see
+    #: git_assistant.review.rule_files.
+    profiles: list = field(default_factory=list)
 
 
 @dataclass
@@ -244,6 +503,10 @@ class ModelRules:
     context_window: int = 32768  # 0 asks the provider
     safety_margin: float = 0.10
     parallel_calls: int = 4
+    #: Where each backend is, by provider key. Only the ones whose address is
+    #: yours to give -- the hosted providers have one and it is not a setting.
+    #: API keys are NOT here and must never be: see git_assistant.credentials.
+    endpoints: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -254,8 +517,10 @@ class RepoSettings:
     fetch: FetchRules = field(default_factory=FetchRules)
     audit: AuditRules = field(default_factory=AuditRules)
     commit: CommitRules = field(default_factory=CommitRules)
+    prompt: PromptRules = field(default_factory=PromptRules)
     review: ReviewRules = field(default_factory=ReviewRules)
     model: ModelRules = field(default_factory=ModelRules)
+    tracing: TracingRules = field(default_factory=TracingRules)
     #: Which settings these are. The window names it, and a value nobody can
     #: trace to a file is a value nobody trusts.
     tier: "Tier" = None  # set by `resolve`; see `Tier`
@@ -272,6 +537,7 @@ class RepoSettings:
             "version": SCHEMA_VERSION,
             "branch": {
                 "pattern": self.branch.pattern,
+                "patterns": list(self.branch.patterns),
                 "user": self.branch.user,
                 "push_sets_upstream": self.branch.push_sets_upstream,
             },
@@ -286,8 +552,6 @@ class RepoSettings:
                 "fast": self.audit.fast,
                 "large_file_mb": self.audit.large_file_mb,
                 "history_limit": self.audit.history_limit,
-                "selected": list(self.audit.selected),
-                "last": self.audit.last,
                 "stale": {
                     "months": self.audit.stale.months,
                     "protect": list(self.audit.stale.protect),
@@ -303,11 +567,26 @@ class RepoSettings:
                 "history_limit": self.commit.history_limit,
                 "ignore_globs": list(self.commit.ignore_globs),
             },
-            "review": {"history_limit": self.review.history_limit},
+            "prompt": {
+                "template": self.prompt.template,
+                "templates": [dict(one) for one in self.prompt.templates],
+            },
+            "review": {
+                "history_limit": self.review.history_limit,
+                "profiles": [dict(one) for one in self.review.profiles],
+            },
             "model": {
                 "context_window": self.model.context_window,
                 "safety_margin": self.model.safety_margin,
                 "parallel_calls": self.model.parallel_calls,
+                "endpoints": dict(self.model.endpoints),
+            },
+            "tracing": {
+                "enabled": self.tracing.enabled,
+                "host": self.tracing.host,
+                "environment": self.tracing.environment,
+                "release": self.tracing.release,
+                "send_prompts": self.tracing.send_prompts,
             },
         }
 
@@ -379,12 +658,41 @@ def _read(path: Path) -> tuple[dict | None, str]:
     except (OSError, UnicodeDecodeError) as exc:
         return None, f"{path.name} could not be read: {exc}"
     try:
-        data = json.loads(text)
+        data = jsonc.loads(text)
     except json.JSONDecodeError as exc:
         return None, f"{path.name} is not valid JSON: {exc}"
     if not isinstance(data, dict):
         return None, f"{path.name} does not hold a settings object."
     return data, ""
+
+
+def _strings(data: dict, key: str, fallback: dict) -> dict:
+    """A map of string to string. Anything else in it is left out."""
+    raw = data.get(key)
+    if not isinstance(raw, dict):
+        return dict(fallback)
+    return {
+        str(name): str(value)
+        for name, value in raw.items()
+        if isinstance(value, str)
+    }
+
+
+def _dicts(data: dict, key: str, fallback: list) -> list:
+    """A list of objects. Anything in it that is not one is left out."""
+    raw = data.get(key)
+    if not isinstance(raw, list):
+        return [dict(one) for one in fallback]
+    return [dict(one) for one in raw if isinstance(one, dict)]
+
+
+def _named(data: dict, key: str, required: tuple, fallback: list) -> list:
+    """A list of objects that each have every one of ``required``."""
+    return [
+        one
+        for one in _dicts(data, key, fallback)
+        if all(isinstance(one.get(name), str) for name in required)
+    ]
 
 
 def _section(data: dict, name: str) -> dict:
@@ -429,11 +737,14 @@ def _overlay(settings: RepoSettings, data: dict) -> RepoSettings:
     audit = _section(data, "audit")
     stale = _section(audit, "stale")
     commit = _section(data, "commit")
+    prompt = _section(data, "prompt")
     review = _section(data, "review")
     model = _section(data, "model")
+    tracing = _section(data, "tracing")
     return RepoSettings(
         branch=BranchRules(
             pattern=_str(branch, "pattern", settings.branch.pattern),
+            patterns=_list(branch, "patterns", settings.branch.patterns),
             user=_str(branch, "user", settings.branch.user),
             push_sets_upstream=_bool(
                 branch, "push_sets_upstream", settings.branch.push_sets_upstream
@@ -454,8 +765,6 @@ def _overlay(settings: RepoSettings, data: dict) -> RepoSettings:
             history_limit=_int(
                 audit, "history_limit", settings.audit.history_limit
             ),
-            selected=_list(audit, "selected", settings.audit.selected),
-            last=_str(audit, "last", settings.audit.last),
             stale=StaleRules(
                 months=_int(stale, "months", settings.audit.stale.months),
                 protect=_list(stale, "protect", settings.audit.stale.protect),
@@ -483,10 +792,17 @@ def _overlay(settings: RepoSettings, data: dict) -> RepoSettings:
                 commit, "ignore_globs", settings.commit.ignore_globs
             ),
         ),
+        prompt=PromptRules(
+            template=_str(prompt, "template", settings.prompt.template),
+            templates=_named(
+                prompt, "templates", ("name", "text"), settings.prompt.templates
+            ),
+        ),
         review=ReviewRules(
             history_limit=_int(
                 review, "history_limit", settings.review.history_limit
             ),
+            profiles=_dicts(review, "profiles", settings.review.profiles),
         ),
         model=ModelRules(
             context_window=_int(
@@ -497,6 +813,18 @@ def _overlay(settings: RepoSettings, data: dict) -> RepoSettings:
             ),
             parallel_calls=_int(
                 model, "parallel_calls", settings.model.parallel_calls
+            ),
+            endpoints=_strings(model, "endpoints", settings.model.endpoints),
+        ),
+        tracing=TracingRules(
+            enabled=_bool(tracing, "enabled", settings.tracing.enabled),
+            host=_str(tracing, "host", settings.tracing.host),
+            environment=_str(
+                tracing, "environment", settings.tracing.environment
+            ),
+            release=_str(tracing, "release", settings.tracing.release),
+            send_prompts=_bool(
+                tracing, "send_prompts", settings.tracing.send_prompts
             ),
         ),
         tier=settings.tier,
@@ -573,6 +901,12 @@ _BOUND: dict[str, tuple[str, str]] = {
     "agent_fast_mode": ("audit", "fast"),
     "agent_large_file_mb": ("audit", "large_file_mb"),
     "agent_history_limit": ("audit", "history_limit"),
+    "prompt_template": ("prompt", "template"),
+    "langfuse_enabled": ("tracing", "enabled"),
+    "langfuse_host": ("tracing", "host"),
+    "langfuse_environment": ("tracing", "environment"),
+    "langfuse_release": ("tracing", "release"),
+    "langfuse_send_prompts": ("tracing", "send_prompts"),
 }
 
 
@@ -612,10 +946,83 @@ class Bound:
         return getattr(getattr(self._rules, section), key)
 
     def __setattr__(self, name: str, value) -> None:
-        raise AttributeError(
-            f"{name} cannot be set on the settings bound to a repository. "
-            "Use repo_config.change, which knows which file it belongs in."
-        )
+        """Repo-scoped names refuse; everything else goes to the user's settings.
+
+        The refusal is the point: setting ``diff_mode`` here would change a copy
+        and persist nothing, and the caller would have no way to tell. But
+        ``active_repo`` is not one of those -- it is an ordinary user setting,
+        it is the same object underneath, and refusing it would mean holding
+        the unbound settings alongside the bound ones just to change which
+        repository is active.
+        """
+        if name in _BOUND or name in ("repo", "tier"):
+            raise AttributeError(
+                f"{name} cannot be set on the settings bound to a repository. "
+                "Use repo_config.change, which knows which file it belongs in."
+            )
+        setattr(self._settings, name, value)
+
+    # ---- the ones that are not a plain lookup -------------------------------
+    # Methods rather than entries in _BOUND because they take an argument or
+    # build something. They were methods on `Settings` and every caller still
+    # calls them by the same name, which is the whole point of this class.
+    @property
+    def templates(self) -> list:
+        """The named prompt templates, as the window's own objects."""
+        from git_assistant.config import Template
+
+        return [
+            Template(name=one.get("name", ""), text=one.get("text", ""))
+            for one in self._rules.prompt.templates
+            if one.get("name")
+        ]
+
+    @property
+    def base_url(self) -> str:
+        """LM Studio's address. Other providers go through `provider_endpoint`."""
+        return self.provider_endpoint("lmstudio") or LMSTUDIO_ENDPOINT
+
+    def provider_endpoint(self, key: str) -> str:
+        """Where this backend is, or ``""`` to use the provider's own default."""
+        return (self._rules.model.endpoints.get(key) or "").strip()
+
+    def template_names(self) -> list[str]:
+        """Every selectable template, the default first."""
+        from git_assistant.config import DEFAULT_TEMPLATE_NAME
+
+        return [DEFAULT_TEMPLATE_NAME, *(one.name for one in self.templates)]
+
+    def template_text(self, name: str) -> str:
+        """Body of a named template, falling back to the default."""
+        from git_assistant.config import DEFAULT_TEMPLATE_NAME
+        from git_assistant.prompts import DEFAULT_TEMPLATE
+
+        if name and name != DEFAULT_TEMPLATE_NAME:
+            for one in self.templates:
+                if one.name == name:
+                    return one.text
+        return self._rules.prompt.template or DEFAULT_TEMPLATE
+
+    def template_for_repo(self, repo_path: str) -> str:
+        """The template a repository should be described with."""
+        return self.template_text(self._settings.repo_template(repo_path))
+
+    def review_profiles_built(self) -> list:
+        """The profiles as `review.profiles.Profile` objects, bad ones dropped."""
+        from git_assistant.review import profiles
+
+        built = [profiles.Profile.from_dict(one) for one in self._rules.review.profiles]
+        return [one for one in built if one is not None]
+
+    def review_profile(self, name: str):
+        """A profile by name, or ``None``."""
+        from git_assistant.review import profiles
+
+        for one in self._rules.review.profiles:
+            built = profiles.Profile.from_dict(one)
+            if built is not None and built.name == name:
+                return built
+        return None
 
     def __repr__(self) -> str:
         return f"<Bound {self.repo or 'no repository'} tier={self.tier}>"
@@ -637,18 +1044,18 @@ def defaults() -> RepoSettings:
 
 
 # ---- writing the defaults ------------------------------------------------------------
-def _write(path: Path, data: dict) -> None:
+def _write(path: Path, text: str) -> None:
     """Replaced, never truncated: a torn write must not eat the settings."""
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f"{path.name}.{uuid.uuid4().hex[:8]}.tmp")
-    tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    tmp.write_text(text, encoding="utf-8")
     os.replace(tmp, path)
 
 
 def save_defaults(settings: RepoSettings) -> str:
     """Write the user's answer for every repository. Returns a problem, or ``""``."""
     try:
-        _write(defaults_path(), settings.to_dict())
+        _write(defaults_path(), text_from(settings.to_dict(), Tier.USER))
     except OSError as exc:
         return str(exc)
     return ""
@@ -669,7 +1076,7 @@ def read_text(tier: Tier, repo_path: str | Path = "") -> str:
 def check(text: str) -> str:
     """Why ``text`` is not a settings file, or ``""`` if it is one."""
     try:
-        data = json.loads(text)
+        data = jsonc.loads(text)
     except json.JSONDecodeError as exc:
         return f"Not valid JSON: {exc}"
     return "" if isinstance(data, dict) else "A settings file holds an object, not a list."
@@ -686,22 +1093,29 @@ def write_text(tier: Tier, repo_path: str | Path, text: str) -> str:
     if problem:
         return problem
     try:
-        _write(path_for(tier, repo_path), json.loads(text))
+        # Written exactly as given. These files carry comments, and a save that
+        # re-rendered the data would throw away every comment the user had
+        # added to explain their own settings -- which is the one thing a
+        # hand-editable file must not do to a hand edit.
+        _write(path_for(tier, repo_path), text)
     except OSError as exc:
         return str(exc)
     return ""
 
 
-def text_from(data: dict) -> str:
+def text_from(data: dict, tier: Tier = Tier.USER) -> str:
     """``data`` as a settings file: the schema version, then the settings.
 
     Used by anything that builds settings rather than editing them -- a merge,
-    for one -- so that what it writes is a file this module would have written.
+    for one -- so that what it writes is a file this module would have written,
+    comments and all.
     """
     body = {key: value for key, value in data.items() if key != "version"}
-    return json.dumps(
-        {"version": SCHEMA_VERSION, **body}, indent=2, ensure_ascii=False
-    ) + "\n"
+    return jsonc.dumps(
+        {"version": SCHEMA_VERSION, **body},
+        FIELD_COMMENTS,
+        HEADERS.get(tier, ""),
+    )
 
 
 def source_dict(tier: Tier | None, repo_path: str | Path = "") -> dict:
@@ -737,7 +1151,46 @@ def set_user_values(**sections: dict) -> None:
     write_text(Tier.USER, "", text_from(data))
 
 
-def starter_text() -> str:
+# ---- the libraries, which the window edits ------------------------------------------
+# Read from the user tier and written back to it. The window that edits these --
+# the Template tab, the review profiles list -- is not about a repository, so it
+# edits the answer every repository without one of its own gets. A repository
+# that ships its own keeps it, which is the point of it being a setting.
+def user_templates() -> list:
+    """The named prompt templates in the user tier, as plain dicts."""
+    return [dict(one) for one in defaults().prompt.templates]
+
+
+def save_user_templates(templates) -> None:
+    """Replace them. ``templates`` may hold dicts or anything with name/text."""
+    set_user_values(prompt={"templates": [_named_dict(one) for one in templates]})
+
+
+def save_user_prompt(text: str) -> None:
+    """The default template's body."""
+    set_user_values(prompt={"template": text})
+
+
+def user_profiles() -> list:
+    """The review profiles in the user tier, as plain dicts."""
+    return [dict(one) for one in defaults().review.profiles]
+
+
+def save_user_profiles(profiles) -> None:
+    set_user_values(review={"profiles": [_profile_dict(one) for one in profiles]})
+
+
+def _named_dict(one) -> dict:
+    if isinstance(one, dict):
+        return {"name": str(one.get("name", "")), "text": str(one.get("text", ""))}
+    return {"name": str(getattr(one, "name", "")), "text": str(getattr(one, "text", ""))}
+
+
+def _profile_dict(one) -> dict:
+    return dict(one) if isinstance(one, dict) else one.to_dict()
+
+
+def starter_text(tier: Tier = Tier.USER) -> str:
     """The user tier, written out as another tier's file would hold it.
 
     Every key, so the file can be read to find out what there is to set -- a
@@ -749,7 +1202,7 @@ def starter_text() -> str:
     a reset, where "what it resolves to" includes the file being reset, and
     faithfully reproduces whatever went wrong with it.
     """
-    return json.dumps(defaults().to_dict(), indent=2, ensure_ascii=False) + "\n"
+    return text_from(defaults().to_dict(), tier)
 
 
 def create(tier: Tier, repo_path: str | Path) -> str:
@@ -760,7 +1213,7 @@ def create(tier: Tier, repo_path: str | Path) -> str:
     """
     if exists(tier, repo_path):
         return f"There is already a {tier.label()} settings file."
-    return write_text(tier, repo_path, starter_text())
+    return write_text(tier, repo_path, starter_text(tier))
 
 
 def reset(tier: Tier, repo_path: str | Path) -> str:
@@ -770,7 +1223,7 @@ def reset(tier: Tier, repo_path: str | Path) -> str:
     is reached for when a file has been edited into something that does not
     work, and the answer to that cannot be "you already have one".
     """
-    return write_text(tier, repo_path, starter_text())
+    return write_text(tier, repo_path, starter_text(tier))
 
 
 def remove(tier: Tier, repo_path: str | Path) -> str:
@@ -810,7 +1263,7 @@ def change(settings, repo_path: str, mutate, *, may_replace_custom=None) -> str:
     mutate(data)
 
     if tier is Tier.CUSTOM:
-        return write_text(tier, repo_path, text_from(data))
+        return write_text(tier, repo_path, text_from(data, tier))
 
     if exists(Tier.CUSTOM, repo_path):
         allowed = may_replace_custom(
@@ -819,7 +1272,7 @@ def change(settings, repo_path: str, mutate, *, may_replace_custom=None) -> str:
         if not allowed:
             return "Your Custom settings for this repository were not replaced."
 
-    problem = write_text(Tier.CUSTOM, repo_path, text_from(data))
+    problem = write_text(Tier.CUSTOM, repo_path, text_from(data, Tier.CUSTOM))
     if problem:
         return problem
     settings.set_settings_tier(repo_path, Tier.CUSTOM.value)
@@ -857,36 +1310,136 @@ _MIGRATED = {
     "context_window": ("model", "context_window"),
     "safety_margin": ("model", "safety_margin"),
     "parallel_calls": ("model", "parallel_calls"),
+    "prompt_template": ("prompt", "template"),
+    "review_profiles": ("review", "profiles"),
+    "templates": ("prompt", "templates"),
+    "langfuse_enabled": ("tracing", "enabled"),
+    "langfuse_host": ("tracing", "host"),
+    "langfuse_environment": ("tracing", "environment"),
+    "langfuse_release": ("tracing", "release"),
+    "langfuse_send_prompts": ("tracing", "send_prompts"),
 }
 
 
-def migrate_user_settings(settings) -> bool:
-    """Carry the old per-repository settings into the user tier. Once.
+def rename_legacy_user_file() -> bool:
+    """Move ``default_repo_settings.json`` to ``user_settings.json``. True if moved.
 
-    An upgrade must not silently reset what somebody configured. The values
-    were in ``settings.json`` and are now the user tier, so they are copied
-    across the first time this build sees a settings file that still has them
-    -- and the old fields are then left alone, because a build that removes
-    them is a build the previous one cannot read a downgrade from.
-
-    Returns True when anything was carried over.
+    A rename and not a copy: two files, one of them stale and both looking
+    authoritative, is the problem this whole split exists to end.
     """
-    if getattr(settings, "settings_migrated", False):
+    new, old = path_for(Tier.USER), _config_root() / LEGACY_DEFAULTS_FILE
+    if new.exists() or not old.is_file():
         return False
-    data = source_dict(Tier.USER)
-    for field_name, (section, key) in _MIGRATED.items():
-        if not hasattr(settings, field_name):
-            continue
-        data.setdefault(section, {})[key] = getattr(settings, field_name)
-    stale = getattr(settings, "stale_branch_rules", None)
-    if isinstance(stale, dict) and stale:
-        data.setdefault("audit", {})["stale"] = dict(stale)
-
-    if save_text(Tier.USER, "", text_from(data)):
-        return False  # a disk that refused; try again next time
-    settings.settings_migrated = True
-    settings.save()
+    try:
+        new.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(old, new)
+    except OSError:
+        return False  # a disk that refused; try again next run
     return True
+
+
+def user_tier_from(data: dict) -> dict:
+    """The per-repository half of an old ``settings.json``, as a user-tier file.
+
+    Built from the raw dict rather than from a loaded ``Settings``, because the
+    fields it reads no longer exist on that class -- which is the point of the
+    split, and would otherwise make the migration unable to find what it is
+    migrating.
+    """
+    out: dict = {}
+    for field_name, (section, key) in _MIGRATED.items():
+        if field_name in data:
+            out.setdefault(section, {})[key] = data[field_name]
+    stale = data.get("stale_branch_rules")
+    if isinstance(stale, dict) and stale:
+        out.setdefault("audit", {})["stale"] = dict(stale)
+
+    # Where each backend is. Three shapes became one: a map of the providers
+    # whose address the user supplied, plus LM Studio's own IP and port, which
+    # asked the same question in its own way for no reason anybody could name.
+    endpoints = data.get("provider_endpoints")
+    endpoints = dict(endpoints) if isinstance(endpoints, dict) else {}
+    ip = str(data.get("lmstudio_ip") or "").strip()
+    port = data.get("lmstudio_port")
+    if ip and isinstance(port, int):
+        endpoints["lmstudio"] = f"http://{ip}:{port}"
+    if endpoints:
+        out.setdefault("model", {})["endpoints"] = endpoints
+    return out
+
+
+def migrate_user_settings(data: dict) -> bool:
+    """Write the user tier from an old ``settings.json``. True if written.
+
+    An upgrade must not silently reset what somebody configured, and the values
+    it configured were in that file. Never over an existing user tier: the file
+    being read here is the older answer by definition.
+    """
+    if exists(Tier.USER):
+        return False
+    carried = user_tier_from(data)
+    if not carried:
+        return False
+    return not save_text(Tier.USER, "", text_from(carried))
+
+
+#: The keys the old single file used for what is now a selection, and the maps
+#: they become. The value they carried was one answer for every repository, so
+#: it lands under "" -- the answer for a repository nobody has chosen for.
+_LIFTED = {"agent_selected_ids": "audit_selected", "agent_last_id": "audit_last"}
+
+
+def migrate_files() -> bool:
+    """Turn whatever this machine has into the three files this build reads.
+
+    Three shapes arrive here:
+
+      * nothing -- a first run, and there is nothing to migrate;
+      * ``settings.json`` alone, from a build before the settings were split by
+        who they belong to. Its per-repository half becomes the user tier and
+        the rest becomes ``static_user_settings.json``;
+      * ``settings.json`` *and* ``default_repo_settings.json``, from a build
+        that had split them but had not yet named them for what they hold.
+
+    Renames rather than copies throughout. Two files, one of them stale and
+    both looking authoritative, is the problem this split exists to end.
+
+    Returns True when anything moved. Never raises: a disk that refuses costs
+    the migration, not the launch, and the next run tries again.
+    """
+    from git_assistant import config as user_config
+
+    moved = rename_legacy_user_file()
+    if user_config.config_path().exists():
+        return moved
+
+    old = user_config.old_config_path()
+    if not old.is_file():
+        return moved
+    try:
+        data = jsonc.loads(old.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+        return moved
+    if not isinstance(data, dict):
+        return moved
+
+    migrate_user_settings(data)
+    settings = user_config.Settings.from_dict(_lift_selections(data))
+    settings.save()
+    try:
+        old.unlink()
+    except OSError:
+        pass  # the new file is written; a leftover is untidy, not wrong
+    return True
+
+
+def _lift_selections(data: dict) -> dict:
+    """One global selection becomes the fallback entry of a per-repository map."""
+    out = dict(data)
+    for old_key, new_key in _LIFTED.items():
+        if old_key in data and data[old_key]:
+            out[new_key] = {"": data[old_key]}
+    return out
 
 
 def save_text(tier: Tier, repo_path: str, text: str) -> str:

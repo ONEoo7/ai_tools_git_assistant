@@ -1,4 +1,5 @@
 from git_assistant.commit_generator import DEFAULT_CONTEXT_WINDOW, CommitGenerator
+from conftest import settings_with
 from git_assistant.config import Settings
 from git_assistant.llm import ModelInfo
 from git_assistant.tokenizer import (
@@ -17,7 +18,7 @@ class _StubClient:
 
 
 def _gen(size, detected, margin=0.10):
-    settings = Settings(selected_model="m", context_window=size, safety_margin=margin)
+    settings = settings_with(selected_model="m", context_window=size, safety_margin=margin)
     return CommitGenerator(settings, _StubClient(detected))
 
 
@@ -95,7 +96,7 @@ def test_input_budget_overhead_subtracted():
 
 # ---- parallel execution ------------------------------------------------------
 def _par_gen(parallel):
-    settings = Settings(selected_model="m", parallel_calls=parallel)
+    settings = settings_with(selected_model="m", parallel_calls=parallel)
     g = CommitGenerator(settings, _StubClient(None))
     # generate() derives this from the context window; set it directly here.
     g._workers = parallel
@@ -164,7 +165,7 @@ def test_run_parallel_cancellation():
 
 # ---- parallel slots share the context window ---------------------------------
 def _ctx_gen(parallel, window):
-    settings = Settings(
+    settings = settings_with(
         selected_model="m", parallel_calls=parallel, context_window=window
     )
     return CommitGenerator(settings, _StubClient(None))
@@ -212,7 +213,7 @@ class _ListingClient:
 
 
 def _cold_gen(loaded, parallel=4):
-    settings = Settings(selected_model="m", parallel_calls=parallel)
+    settings = settings_with(selected_model="m", parallel_calls=parallel)
     g = CommitGenerator(settings, _ListingClient(loaded))
     g._workers = parallel
     g._cold_start = g._model_is_cold()
@@ -229,12 +230,12 @@ def test_an_unloaded_model_is_cold():
 
 def test_a_provider_that_cannot_report_load_state_is_treated_as_ready():
     """A hosted model has nothing to load; a failed listing must not stall us."""
-    g = CommitGenerator(Settings(selected_model="m"), _StubClient(4096))
+    g = CommitGenerator(settings_with(selected_model="m"), _StubClient(4096))
     assert g._model_is_cold() is False
 
 
 def test_the_context_comes_from_the_listing_without_a_second_call():
-    g = CommitGenerator(Settings(selected_model="m"), _ListingClient(loaded=True))
+    g = CommitGenerator(settings_with(selected_model="m"), _ListingClient(loaded=True))
     assert g._context_window() == 8192
 
 

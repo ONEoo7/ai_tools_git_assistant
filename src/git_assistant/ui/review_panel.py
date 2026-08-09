@@ -283,7 +283,13 @@ class ReviewPanel(QWidget):
         lookup, so a second lookup would copy the unedited one.
         """
         profile = self.profile_tab.profile()
-        if profile is not None and profile not in self.settings.review_profiles:
+        # By name, not by value. The library is read back from the settings
+        # file on every call, so the object handed to the tab is never the same
+        # object -- and once it has been edited it is not an equal one either,
+        # which would make every edit look like an edit to something read-only.
+        if profile is not None and profile.name not in {
+            one.name for one in self._library()
+        }:
             # The shipped rules and a repository's own are read-only; editing
             # one makes a copy, so a change is never silently lost and never
             # rewrites what ships. The copy is *not* put under review: which
@@ -291,8 +297,7 @@ class ReviewPanel(QWidget):
             # here is how a review runs against rules nobody selected.
             copy = profiles_mod.Profile.from_dict(profile.to_dict())
             copy.name = _free_profile_name(f"{profile.name} (edited)", self.settings)
-            self.settings.review_profiles.append(copy)
-            self.settings.save()
+            self._add_profile(copy)
             self._viewed = copy.name
             self._refresh_tables()
             self.status.setText(
@@ -301,7 +306,7 @@ class ReviewPanel(QWidget):
                 "against it."
             )
             return
-        self.settings.save()
+        self._save_edited(profile)
         self._refresh_versions()
 
     def _on_add_language(self) -> None:
@@ -512,6 +517,27 @@ class ReviewPanel(QWidget):
         return row
 
     # ---- state ---------------------------------------------------------------
+    # ---- the profile library -------------------------------------------------
+    # Read from the settings in force and written back to the user tier. The
+    # profiles decide which rules a review runs, so they are a setting a
+    # project can ship -- see repo_config.ReviewRules. The list here is the
+    # user's own, which is what this tab edits.
+    def _library(self) -> list:
+        """The user's own profiles, as objects. Not the offered list."""
+        return repo_config.bind(self.settings).review_profiles_built()
+
+    def _add_profile(self, profile) -> None:
+        repo_config.save_user_profiles([*self._library(), profile])
+
+    def _save_edited(self, profile) -> None:
+        """Put an edited profile back in the library, replacing the one it was."""
+        repo_config.save_user_profiles(
+            [
+                profile if one.name == profile.name else one
+                for one in self._library()
+            ]
+        )
+
     def bound(self):
         """The settings as the selected repository sees them; see repo_config."""
         return repo_config.bind(self.settings, self._repo_path())
@@ -576,7 +602,7 @@ class ReviewPanel(QWidget):
         is lost the moment anything asks again.
         """
         repo_profile, self._repo_tables = shared_profile.read(self._repo_path())
-        offered = [*self.settings.review_profiles, profiles_mod.defaults()]
+        offered = [*self._library(), profiles_mod.defaults()]
         self._all_profiles = (
             [repo_profile, *offered] if repo_profile is not None else offered
         )
@@ -623,8 +649,8 @@ class ReviewPanel(QWidget):
         if not table or self._store.find(table) is None:
             return
         profile = profiles_mod.imported(table)
-        if self.settings.review_profile(profile.name) is None:
-            self.settings.review_profiles.append(profile)
+        if self.bound().review_profile(profile.name) is None:
+            self._add_profile(profile)
         self.settings.set_repo_review_profile(repo, profile.name)
         self.settings.save()
 
@@ -816,7 +842,9 @@ class ReviewPanel(QWidget):
         # their next review would run against a table that no longer exists,
         # which looks exactly like a review that found nothing.
         self.settings.rename_review_table(old, new)
-        profiles_mod.rename_table(self.settings.review_profiles, old, new)
+        kept = self._library()
+        profiles_mod.rename_table(kept, old, new)
+        repo_config.save_user_profiles(kept)
         self.settings.save()
         self._select_table(new)
 
@@ -839,7 +867,9 @@ class ReviewPanel(QWidget):
         name = table.name
         self._store.remove(name)
         self.settings.remove_review_table(name)
-        profiles_mod.remove_table(self.settings.review_profiles, name)
+        kept = self._library()
+        profiles_mod.remove_table(kept, name)
+        repo_config.save_user_profiles(kept)
         self.settings.save()
         self._refresh_tables()
         self._update_review_button()
@@ -853,8 +883,8 @@ class ReviewPanel(QWidget):
         """
         repo = self._repo_path()
         profile = profiles_mod.imported(name)
-        if repo and self.settings.review_profile(profile.name) is None:
-            self.settings.review_profiles.append(profile)
+        if repo and self.bound().review_profile(profile.name) is None:
+            self._add_profile(profile)
             self.settings.set_repo_review_profile(repo, profile.name)
             self.settings.save()
         self._refresh_tables()
@@ -1042,8 +1072,8 @@ class ReviewPanel(QWidget):
             if profile.overrides.get(extension) != file.language:
                 profile.overrides[extension] = file.language
                 changed = True
-        if changed and profile in self.settings.review_profiles:
-            self.settings.save()
+        if changed and profile.name in {one.name for one in self._library()}:
+            self._save_edited(profile)
 
     def _on_cancel(self) -> None:
         if self._worker is not None:
@@ -1322,7 +1352,7 @@ def _free_profile_name(wanted: str, settings) -> str:
     Two profiles with one name is one profile as far as lookup by name is
     concerned, and which of them a repository gets would be an accident.
     """
-    taken = {p.name for p in settings.review_profiles}
+    taken = {p.name for p in repo_config.bind(settings).review_profiles_built()}
     if wanted not in taken:
         return wanted
     return next(f"{wanted} {n}" for n in range(2, 1000) if f"{wanted} {n}" not in taken)

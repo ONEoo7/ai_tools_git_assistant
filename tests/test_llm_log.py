@@ -4,6 +4,7 @@ import pytest
 
 from git_assistant import llm_log
 from git_assistant.commit_generator import CommitGenerator
+from conftest import settings_with
 from git_assistant.config import Settings
 from git_assistant.llm import ModelInfo
 from git_assistant.llm_log import RecordingClient
@@ -161,8 +162,7 @@ class _Stub(_Client):
 
 
 def _settings(tmp_path, context=32768):
-    s = Settings(selected_model="m", context_window=context, parallel_calls=2)
-    s.save = lambda: None
+    s = settings_with(selected_model="m", context_window=context, parallel_calls=2)
     s.active_repo = str(tmp_path)
     return s
 

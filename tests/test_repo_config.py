@@ -4,19 +4,29 @@ No git and no Qt. This module answers "what is configured" and nothing else,
 which is most of why it can be tested like this.
 """
 
+import dataclasses
 import json
 
 import pytest
 
+from git_assistant import jsonc
 from git_assistant import repo_config
 
 
 @pytest.fixture(autouse=True)
 def store(tmp_path, monkeypatch):
-    """Redirect the user config; patched where it is imported, as elsewhere."""
-    monkeypatch.setattr(
-        repo_config, "user_config_dir", lambda *a, **k: str(tmp_path / "config")
-    )
+    """Redirect the user config; patched where it is imported, as elsewhere.
+
+    Both modules, and to the same place: they are files in one directory, and a
+    test where they are not is a test where the migration between them has
+    nothing to find.
+    """
+    from git_assistant import config as user_config
+
+    for module in (repo_config, user_config):
+        monkeypatch.setattr(
+            module, "user_config_dir", lambda *a, **k: str(tmp_path / "config")
+        )
     return tmp_path
 
 
@@ -102,9 +112,9 @@ def test_settings_for_no_repository_at_all_are_the_user_tier(repo):
 
 # ---- files that are wrong ---------------------------------------------------------
 def test_a_broken_repository_file_is_reported_not_obeyed_and_not_raised(repo):
-    """A comma out of place must not stop the application, or pass unnoticed."""
+    """A quote left off must not stop the application, or pass unnoticed."""
     _write_defaults({"branch": {"pattern": "wip/{name}"}})
-    _write_repo(repo, '{"branch": {"pattern": "dev/{name}",}}')
+    _write_repo(repo, '{"branch": {"pattern: "dev/{name}"}}')
 
     settings = repo_config.resolve(repo)
 
@@ -199,7 +209,7 @@ def test_the_defaults_file_is_written_so_it_can_be_found(repo):
     assert repo_config.ensure_defaults() is True
     assert repo_config.defaults_path().is_file()
 
-    written = json.loads(repo_config.defaults_path().read_text(encoding="utf-8"))
+    written = jsonc.loads(repo_config.defaults_path().read_text(encoding="utf-8"))
     assert written["version"] == repo_config.SCHEMA_VERSION
     assert written["branch"]["pattern"] == "{name}"
     assert written["fetch"]["shallow"] is False
@@ -241,7 +251,7 @@ def test_the_pattern_is_filled_in_with_the_user_and_the_name():
 
 def test_the_configured_user_beats_the_one_offered():
     rules = repo_config.BranchRules(pattern="{user}/{name}", user="configured")
-    assert rules.render("x", user="from-git") == "configured/x"
+    assert rules.render("x", user=rules.user_for(git="from-git")) == "configured/x"
 
 
 def test_the_offered_user_is_used_when_none_is_configured():
@@ -318,8 +328,13 @@ def test_a_created_file_holds_everything_this_repository_already_uses(repo):
     assert after.branch.pattern == before.branch.pattern
     assert after.fetch.depth == before.fetch.depth
     # Every key, so the file can be read to find out what there is to set.
-    written = json.loads(repo_config.read_text(repo_config.Tier.REPO, repo))
-    assert set(written["branch"]) == {"pattern", "user", "push_sets_upstream"}
+    written = jsonc.loads(repo_config.read_text(repo_config.Tier.REPO, repo))
+    assert set(written["branch"]) == {
+        "pattern",
+        "patterns",
+        "user",
+        "push_sets_upstream",
+    }
     assert set(written["fetch"]) == {"shallow", "depth", "prune", "tags"}
 
 
@@ -578,8 +593,6 @@ def test_the_audit_settings_round_trip_through_a_file(repo):
                 "fast": True,
                 "large_file_mb": 42,
                 "history_limit": 3,
-                "selected": ["metrics", "size-audit"],
-                "last": "metrics",
                 "stale": {"months": 12, "protect": ["main"], "merged_only": False},
             }
         },
@@ -589,64 +602,58 @@ def test_the_audit_settings_round_trip_through_a_file(repo):
 
     assert audit.narrate is False and audit.fast is True
     assert (audit.large_file_mb, audit.history_limit) == (42, 3)
-    assert audit.selected == ["metrics", "size-audit"]
-    assert audit.last == "metrics"
     assert (audit.stale.months, audit.stale.merged_only) == (12, False)
     assert audit.stale.keep_unpushed is True  # not set, so the built-in
 
 
-def test_a_selected_list_holding_nonsense_keeps_only_the_names(repo):
-    _write_repo(repo, {"audit": {"selected": ["size-audit", 7, None]}})
-    assert repo_config.resolve(repo).audit.selected == ["size-audit"]
+def test_what_is_ticked_is_not_something_a_repository_can_carry(repo):
+    """A selection changes what is on screen, never what an audit does.
+
+    So a file that names one is a file with a key this build does not read --
+    and a repository that shipped one cannot decide what the reader has ticked.
+    """
+    _write_repo(repo, {"audit": {"selected": ["size-audit"], "last": "size-audit"}})
+
+    audit = repo_config.resolve(repo).audit
+
+    assert not hasattr(audit, "selected")
+    assert not hasattr(audit, "last")
 
 
 # ---- carrying the old settings over --------------------------------------------------
-def _legacy():
-    from git_assistant.config import Settings
-
-    settings = Settings(
-        agents_narrate=False,
-        agent_fast_mode=True,
-        agent_large_file_mb=77,
-        agent_history_limit=3,
-        agent_selected_ids=["metrics"],
-        agent_last_id="metrics",
-        stale_branch_rules={"months": 18, "protect": ["main"]},
-    )
-    settings.save = lambda: None
-    return settings
+#: One old settings.json, holding both halves: the per-repository keys that
+#: became the user tier, the selections that became the user's own, and the
+#: account settings that stayed put.
+_LEGACY = {
+    "provider": "claude",
+    "agents_narrate": False,
+    "agent_fast_mode": True,
+    "agent_large_file_mb": 77,
+    "agent_history_limit": 3,
+    "agent_selected_ids": ["metrics"],
+    "agent_last_id": "metrics",
+    "stale_branch_rules": {"months": 18, "protect": ["main"]},
+    "context_window": 8192,
+}
 
 
 def test_settings_configured_before_this_build_are_carried_over(repo):
     """An upgrade must not silently reset what somebody configured."""
-    settings = _legacy()
-
-    assert repo_config.migrate_user_settings(settings) is True
+    assert repo_config.migrate_user_settings(_LEGACY) is True
 
     audit = repo_config.resolve(repo, "user").audit
     assert audit.narrate is False and audit.fast is True
     assert (audit.large_file_mb, audit.history_limit) == (77, 3)
-    assert audit.selected == ["metrics"] and audit.last == "metrics"
     assert audit.stale.months == 18 and audit.stale.protect == ["main"]
+    assert repo_config.resolve(repo, "user").model.context_window == 8192
 
 
-def test_the_carry_over_happens_once_and_not_again(repo):
-    settings = _legacy()
-    repo_config.migrate_user_settings(settings)
+def test_the_carry_over_never_happens_over_an_answer_already_there(repo):
+    """The file being read is the older answer by definition."""
     repo_config.write_text(repo_config.Tier.USER, "", '{"audit": {"narrate": true}}')
 
-    assert repo_config.migrate_user_settings(settings) is False
+    assert repo_config.migrate_user_settings(_LEGACY) is False
     assert repo_config.resolve(repo, "user").audit.narrate is True
-
-
-def test_the_old_fields_are_left_where_a_downgrade_can_read_them(repo):
-    """Removing them would leave the previous build with nothing to fall back on."""
-    settings = _legacy()
-
-    repo_config.migrate_user_settings(settings)
-
-    assert settings.agent_large_file_mb == 77
-    assert settings.settings_migrated is True
 
 
 # ---- one change, wherever it comes from ----------------------------------------------
@@ -725,7 +732,7 @@ def test_a_change_keeps_a_file_saying_only_what_it_said(repo):
         settings, str(repo), lambda data: data["audit"].update({"fast": True})
     )
 
-    written = json.loads(repo_config.read_text(repo_config.Tier.CUSTOM, repo))
+    written = jsonc.loads(repo_config.read_text(repo_config.Tier.CUSTOM, repo))
     assert set(written["audit"]) == {"narrate", "fast"}
 
 
@@ -878,3 +885,395 @@ def test_an_override_answers_for_this_run_and_is_written_nowhere(repo):
     assert bound.diff_mode == "working"
     assert bound.ignore_globs == repo_config.CommitRules().ignore_globs  # untouched
     assert repo_config.resolve(repo).commit.diff_mode == "cached"  # not written
+
+
+# ---- the three files, and what belongs in which --------------------------------------
+def _config_dir():
+    from git_assistant import config as user_config
+
+    return user_config.config_path().parent
+
+
+def _write_old(data):
+    """An old settings.json, as the single file that held both halves."""
+    from git_assistant import config as user_config
+
+    path = user_config.old_config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data), encoding="utf-8")
+    return path
+
+
+def test_the_user_and_repo_files_hold_exactly_the_same_keys(repo):
+    """The whole point of the split: one schema, kept in two places.
+
+    A key in only one of them is a key a repository can set and a user cannot,
+    or the reverse -- and either way the settings editor shows a file that
+    cannot say what the other one says.
+    """
+    repo_config.create(repo_config.Tier.USER, "")
+    repo_config.create(repo_config.Tier.REPO, repo)
+
+    user = jsonc.loads(repo_config.read_text(repo_config.Tier.USER, ""))
+    theirs = jsonc.loads(repo_config.read_text(repo_config.Tier.REPO, repo))
+
+    assert _flatten(user) == _flatten(theirs)
+
+
+def _flatten(data, prefix=""):
+    """Every leaf key, dotted, so a section added to one file is visible here."""
+    out = set()
+    for key, value in data.items():
+        name = f"{prefix}{key}"
+        nested = isinstance(value, dict) and value
+        out |= _flatten(value, f"{name}.") if nested else {name}
+    return out
+
+
+def test_nothing_a_run_reads_per_repository_is_also_a_field_on_the_users_own():
+    """The duplication this split removed, asserted so it cannot come back.
+
+    Every one of these was a field on `Settings` *and* a key in the settings a
+    repository carries. Two homes, one of them stale, and nothing on screen
+    saying which had been read.
+    """
+    from git_assistant.config import Settings
+
+    fields = {f.name for f in dataclasses.fields(Settings)}
+    both = fields & set(repo_config._BOUND)
+
+    assert both == set(), sorted(both)
+
+
+def test_no_selection_is_something_a_repository_can_carry():
+    """Selections change what is on screen, never what a run does."""
+    audit = repo_config.RepoSettings().to_dict()["audit"]
+    assert "selected" not in audit and "last" not in audit
+
+
+def test_an_old_settings_file_becomes_the_two_that_replaced_it(repo):
+    from git_assistant import config as user_config
+
+    old = _write_old(
+        {"provider": "claude", "context_window": 8192, "diff_mode": "working"}
+    )
+
+    assert repo_config.migrate_files() is True
+
+    assert user_config.Settings.load().provider == "claude"  # the account's half
+    user = repo_config.resolve(repo, "user")
+    assert user.model.context_window == 8192  # the repository's half
+    assert user.commit.diff_mode == "working"
+    assert not old.exists()  # and not left behind looking authoritative
+
+
+def test_the_old_global_selection_becomes_the_answer_for_every_repository():
+    """An upgrade opens on the audits that were already ticked."""
+    from git_assistant import config as user_config
+
+    _write_old({"agent_selected_ids": ["metrics"], "agent_last_id": "metrics"})
+
+    repo_config.migrate_files()
+
+    settings = user_config.Settings.load()
+    assert settings.audits_selected("/anywhere/at/all") == ["metrics"]
+    assert settings.audit_shown("/anywhere/at/all") == "metrics"
+
+
+def test_the_user_tier_is_renamed_rather_than_copied():
+    path = _config_dir() / repo_config.LEGACY_DEFAULTS_FILE
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text('{"audit": {"narrate": false}}', encoding="utf-8")
+
+    assert repo_config.migrate_files() is True
+
+    assert repo_config.defaults().audit.narrate is False
+    assert not path.exists()  # one file, not two, one of them stale
+
+
+def test_a_build_that_had_split_them_keeps_both_halves(repo):
+    """settings.json *and* default_repo_settings.json: the in-between build."""
+    from git_assistant import config as user_config
+
+    _write_old({"provider": "claude", "context_window": 8192})
+    (_config_dir() / repo_config.LEGACY_DEFAULTS_FILE).write_text(
+        '{"model": {"context_window": 4096}}', encoding="utf-8"
+    )
+
+    repo_config.migrate_files()
+
+    # The user tier already existed, so it wins: the old file's copy of these
+    # is what it looked like before anyone edited them.
+    assert repo_config.defaults().model.context_window == 4096
+    assert user_config.Settings.load().provider == "claude"
+
+
+def test_migrating_twice_changes_nothing_the_second_time(repo):
+    _write_old({"provider": "claude", "context_window": 8192})
+    repo_config.migrate_files()
+    repo_config.write_text(repo_config.Tier.USER, "", '{"model": {"context_window": 1}}')
+
+    assert repo_config.migrate_files() is False
+    assert repo_config.defaults().model.context_window == 1
+
+
+def test_a_first_run_has_nothing_to_migrate():
+    assert repo_config.migrate_files() is False
+
+
+def test_an_unreadable_old_file_is_not_a_failed_launch():
+    _write_old({})  # replaced below with something that is not JSON
+    from git_assistant import config as user_config
+
+    user_config.old_config_path().write_text("{ not json", encoding="utf-8")
+
+    assert repo_config.migrate_files() is False
+
+
+# ---- the patterns a new branch can be named from -------------------------------------
+def test_the_offered_patterns_are_there_without_configuring_anything():
+    offered = repo_config.BranchRules().offered()
+    assert offered == ["dev/rem/{user}/{name}", "test/rem/{user}/{name}"]
+
+
+def test_the_plain_name_is_not_one_of_the_patterns():
+    """It is the absence of a pattern, and the window offers it as its own thing."""
+    assert repo_config.PLAIN not in repo_config.BranchRules().offered()
+
+
+def test_a_repositorys_own_pattern_is_offered_first():
+    rules = repo_config.BranchRules(pattern="feature/{name}")
+    assert rules.offered()[0] == "feature/{name}"
+
+
+def test_a_repositorys_own_pattern_is_not_offered_twice():
+    rules = repo_config.BranchRules(pattern="dev/rem/{user}/{name}")
+    assert rules.offered().count("dev/rem/{user}/{name}") == 1
+
+
+def test_a_pattern_renders_the_user_and_the_typed_name():
+    rules = repo_config.BranchRules()
+    assert (
+        rules.render("my thing", pattern="dev/rem/{user}/{name}", user="Stefan Ghitescu")
+        == "dev/rem/Stefan-Ghitescu/my-thing"
+    )
+
+
+def test_who_the_user_is_has_an_order_the_answers_beat_each_other_in():
+    rules = repo_config.BranchRules(user="configured")
+
+    assert rules.user_for(typed="typed", git="git") == "typed"
+    assert rules.user_for(git="git") == "configured"
+    assert repo_config.BranchRules().user_for(git="git") == "git"
+
+
+def test_the_user_the_window_decided_on_is_the_one_rendered():
+    rules = repo_config.BranchRules(user="configured")
+    who = rules.user_for(typed="rem", git="Stefan")
+
+    assert rules.render("x", pattern="dev/{user}/{name}", user=who) == "dev/rem/x"
+
+
+def test_no_pattern_selected_is_the_name_as_typed():
+    assert repo_config.BranchRules().render("my thing") == "my-thing"
+
+
+def test_a_name_with_slashes_keeps_them():
+    """`feature/login` typed whole is a branch name, not one word."""
+    assert repo_config.BranchRules().render("feature/login") == "feature/login"
+
+
+def test_a_pattern_whose_user_is_unknown_does_not_leave_an_empty_piece(repo):
+    """`dev//thing` is a ref git refuses."""
+    rules = repo_config.BranchRules()
+    assert rules.render("thing", pattern="dev/{user}/{name}") == "dev/thing"
+
+
+def test_the_patterns_round_trip_through_a_file(repo):
+    _write_repo(repo, {"branch": {"patterns": ["rel/{name}", "spike/{user}/{name}"]}})
+    assert repo_config.resolve(repo).branch.patterns == [
+        "rel/{name}",
+        "spike/{user}/{name}",
+    ]
+
+
+def test_a_patterns_list_holding_nonsense_keeps_only_the_patterns(repo):
+    _write_repo(repo, {"branch": {"patterns": ["rel/{name}", 7, None]}})
+    assert repo_config.resolve(repo).branch.patterns == ["rel/{name}"]
+
+
+def test_which_pattern_is_selected_is_the_users_and_is_per_repository():
+    from git_assistant.config import Settings
+
+    settings = Settings()
+    settings.set_branch_pattern("/x/one", "dev/rem/{user}/{name}")
+
+    assert settings.branch_pattern_for("/x/one") == "dev/rem/{user}/{name}"
+    # Not carried across: the plain name is the default, and a convention
+    # chosen for one project must not become the answer for the next clone.
+    assert settings.branch_pattern_for("/x/two") == ""
+
+
+def test_going_back_to_the_plain_name_forgets_the_choice_rather_than_storing_it():
+    from git_assistant.config import Settings
+
+    settings = Settings()
+    settings.set_branch_pattern("/x/one", "dev/rem/{user}/{name}")
+
+    settings.set_branch_pattern("/x/one", "")
+
+    assert settings.branch_pattern == {}
+
+
+def test_a_typed_in_user_is_remembered_per_repository():
+    from git_assistant.config import Settings
+
+    settings = Settings()
+    settings.set_branch_user("/x/one", "  rem  ")
+
+    assert settings.branch_user_for("/x/one") == "rem"
+    assert settings.branch_user_for("/x/two") == ""
+
+
+# ---- names git will actually accept ---------------------------------------------------
+# Checked against `git check-ref-format` in test_branches_panel, which has a real
+# repository. These are the rules that are about a slash-separated piece rather
+# than the whole name, which is why `slug` alone cannot see them.
+@pytest.mark.parametrize(
+    "typed,expected",
+    [
+        ("index.lock", "index"),  # a piece may not end with .lock
+        ("x.lock.lock", "x"),  # nor twice
+        ("a/.hidden", "a/hidden"),  # nor begin with a dot
+        ("sub/.dot", "sub/dot"),
+        ("release.", "release"),  # nor end with one
+        ("a..b", "a.b"),  # `..` is a ref git refuses outright
+        ("a///b", "a/b"),  # an empty piece is no piece
+        ("v1.0", "v1.0"),  # and a dot in the middle is just a dot
+    ],
+)
+def test_a_typed_name_is_made_into_one_git_will_take(typed, expected):
+    assert repo_config.BranchRules().render(typed) == expected
+
+
+@pytest.mark.parametrize("typed", ["///", "----", "...", "   ", ""])
+def test_a_pattern_with_nothing_left_of_the_name_creates_nothing(typed):
+    """The prefix on its own is not the branch anybody asked for.
+
+    `dev/rem/{user}/{name}` with the name slugged away leaves
+    `dev/rem/<who>` -- a real branch name, and the wrong one. It also blocks
+    every later `dev/rem/<who>/...`, because git will not have a branch and a
+    directory of branches with the same name.
+    """
+    rules = repo_config.BranchRules()
+    assert rules.render(typed, pattern="dev/rem/{user}/{name}", user="Stefan") == ""
+
+
+# ---- where each backend is -----------------------------------------------------------
+def test_the_endpoints_are_something_a_repository_can_carry(repo):
+    _write_repo(repo, {"model": {"endpoints": {"ollama": "http://gpu-box.lan:11434/v1"}}})
+    assert repo_config.resolve(repo).model.endpoints == {
+        "ollama": "http://gpu-box.lan:11434/v1"
+    }
+
+
+def test_an_endpoints_map_holding_nonsense_keeps_only_the_addresses(repo):
+    _write_repo(repo, {"model": {"endpoints": {"ollama": "http://x", "bad": 7}}})
+    assert repo_config.resolve(repo).model.endpoints == {"ollama": "http://x"}
+
+
+def test_lm_studios_address_is_read_like_every_other_backends():
+    from git_assistant import providers
+    from git_assistant.config import Settings
+
+    settings = Settings()
+    settings.save = lambda: None
+    bound = repo_config.bind(settings)
+
+    assert bound.base_url == repo_config.LMSTUDIO_ENDPOINT
+    assert providers.get("lmstudio").base_url == repo_config.LMSTUDIO_ENDPOINT
+
+
+def test_a_configured_lm_studio_address_wins():
+    from git_assistant.config import Settings
+
+    repo_config.set_user_values(model={"endpoints": {"lmstudio": "http://box:1234"}})
+    settings = Settings()
+    settings.save = lambda: None
+
+    assert repo_config.bind(settings).base_url == "http://box:1234"
+
+
+def test_the_old_ip_and_port_become_one_address():
+    """Three self-hosted backends asking the same question three ways: now one."""
+    carried = repo_config.user_tier_from(
+        {"lmstudio_ip": "10.0.0.5", "lmstudio_port": 4242}
+    )
+    assert carried["model"]["endpoints"]["lmstudio"] == "http://10.0.0.5:4242"
+
+
+def test_the_old_per_provider_endpoints_are_carried_over_beside_it():
+    carried = repo_config.user_tier_from(
+        {
+            "provider_endpoints": {"ollama": "http://gpu-box.lan:11434/v1"},
+            "lmstudio_ip": "127.0.0.1",
+            "lmstudio_port": 1234,
+        }
+    )
+    assert carried["model"]["endpoints"] == {
+        "ollama": "http://gpu-box.lan:11434/v1",
+        "lmstudio": "http://127.0.0.1:1234",
+    }
+
+
+def test_an_old_file_with_no_addresses_carries_none():
+    assert "endpoints" not in repo_config.user_tier_from({"provider": "claude"}).get(
+        "model", {}
+    )
+
+
+def test_a_half_written_lm_studio_address_is_left_out_rather_than_guessed():
+    """`http://:1234` is not an address anybody meant."""
+    carried = repo_config.user_tier_from({"lmstudio_port": 1234})
+    assert "lmstudio" not in carried.get("model", {}).get("endpoints", {})
+
+
+# ---- what a run is asked, and where its trace goes ------------------------------------
+def test_the_prompt_and_the_tracing_round_trip_through_a_file(repo):
+    _write_repo(
+        repo,
+        {
+            "prompt": {
+                "template": "HOUSE STYLE",
+                "templates": [{"name": "Work", "text": "WORK"}],
+            },
+            "tracing": {"enabled": True, "host": "https://lf.example", "send_prompts": False},
+        },
+    )
+
+    settings = repo_config.resolve(repo)
+
+    assert settings.prompt.template == "HOUSE STYLE"
+    assert settings.prompt.templates == [{"name": "Work", "text": "WORK"}]
+    assert settings.tracing.enabled and settings.tracing.host == "https://lf.example"
+    assert settings.tracing.send_prompts is False
+    assert settings.tracing.environment == "development"  # not set, so the built-in
+
+
+def test_a_template_missing_its_text_is_left_out(repo):
+    _write_repo(repo, {"prompt": {"templates": [{"name": "Broken"}, {"name": "O", "text": "k"}]}})
+    assert repo_config.resolve(repo).prompt.templates == [{"name": "O", "text": "k"}]
+
+
+def test_the_langfuse_names_a_run_reads_are_answered(repo):
+    from git_assistant.config import Settings
+
+    _write_repo(repo, {"tracing": {"enabled": True, "host": "https://lf.example"}})
+    settings = Settings()
+    settings.save = lambda: None
+
+    bound = repo_config.bind(settings, repo)
+
+    assert bound.langfuse_enabled is True
+    assert bound.langfuse_host == "https://lf.example"
+    assert bound.langfuse_send_prompts is True

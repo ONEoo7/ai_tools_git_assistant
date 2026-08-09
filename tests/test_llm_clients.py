@@ -6,6 +6,8 @@ import sys
 import httpx
 import pytest
 
+from conftest import user_tier
+from git_assistant import repo_config
 from git_assistant import credentials, usage
 from git_assistant.claude_client import ClaudeClient, _text_of
 from git_assistant.config import Settings
@@ -106,12 +108,15 @@ def test_model_and_endpoint_are_kept_per_provider():
     s = Settings()
     s.set_provider_model("claude", "claude-opus-5")
     s.set_provider_model("openai", "gpt-4o")
-    s.set_provider_endpoint("azure-ai-foundry", "https://r.openai.azure.com/openai/v1")
+    user_tier(endpoints={"azure-ai-foundry": "https://r.openai.azure.com/openai/v1"})
 
     assert s.provider_model("claude") == "claude-opus-5"
     assert s.provider_model("openai") == "gpt-4o"
-    assert s.provider_endpoint("azure-ai-foundry").startswith("https://")
-    assert s.provider_endpoint("openai") == ""
+    # The address is the repository's setting now, so it is read through the
+    # bound view -- which is what every consumer of it is handed.
+    bound = repo_config.bind(s)
+    assert bound.provider_endpoint("azure-ai-foundry").startswith("https://")
+    assert bound.provider_endpoint("openai") == ""
 
 
 def test_lm_studio_keeps_using_the_original_model_field():
@@ -132,13 +137,19 @@ def test_active_model_follows_the_selected_provider():
     assert s.active_model() == "claude-opus-5"
 
 
-def test_per_provider_maps_round_trip():
+def test_the_model_map_round_trips_through_the_users_own_file():
     s = Settings()
     s.set_provider_model("openai", "gpt-4o")
-    s.set_provider_endpoint("ollama", "http://localhost:11434/v1")
-    restored = Settings.from_dict(s.to_dict())
-    assert restored.provider_model("openai") == "gpt-4o"
-    assert restored.provider_endpoint("ollama") == "http://localhost:11434/v1"
+
+    assert Settings.from_dict(s.to_dict()).provider_model("openai") == "gpt-4o"
+
+
+def test_the_endpoints_round_trip_through_the_settings_a_repository_carries():
+    user_tier(endpoints={"ollama": "http://localhost:11434/v1"})
+
+    assert repo_config.defaults().model.endpoints == {
+        "ollama": "http://localhost:11434/v1"
+    }
 
 
 def test_a_hand_edited_map_of_the_wrong_type_does_not_crash():
@@ -428,9 +439,12 @@ def test_an_overridden_endpoint_beats_the_default():
 
     settings = Settings()
     settings.provider = "ollama"
-    settings.set_provider_endpoint("ollama", "http://gpu-box.lan:11434/v1")
+    user_tier(endpoints={"ollama": "http://gpu-box.lan:11434/v1"})
 
-    assert build_client(settings).base_url == "http://gpu-box.lan:11434/v1"
+    assert (
+        build_client(repo_config.bind(settings)).base_url
+        == "http://gpu-box.lan:11434/v1"
+    )
 
 
 def test_a_trailing_slash_does_not_double_up_the_path():
@@ -439,9 +453,12 @@ def test_a_trailing_slash_does_not_double_up_the_path():
 
     settings = Settings()
     settings.provider = "ollama"
-    settings.set_provider_endpoint("ollama", "http://localhost:11434/v1/")
+    user_tier(endpoints={"ollama": "http://localhost:11434/v1/"})
 
-    assert build_client(settings).base_url == "http://localhost:11434/v1"
+    assert (
+        build_client(repo_config.bind(settings)).base_url
+        == "http://localhost:11434/v1"
+    )
 
 
 # ---- LM Studio: what the server said, and how big its context really is ------

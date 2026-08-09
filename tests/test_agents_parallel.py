@@ -13,6 +13,7 @@ import time
 
 from git_assistant import agents
 from git_assistant.agents.base import AgentInfo, Fact, Report, Section
+from conftest import settings_with
 from git_assistant.config import Settings
 from git_assistant.llm import ModelInfo
 from git_assistant.model_runtime import ModelRuntime
@@ -82,8 +83,7 @@ class _CountingClient:
 
 
 def _settings(**kw) -> Settings:
-    settings = Settings(selected_model="m", context_window=CONTEXT, **kw)
-    settings.save = lambda: None
+    settings = settings_with(selected_model="m", context_window=CONTEXT, **kw)
     return settings
 
 

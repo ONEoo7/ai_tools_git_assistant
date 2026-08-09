@@ -300,28 +300,45 @@ def test_cancelling_stops_the_run(settings, repo):
 
 
 # ---- the rules, stored and read back --------------------------------------------------
-def test_the_rules_survive_the_settings_file(settings):
-    from git_assistant.agents.branches import StaleRules
+# They are a repository's, not the user's: whether a six-month branch is stale
+# is a question about the project. So they round-trip through the settings a
+# repository carries -- see git_assistant.repo_config.StaleRules.
+def test_the_rules_survive_the_settings_file(repo):
+    from git_assistant import repo_config
 
-    settings.set_stale_rules(StaleRules(months=3, protect=["keep/*"], merged_only=False))
+    repo_config.write_text(
+        repo_config.Tier.REPO,
+        str(repo),
+        '{"audit": {"stale": {"months": 3, "protect": ["keep/*"],'
+        ' "merged_only": false}}}',
+    )
 
-    back = Settings.from_dict(settings.to_dict()).stale_rules()
+    back = repo_config.resolve(repo).audit.stale.as_branch_rules()
 
     assert (back.months, back.protect, back.merged_only) == (3, ["keep/*"], False)
 
 
 def test_an_unconfigured_install_gets_working_defaults():
-    rules = Settings().stale_rules()
+    from git_assistant import repo_config
+
+    rules = repo_config.RepoSettings().audit.stale.as_branch_rules()
     assert rules.months == 6 and rules.merged_only and "main" in rules.protect
 
 
-def test_a_hand_edited_file_falls_back_rather_than_raising():
-    settings = Settings.from_dict({"stale_branch_rules": {"months": "half a year"}})
-    assert settings.stale_rules().months == 6
+def test_a_hand_edited_file_falls_back_rather_than_raising(repo):
+    from git_assistant import repo_config
+
+    repo_config.write_text(
+        repo_config.Tier.REPO, str(repo), '{"audit": {"stale": {"months": "half a year"}}}'
+    )
+    assert repo_config.resolve(repo).audit.stale.months == 6
 
 
-def test_nonsense_in_place_of_the_rules_is_ignored():
-    assert Settings.from_dict({"stale_branch_rules": 7}).stale_rules().months == 6
+def test_nonsense_in_place_of_the_rules_is_ignored(repo):
+    from git_assistant import repo_config
+
+    repo_config.write_text(repo_config.Tier.REPO, str(repo), '{"audit": {"stale": 7}}')
+    assert repo_config.resolve(repo).audit.stale.months == 6
 
 
 # ---- narration and comparison know about it -----------------------------------------------

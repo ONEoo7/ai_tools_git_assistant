@@ -2,6 +2,8 @@
 
 import pytest
 
+from conftest import user_tier
+from git_assistant import repo_config
 from git_assistant import providers
 from git_assistant.config import RepoEntry, Settings
 from git_assistant.providers import DEFAULT_PROVIDER, PROVIDERS
@@ -55,8 +57,8 @@ def test_every_implemented_provider_can_be_built(monkeypatch):
         s = Settings()
         s.provider = provider.key
         if not provider.base_url:
-            s.set_provider_endpoint(provider.key, "https://x.example/v1")
-        assert build_client(s) is not None, provider.key
+            user_tier(endpoints={provider.key: "https://x.example/v1"})
+        assert build_client(repo_config.bind(s)) is not None, provider.key
 
 
 def test_keys_are_unique():
@@ -224,7 +226,7 @@ def test_azure_has_no_default_to_prefill(qapp, settings):
 
 def test_a_stored_endpoint_beats_the_prefilled_default(qapp, settings):
     settings.provider = "lemonade"
-    settings.set_provider_endpoint("lemonade", "http://gpu-box.lan:13305/api/v1")
+    user_tier(endpoints={"lemonade": "http://gpu-box.lan:13305/api/v1"})
     dlg = SettingsDialog(settings)
 
     assert dlg.endpoint_edit.text() == "http://gpu-box.lan:13305/api/v1"
@@ -237,7 +239,7 @@ def test_an_untouched_default_is_not_written_into_settings(qapp, settings):
     dlg = SettingsDialog(settings)
     dlg._apply_to_settings()
 
-    assert "lemonade" not in settings.provider_endpoints
+    assert "lemonade" not in repo_config.defaults().model.endpoints
 
 
 def test_an_edited_endpoint_is_written_into_settings(qapp, settings):
@@ -246,4 +248,6 @@ def test_an_edited_endpoint_is_written_into_settings(qapp, settings):
     dlg.endpoint_edit.setText("http://gpu-box.lan:13305/api/v1")
     dlg._apply_to_settings()
 
-    assert settings.provider_endpoint("lemonade") == "http://gpu-box.lan:13305/api/v1"
+    assert repo_config.defaults().model.endpoints["lemonade"] == (
+        "http://gpu-box.lan:13305/api/v1"
+    )

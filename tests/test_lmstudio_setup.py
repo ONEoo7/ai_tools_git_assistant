@@ -200,7 +200,8 @@ def test_the_app_is_pointed_at_what_was_just_installed(home):
 
     assert settings.provider == "lmstudio"
     assert settings.active_model() == "qwen3.5-4b"
-    assert settings.lmstudio_port == 1234
+    # The address goes where the other two local servers keep theirs.
+    assert repo_config.defaults().model.endpoints["lmstudio"] == setup.ENDPOINT
     # The window belongs to the model, so it lands in the User tier -- where
     # every run reads it from. Setting the field on `settings` would leave it
     # somewhere nothing reads.

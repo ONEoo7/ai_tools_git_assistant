@@ -2,6 +2,7 @@
 
 import pytest
 
+from conftest import settings_with
 from git_assistant.agents import narrator, prompts
 from git_assistant.agents.base import AgentContext, Fact, Report, Section, Table
 from git_assistant.agents.facts import facts_block
@@ -64,12 +65,12 @@ def _report(rows=3) -> Report:
 
 
 def _runtime(client, **kw):
-    settings = Settings(selected_model="m", **kw)
+    settings = settings_with(selected_model="m", **kw)
     return ModelRuntime(settings, client)
 
 
 def _ctx():
-    return AgentContext(repo="/repos/demo", settings=Settings())
+    return AgentContext(repo="/repos/demo", settings=settings_with())
 
 
 # ---- the happy path -----------------------------------------------------------
@@ -166,7 +167,7 @@ def test_a_section_with_no_outline_is_left_alone():
 def test_cancelling_stops_before_the_next_section():
     report = _report()
     report.sections.append(Section(number="2", title="More", slot="next_steps"))
-    ctx = AgentContext(repo="/r", settings=Settings(), is_cancelled=lambda: True)
+    ctx = AgentContext(repo="/r", settings=settings_with(), is_cancelled=lambda: True)
 
     with pytest.raises(Exception):
         narrator.narrate(report, _runtime(_Client("x")), ctx)

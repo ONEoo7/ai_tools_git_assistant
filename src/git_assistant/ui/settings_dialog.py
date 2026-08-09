@@ -179,6 +179,16 @@ def _temperature_note(settings, provider, model: str) -> str:
     return f"Remembered for {model}."
 
 
+def _free_name(base: str, taken: set) -> str:
+    """``base``, or ``base (2)``, or the first number after that nobody has."""
+    if base not in taken:
+        return base
+    n = 2
+    while f"{base} ({n})" in taken:
+        n += 1
+    return f"{base} ({n})"
+
+
 class SettingsDialog(QDialog):
     #: Emitted with an `UpdateResult` when the user clicks the "vX.Y.Z
     #: available" readout. The tray connects it to the same handler the tray
@@ -217,14 +227,17 @@ class SettingsDialog(QDialog):
         self.tabs = tabs
         self._ready = False  # set once every tab's widgets exist
         tabs.currentChanged.connect(self._on_tab_changed)
+        # Before the tabs: the Branches tab reads `{user}` out of this, and the
+        # bar above them all shows which one is in force.
+        # Read from their own file, seeded from git on first run.
+        self.identity_store = IdentityStore.bootstrap()
+
         tabs.addTab(self._build_commit_tab(), "Generate Commit Message")
         tabs.addTab(self._build_tags_tab(), "Branches && Tags")
         tabs.addTab(self._build_agents_tab(), "Audit")
         tabs.addTab(self._build_review_tab(), "Code Review")
         tabs.addTab(self._build_connection_tab(), "Connection && Model")
         tabs.addTab(self._build_repos_tab(), "Repositories && Settings")
-        # Identities are read from their own file, seeded from git on first run.
-        self.identity_store = IdentityStore.bootstrap()
         self.identities_panel = IdentitiesPanel(self.identity_store)
         self.identities_tab_index = tabs.addTab(self.identities_panel, "Identities")
         tabs.addTab(self._build_mcp_tab(), "MCP Server")
@@ -245,9 +258,16 @@ class SettingsDialog(QDialog):
         # Editing the list must re-offer it; picking "Manage identities..."
         # is a request for the tab that owns the list.
         self.identities_panel.identitiesChanged.connect(self.identity_bar.refresh)
+        # `{user}` in a branch name is the identity, so a change to either the
+        # list or the one in force changes what the next branch will be called.
+        self.identities_panel.identitiesChanged.connect(self.tags_panel.refresh)
+        self.identity_bar.identityChanged.connect(self.tags_panel.refresh)
         self.identity_bar.manageRequested.connect(
             lambda: tabs.setCurrentIndex(self.identities_tab_index)
         )
+        # The bar decides which settings apply; this pane shows the files. When
+        # the choice changes, the pane opens on the one now in force.
+        self.identity_bar.settingsTierChanged.connect(self._refresh_repo_config)
 
         # Top right, at the end of the same row: the only control here that
         # changes every other one, so it sits where nothing else competes with
@@ -580,7 +600,7 @@ class SettingsDialog(QDialog):
         return self.commit_panel
 
     def _build_tags_tab(self) -> QWidget:
-        self.tags_panel = BranchesTagsPanel(self.settings)
+        self.tags_panel = BranchesTagsPanel(self.settings, self.identity_store)
         return self.tags_panel
 
     def _build_agents_tab(self) -> QWidget:
@@ -656,9 +676,6 @@ class SettingsDialog(QDialog):
         split.setSizes([700, 460])
         outer.addWidget(split)
 
-        self.ip_edit = QLineEdit()
-        self.port_spin = QSpinBox()
-        self.port_spin.setRange(1, 65535)
 
         self.test_btn = QPushButton("Test connection && list models")
         self.test_btn.clicked.connect(self._on_test_connection)
@@ -753,8 +770,6 @@ class SettingsDialog(QDialog):
             "address is not fixed by the vendor."
         )
 
-        form.addRow("LM Studio IP:", self.ip_edit)
-        form.addRow("Port:", self.port_spin)
         form.addRow("", self.setup_row_host)
         form.addRow("", self.setup_status)
         # An agent CLI is installed, not configured: no key, no address, just
@@ -811,8 +826,6 @@ class SettingsDialog(QDialog):
         # would leave its label behind.
         self._provider_rows = {
             "lmstudio_only": (
-                self.ip_edit,
-                self.port_spin,
                 self.setup_row_host,
                 self.setup_status,
             ),
@@ -849,7 +862,8 @@ class SettingsDialog(QDialog):
         # its address is per-resource -- so that field stays empty and the hint
         # is all there is to show.
         self.endpoint_edit.setText(
-            self.settings.provider_endpoint(provider.key) or provider.base_url
+            repo_config.defaults().model.endpoints.get(provider.key)
+            or provider.base_url
         )
         self._refresh_key_status(provider)
 
@@ -919,8 +933,6 @@ class SettingsDialog(QDialog):
             # settings; show them. Targeted rather than a full reload, which
             # would also rebuild the repository tree and discard edits made
             # there but not yet saved.
-            self.ip_edit.setText(self.settings.lmstudio_ip)
-            self.port_spin.setValue(self.settings.lmstudio_port)
             self.ctx_size_spin.setValue(
                 repo_config.defaults().model.context_window
             )
@@ -1254,12 +1266,15 @@ class SettingsDialog(QDialog):
         font.setBold(True)
         header.setFont(font)
 
-        # Which of the three is in force. One is: they are not merged, so this
-        # is the whole answer rather than the top of a stack.
+        # Which file the editor below is showing -- not which one applies.
+        # That choice is "Active Settings", in the bar above the tabs: it
+        # belongs to the repository being worked on rather than to whichever
+        # row happens to be selected in this tree, and separating the two is
+        # what stops opening a file to look at it from switching onto it.
         self.settings_tier_combo = QComboBox()
         self.settings_tier_combo.setToolTip(
-            "Which settings this repository uses. They are not combined -- the "
-            "one chosen here is the one that applies."
+            "Which of the three files to show below. What a run actually uses "
+            "is Active Settings, in the bar above the tabs."
         )
         for tier in repo_config.Tier:
             self.settings_tier_combo.addItem(tier.label(), tier.value)
@@ -1268,7 +1283,7 @@ class SettingsDialog(QDialog):
         tier_row = QHBoxLayout()
         tier_row.addWidget(header)
         tier_row.addSpacing(SECTION_GAP)
-        tier_row.addWidget(QLabel("Active Settings:"))
+        tier_row.addWidget(QLabel("Editing:"))
         tier_row.addWidget(self.settings_tier_combo)
         tier_row.addStretch(1)
         box.addLayout(tier_row)
@@ -1378,12 +1393,14 @@ class SettingsDialog(QDialog):
         self.settings_tier_combo.blockSignals(False)
 
     def _on_settings_tier(self, _index: int) -> None:
-        repo = self._selected_repo_path()
-        if not repo:
-            return
-        self.settings.set_settings_tier(repo, self.settings_tier_combo.currentData())
-        self.settings.save()
-        self._refresh_repo_config(keep_tier=True)
+        """Show another file. Deliberately does not change which one applies.
+
+        It used to. Choosing "Repo" to read what a colleague checked in put the
+        repository onto those settings, which is a side effect nobody asked for
+        from a combo that reads like a view selector -- and it is one now.
+        """
+        if self._selected_repo_path():
+            self._refresh_repo_config(keep_tier=True)
 
     def _refresh_repo_config(self, keep_tier: bool = False) -> None:
         """Show the settings in force for the selected repository.
@@ -1432,9 +1449,14 @@ class SettingsDialog(QDialog):
                 button.setEnabled(present)
 
         self.repo_config_note.setText(_TIER_NOTES[tier])
+        # About what is in force, not about what is on screen: the warning is
+        # that a checked-in file is being ignored, and reading it changes
+        # nothing about that.
+        in_force = repo_config.effective_tier(repo, self.settings.settings_tier(repo))
         self.settings_tier_warning.setText(
             "Not recommended setup, Repo settings exist."
-            if tier is not repo_config.Tier.REPO and repo_config.has_repo_config(repo)
+            if in_force is not repo_config.Tier.REPO
+            and repo_config.has_repo_config(repo)
             else ""
         )
 
@@ -1562,6 +1584,9 @@ class SettingsDialog(QDialog):
             self.settings.set_settings_tier(repo, target.value)
             self.settings.save()
             self._refresh_repo_config()
+            # The fork changed which settings apply, and the control that says
+            # so is in the bar above the tabs.
+            self.identity_bar.refresh()
             self.repo_config_status.setStyleSheet(INFO_COLOUR)
             self.repo_config_status.setText(
                 f"Saved to your Custom settings for this repository. The "
@@ -2011,8 +2036,11 @@ class SettingsDialog(QDialog):
         """
         from dataclasses import replace
 
+        # Read through the bound settings: where a trace goes is one of the
+        # settings a repository carries now, and `self.settings` no longer has
+        # a field of that name for `from_settings` to find.
         return replace(
-            tracing.from_settings(self.settings),
+            tracing.from_settings(repo_config.bind(self.settings)),
             public_key=self.langfuse_public_edit.text().strip(),
         )
 
@@ -2063,8 +2091,6 @@ class SettingsDialog(QDialog):
     # ---- load / save -------------------------------------------------------
     def _load_into_widgets(self) -> None:
         s = self.settings
-        self.ip_edit.setText(s.lmstudio_ip)
-        self.port_spin.setValue(s.lmstudio_port)
         shipped = repo_config.defaults()
         self.parallel_spin.setValue(shipped.model.parallel_calls)
 
@@ -2096,11 +2122,12 @@ class SettingsDialog(QDialog):
         self.subject_limit_spin.setValue(shipped.commit.subject_limit)
         self.body_limit_spin.setValue(shipped.commit.body_limit)
 
-        self.langfuse_check.setChecked(s.langfuse_enabled)
-        self.langfuse_host_edit.setText(s.langfuse_host)
+        traced = repo_config.defaults().tracing
+        self.langfuse_check.setChecked(traced.enabled)
+        self.langfuse_host_edit.setText(traced.host)
         self.langfuse_public_edit.setText(tracing.public_key())
-        self.langfuse_env_edit.setText(s.langfuse_environment)
-        self.langfuse_prompts_check.setChecked(s.langfuse_send_prompts)
+        self.langfuse_env_edit.setText(traced.environment)
+        self.langfuse_prompts_check.setChecked(traced.send_prompts)
         self._refresh_langfuse()
 
         self._update_budget_label()
@@ -2109,8 +2136,6 @@ class SettingsDialog(QDialog):
     # ---- autosave ----------------------------------------------------------
     def _connect_autosave(self) -> None:
         """Persist edits automatically; no Save button to press."""
-        self.ip_edit.textChanged.connect(self._schedule_save)
-        self.port_spin.valueChanged.connect(self._schedule_save)
         self.parallel_spin.valueChanged.connect(self._schedule_save)
         self.endpoint_edit.textChanged.connect(self._schedule_save)
         self.model_combo.currentIndexChanged.connect(self._schedule_save)
@@ -2150,8 +2175,6 @@ class SettingsDialog(QDialog):
     def _apply_to_settings(self) -> None:
         """Copy every widget's value into ``self.settings`` (without saving)."""
         s = self.settings
-        s.lmstudio_ip = self.ip_edit.text().strip() or "127.0.0.1"
-        s.lmstudio_port = self.port_spin.value()
 
         # Model and endpoint belong to the selected provider, so switching does
         # not carry one backend's model name into another's request. The API
@@ -2169,7 +2192,15 @@ class SettingsDialog(QDialog):
         endpoint = self.endpoint_edit.text().strip()
         if endpoint == providers.get(provider_key).base_url:
             endpoint = ""
-        s.set_provider_endpoint(provider_key, endpoint)
+        # The address is a setting, not an account detail: a project can pin
+        # the server it is meant to be generated against. This tab edits the
+        # User tier, as the rest of it does.
+        endpoints = dict(repo_config.defaults().model.endpoints)
+        if endpoint:
+            endpoints[provider_key] = endpoint
+        else:
+            endpoints.pop(provider_key, None)
+        repo_config.set_user_values(model={"endpoints": endpoints})
 
         repos, roots, watched = self._collect_repos_and_roots()
         s.repos = repos
@@ -2234,19 +2265,51 @@ class SettingsDialog(QDialog):
         browser code.
         """
         s = self.settings
-        s.langfuse_enabled = self.langfuse_check.isChecked()
-        s.langfuse_host = self.langfuse_host_edit.text().strip().rstrip("/")
-        s.langfuse_environment = self.langfuse_env_edit.text().strip() or "development"
-        s.langfuse_send_prompts = self.langfuse_prompts_check.isChecked()
+        # Where a run's trace goes is a property of the work, not of the
+        # person: a team that traces one project and not another says so in
+        # that project's settings. This tab edits the User tier, as the rest
+        # of it does. Neither key goes here -- both are in the Credential
+        # Manager; see git_assistant.tracing.
+        repo_config.set_user_values(
+            tracing={
+                "enabled": self.langfuse_check.isChecked(),
+                "host": self.langfuse_host_edit.text().strip().rstrip("/"),
+                "environment": (
+                    self.langfuse_env_edit.text().strip() or "development"
+                ),
+                "send_prompts": self.langfuse_prompts_check.isChecked(),
+            }
+        )
 
     # ---- templates ---------------------------------------------------------
+    # The library lives in the settings a repository can carry, because a
+    # template decides what is sent. This tab is about no repository in
+    # particular, so it reads and writes the User tier -- the answer every
+    # repository without one of its own gets. See repo_config.PromptRules.
+    def _templates(self) -> list:
+        return [
+            Template(name=one.get("name", ""), text=one.get("text", ""))
+            for one in repo_config.user_templates()
+            if one.get("name")
+        ]
+
+    def _template_names(self) -> list[str]:
+        return [DEFAULT_TEMPLATE_NAME, *(one.name for one in self._templates())]
+
+    def _template_text(self, name: str) -> str:
+        if name and name != DEFAULT_TEMPLATE_NAME:
+            for one in self._templates():
+                if one.name == name:
+                    return one.text
+        return repo_config.defaults().prompt.template or DEFAULT_TEMPLATE
+
     def _reload_templates(self, select: str | None = None) -> None:
         """Rebuild the list from settings, keeping (or choosing) a selection."""
         want = select or self.template_list.currentItem()
         want = want if isinstance(want, str) else (want.text() if want else None)
         self.template_list.blockSignals(True)
         self.template_list.clear()
-        self.template_list.addItems(self.settings.template_names())
+        self.template_list.addItems(self._template_names())
         self.template_list.blockSignals(False)
         self._apply_template_filter(self.template_filter.text())
         items = self.template_list.findItems(want or "", Qt.MatchFlag.MatchExactly)
@@ -2274,7 +2337,7 @@ class SettingsDialog(QDialog):
             return
         self.template_name_label.setText(name)
         self.template_edit.blockSignals(True)
-        self.template_edit.setPlainText(self.settings.template_text(name))
+        self.template_edit.setPlainText(self._template_text(name))
         self.template_edit.blockSignals(False)
         self.template_status.setText("")
 
@@ -2285,22 +2348,17 @@ class SettingsDialog(QDialog):
         name = self._current_template()
         text = self.template_edit.toPlainText()
         if name == DEFAULT_TEMPLATE_NAME:
-            self.settings.prompt_template = text
-        else:
-            for t in self.settings.templates:
-                if t.name == name:
-                    t.text = text
-                    break
-        self._schedule_save()
+            repo_config.save_user_prompt(text)
+            return
+        kept = self._templates()
+        for one in kept:
+            if one.name == name:
+                one.text = text
+                break
+        repo_config.save_user_templates(kept)
 
     def _unique_template_name(self, base: str) -> str:
-        existing = set(self.settings.template_names())
-        if base not in existing:
-            return base
-        n = 2
-        while f"{base} ({n})" in existing:
-            n += 1
-        return f"{base} ({n})"
+        return _free_name(base, set(self._template_names()))
 
     def _on_template_new(self) -> None:
         name, ok = QInputDialog.getText(
@@ -2309,20 +2367,20 @@ class SettingsDialog(QDialog):
         name = (name or "").strip()
         if not ok or not name:
             return
-        if name in self.settings.template_names():
+        if name in self._template_names():
             QMessageBox.warning(self, "Name in use", f"'{name}' already exists.")
             return
-        self.settings.templates.append(Template(name=name, text=DEFAULT_TEMPLATE))
-        self._schedule_save()
+        repo_config.save_user_templates(
+            [*self._templates(), Template(name=name, text=DEFAULT_TEMPLATE)]
+        )
         self._reload_templates(select=name)
 
     def _on_template_duplicate(self) -> None:
         source = self._current_template()
         name = self._unique_template_name(f"{source} copy")
-        self.settings.templates.append(
-            Template(name=name, text=self.settings.template_text(source))
+        repo_config.save_user_templates(
+            [*self._templates(), Template(name=name, text=self._template_text(source))]
         )
-        self._schedule_save()
         self._reload_templates(select=name)
 
     def _on_template_rename(self) -> None:
@@ -2336,10 +2394,15 @@ class SettingsDialog(QDialog):
         new = (new or "").strip()
         if not ok or not new or new == old:
             return
-        if new in self.settings.template_names():
+        if new in self._template_names():
             QMessageBox.warning(self, "Name in use", f"'{new}' already exists.")
             return
-        self.settings.rename_template(old, new)  # also repoints repositories
+        kept = self._templates()
+        for one in kept:
+            if one.name == old:
+                one.name = new
+        repo_config.save_user_templates(kept)
+        self.settings.repoint_template(old, new)  # the repositories that named it
         self._schedule_save()
         self._reload_templates(select=new)
 
@@ -2367,7 +2430,10 @@ class SettingsDialog(QDialog):
             != QMessageBox.StandardButton.Yes
         ):
             return
-        self.settings.remove_template(name)
+        repo_config.save_user_templates(
+            [one for one in self._templates() if one.name != name]
+        )
+        self.settings.repoint_template(name, "")
         self._schedule_save()
         self._reload_templates(select=DEFAULT_TEMPLATE_NAME)
 
@@ -2379,7 +2445,7 @@ class SettingsDialog(QDialog):
         )
         if not path:
             return
-        payload = [{"name": name, "text": self.settings.template_text(name)}]
+        payload = [{"name": name, "text": self._template_text(name)}]
         try:
             Path(path).write_text(
                 json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8"
@@ -2403,17 +2469,23 @@ class SettingsDialog(QDialog):
 
         # Accept a single template or a list of them.
         items = data if isinstance(data, list) else [data]
+        kept = self._templates()
         added, last = 0, None
         for item in items:
             if not isinstance(item, dict) or not item.get("name"):
                 continue
-            # Never silently overwrite an existing template.
-            name = self._unique_template_name(str(item["name"]).strip())
-            self.settings.templates.append(
+            # Never silently overwrite an existing template. Checked against
+            # what has been added so far, not only against what was there, so
+            # a file holding the same name twice imports as two templates.
+            taken = {DEFAULT_TEMPLATE_NAME, *(one.name for one in kept)}
+            name = _free_name(str(item["name"]).strip(), taken)
+            kept.append(
                 Template(name=name, text=str(item.get("text", DEFAULT_TEMPLATE)))
             )
             added += 1
             last = name
+        if added:
+            repo_config.save_user_templates(kept)
         if not added:
             QMessageBox.warning(
                 self,

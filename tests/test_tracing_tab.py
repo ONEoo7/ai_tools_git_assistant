@@ -6,6 +6,7 @@ pytest.importorskip("PyQt6.QtWidgets")
 
 from PyQt6.QtWidgets import QApplication  # noqa: E402
 
+from git_assistant import repo_config
 from git_assistant import credentials, tracing  # noqa: E402
 from git_assistant.config import Settings  # noqa: E402
 from git_assistant.tracing import settings as trace_settings  # noqa: E402
@@ -70,8 +71,11 @@ def test_the_fields_are_saved(dialog, settings):
     _fill(dialog)
     dialog._apply_to_settings()
 
-    assert settings.langfuse_enabled
-    assert settings.langfuse_host == "https://langfuse.example"
+    # Where a trace goes is a setting a repository can carry, so the tab
+    # writes the User tier -- the answer every repository without one gets.
+    traced = repo_config.defaults().tracing
+    assert traced.enabled
+    assert traced.host == "https://langfuse.example"
 
 
 def test_both_keys_go_to_the_credential_manager_and_neither_to_settings(
@@ -129,13 +133,13 @@ def test_removing_the_keys_deletes_both(dialog, store):
 def test_a_trailing_slash_on_the_host_is_dropped(dialog, settings):
     dialog.langfuse_host_edit.setText("https://langfuse.example/")
     dialog._apply_to_settings()
-    assert settings.langfuse_host == "https://langfuse.example"
+    assert repo_config.defaults().tracing.host == "https://langfuse.example"
 
 
 def test_an_empty_environment_falls_back_rather_than_being_blank(dialog, settings):
     dialog.langfuse_env_edit.setText("   ")
     dialog._apply_to_settings()
-    assert settings.langfuse_environment == "development"
+    assert repo_config.defaults().tracing.environment == "development"
 
 
 # ---- what the status line says ----------------------------------------------------
@@ -221,5 +225,5 @@ def test_prompts_are_sent_by_default_and_can_be_withheld(dialog, settings):
     dialog.langfuse_prompts_check.setChecked(False)
     dialog._apply_to_settings()
 
-    assert not settings.langfuse_send_prompts
-    assert not trace_settings.from_settings(settings).send_prompts
+    assert not repo_config.defaults().tracing.send_prompts
+    assert not trace_settings.from_settings(repo_config.bind(settings)).send_prompts

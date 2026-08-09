@@ -38,6 +38,8 @@ MODEL_QUANT = "Q8_0"
 MODEL_FILE = "Qwen3.5-4B-Q8_0.gguf"
 #: What the app should be configured to use once the model is there.
 CONTEXT_LENGTH = 32768
+#: Where the local server listens, which is what this setup configures it for.
+ENDPOINT = "http://127.0.0.1:1234"
 
 #: winget's "there is nothing newer to install", which is a success for us.
 _WINGET_NO_UPDATE = 0x8A15002B
@@ -335,15 +337,17 @@ def configure_model(ctx: SetupContext) -> str:
 def point_app_at_it(ctx: SetupContext, settings) -> str:
     """Select the provider, model and context window in this application."""
     settings.provider = "lmstudio"
-    settings.lmstudio_ip = "127.0.0.1"
-    settings.lmstudio_port = 1234
     settings.set_provider_model("lmstudio", "qwen3.5-4b")
     settings.save()
     # The window belongs to the model, not to a repository, so it goes in the
     # User tier -- the answer every repository without one of its own gets. A
     # repository that has said otherwise keeps what it said: silently
     # overwriting it would undo a deliberate choice.
-    repo_config.set_user_values(model={"context_window": CONTEXT_LENGTH})
+    endpoints = dict(repo_config.defaults().model.endpoints)
+    endpoints["lmstudio"] = ENDPOINT
+    repo_config.set_user_values(
+        model={"context_window": CONTEXT_LENGTH, "endpoints": endpoints}
+    )
     return "provider, model and context window set"
 
 

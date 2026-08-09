@@ -75,67 +75,166 @@ def _set_repo_config(repo, data):
     path.write_text(json.dumps(data), encoding="utf-8")
 
 
-# ---- what a new branch will be called -----------------------------------------
-def test_the_whole_name_is_shown_before_the_branch_is_created(panel):
-    """A pattern nobody can see is a rule nobody can follow."""
-    panel.branch_name_edit.setText("new-thing")
+def _use_pattern(panel, pattern=""):
+    """Switch to the pattern card, as clicking it does, and pick a pattern."""
+    panel._on_card_picked(panel.pattern_card)
+    if pattern:
+        combo = panel.pattern_card.pattern_combo
+        combo.setCurrentIndex(combo.findData(pattern))
+    return panel.pattern_card
 
-    assert "new-thing" in panel.branch_preview.text()
+
+# ---- what a new branch will be called -----------------------------------------
+def test_the_tab_opens_on_the_plain_name(panel):
+    """Most branches are not part of anybody's convention."""
+    assert panel.plain_card.radio.isChecked()
+    assert not panel.pattern_card.radio.isChecked()
+
+
+def test_the_plain_card_creates_exactly_what_was_typed(panel):
+    panel.plain_card.name_edit.setText("new-thing")
+
+    assert "Will create:  new-thing" in panel.branch_preview.text()
     assert panel.create_branch_btn.isEnabled()
 
 
-def test_the_projects_pattern_is_what_the_name_is_built_from(panel, repo):
-    _set_repo_config(repo, {"branch": {"pattern": "dev/rem/{user}/{name}", "user": "sg"}})
+def test_a_slash_typed_into_the_plain_card_is_kept(panel):
+    """`feature/login` typed whole is a branch name, not one word."""
+    panel.plain_card.name_edit.setText("feature/login")
+    assert "feature/login" in panel.branch_preview.text()
+
+
+def test_the_patterns_are_offered_without_configuring_anything(panel):
+    combo = panel.pattern_card.pattern_combo
+    offered = [combo.itemData(i) for i in range(combo.count())]
+    assert offered == ["dev/rem/{user}/{name}", "test/rem/{user}/{name}"]
+
+
+def test_a_pattern_names_the_branch_after_the_user_and_what_was_typed(panel):
+    """A pattern nobody can see is a rule nobody can follow."""
+    card = _use_pattern(panel, "dev/rem/{user}/{name}")
+    card.name_edit.setText("new thing")
+
+    assert "dev/rem/Stefan-Ghitescu/new-thing" in panel.branch_preview.text()
+
+
+def test_the_user_can_be_typed_in_instead_of_gits(panel):
+    card = _use_pattern(panel, "dev/rem/{user}/{name}")
+    card.user_edit.setText("rem")
+    card.name_edit.setText("thing")
+
+    assert "dev/rem/rem/thing" in panel.branch_preview.text()
+
+
+def test_the_projects_own_pattern_is_offered_first(panel, repo):
+    _set_repo_config(
+        repo, {"branch": {"pattern": "dev/rem/{user}/{name}", "user": "sg"}}
+    )
     panel._reload_config()
 
-    panel.branch_name_edit.setText("new thing")
+    assert panel.pattern_card.pattern_combo.itemData(0) == "dev/rem/{user}/{name}"
 
+    card = _use_pattern(panel, "dev/rem/{user}/{name}")
+    card.name_edit.setText("new thing")
     assert "dev/rem/sg/new-thing" in panel.branch_preview.text()
-    assert "dev/rem/{user}/{name}" in panel.branch_pattern_note.text()
 
 
-def test_the_note_says_which_settings_the_pattern_came_from(panel, repo):
+def test_the_note_says_which_settings_the_patterns_came_from(panel, repo):
     """Named by tier: which settings are in force is what the user chose."""
+    _use_pattern(panel)
     assert "User settings" in panel.branch_pattern_note.text()
 
-    _set_repo_config(repo, {"branch": {"pattern": "x/{name}"}})
+    _set_repo_config(repo, {"branch": {"patterns": ["x/{name}"]}})
     panel._reload_config()
+    _use_pattern(panel)
 
     assert "Repo settings" in panel.branch_pattern_note.text()
 
 
-def test_the_user_comes_from_git_when_the_project_does_not_name_one(panel, repo):
-    """repo_config runs no git; this is the caller that can."""
-    _set_repo_config(repo, {"branch": {"pattern": "{user}/{name}"}})
-    panel._reload_config()
+def test_the_plain_card_says_it_adds_nothing(panel):
+    assert "what you type" in panel.branch_pattern_note.text()
 
-    panel.branch_name_edit.setText("thing")
+
+def test_the_user_comes_from_git_when_nobody_names_one(panel, repo):
+    """repo_config runs no git; this is the caller that can."""
+    _set_repo_config(repo, {"branch": {"patterns": ["{user}/{name}"]}})
+    panel._reload_config()
+    card = _use_pattern(panel, "{user}/{name}")
+
+    card.name_edit.setText("thing")
 
     assert "Stefan-Ghitescu/thing" in panel.branch_preview.text()
 
 
 def test_a_name_that_leaves_nothing_usable_cannot_be_created(panel):
-    panel.branch_name_edit.setText("///")
+    panel.plain_card.name_edit.setText("///")
 
     assert panel.branch_preview.text() == ""
     assert not panel.create_branch_btn.isEnabled()
 
 
 def test_an_empty_name_is_not_a_branch(panel):
-    panel.branch_name_edit.setText("")
+    panel.plain_card.name_edit.setText("")
     assert not panel.create_branch_btn.isEnabled()
+
+
+# ---- what is remembered ---------------------------------------------------------
+def test_the_chosen_pattern_is_remembered_for_this_repository(panel, repo):
+    _use_pattern(panel, "test/rem/{user}/{name}")
+
+    assert panel.settings.branch_pattern_for(str(repo)) == "test/rem/{user}/{name}"
+    assert panel.settings.branch_pattern_for("/somewhere/else") == ""
+
+
+def test_going_back_to_the_plain_card_forgets_the_pattern(panel, repo):
+    _use_pattern(panel, "test/rem/{user}/{name}")
+
+    panel._on_card_picked(panel.plain_card)
+
+    assert panel.settings.branch_pattern_for(str(repo)) == ""
+
+
+def test_a_remembered_pattern_is_what_the_tab_opens_on(panel, repo):
+    panel.settings.set_branch_pattern(str(repo), "test/rem/{user}/{name}")
+    panel.settings.set_branch_user(str(repo), "rem")
+
+    panel._reload_config()
+
+    assert panel.pattern_card.radio.isChecked()
+    assert panel.pattern_card.pattern_combo.currentData() == "test/rem/{user}/{name}"
+    assert panel.pattern_card.user_edit.text() == "rem"
+
+
+def test_a_pattern_that_is_no_longer_offered_is_still_the_one_selected(panel, repo):
+    """Dropping it silently would rename the next branch without saying so."""
+    panel.settings.set_branch_pattern(str(repo), "gone/{name}")
+
+    panel._reload_config()
+
+    assert panel.pattern_card.pattern_combo.currentData() == "gone/{name}"
+
+
+def test_the_choice_is_not_written_into_any_repositorys_settings(panel, repo):
+    """A selection must not make a settings file nobody asked for."""
+    _use_pattern(panel, "test/rem/{user}/{name}")
+
+    assert not repo_config.exists(repo_config.Tier.CUSTOM, str(repo))
+    assert not repo_config.exists(repo_config.Tier.REPO, str(repo))
 
 
 # ---- creating ------------------------------------------------------------------
 def test_creating_makes_the_branch_the_preview_promised(panel, repo):
-    _set_repo_config(repo, {"branch": {"pattern": "dev/rem/{user}/{name}", "user": "sg"}})
+    _set_repo_config(
+        repo, {"branch": {"patterns": ["dev/rem/{user}/{name}"], "user": "sg"}}
+    )
     panel._reload_config()
-    panel.branch_name_edit.setText("the-thing")
+    card = _use_pattern(panel, "dev/rem/{user}/{name}")
+    card.name_edit.setText("the-thing")
 
     panel._on_create_branch()
 
     assert git_ops.current_branch(repo) == "dev/rem/sg/the-thing"
-    assert panel.branch_name_edit.text() == ""  # ready for the next one
+    assert card.name_edit.text() == ""  # ready for the next one
     assert "dev/rem/sg/the-thing" in panel.branch_status.text()
 
 
@@ -145,7 +244,7 @@ def test_creating_one_that_exists_says_so_rather_than_moving_it(
     git_ops.create_branch(repo, "taken", switch=False)
     warned = []
     monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: warned.append(a[2]))
-    panel.branch_name_edit.setText("taken")
+    panel.plain_card.name_edit.setText("taken")
 
     panel._on_create_branch()
 
@@ -153,7 +252,7 @@ def test_creating_one_that_exists_says_so_rather_than_moving_it(
 
 
 def test_a_new_branch_appears_in_the_list_as_the_current_one(panel, repo):
-    panel.branch_name_edit.setText("fresh")
+    panel.plain_card.name_edit.setText("fresh")
     panel._on_create_branch()
 
     rows = [
@@ -369,3 +468,196 @@ def test_a_failed_remote_command_re_enables_the_buttons(panel, repo, monkeypatch
 
     assert panel.fetch_btn.isEnabled()
     assert "failed" in panel.branch_status.text().lower()
+
+
+# ---- against git itself, not against my reading of the manual -------------------------
+@pytest.mark.parametrize(
+    "typed",
+    [
+        "Stefan Ghitescu",
+        "JIRA-412 fix login",
+        "feature/login",
+        "index.lock",
+        ".hidden",
+        "a/.hidden",
+        "release.",
+        "a..b",
+        "wip~1",
+        "user@{now}",
+        r"back\slash",
+        "caret^and:colon",
+        "star*and?q[",
+        "  spaced  ",
+        "a///b",
+        "x.lock/y",
+    ],
+)
+def test_whatever_is_typed_becomes_a_name_git_will_take(panel, typed):
+    """`git check-ref-format` is the authority, so it is what the test asks.
+
+    A name this application offers on screen and git then refuses is the worst
+    of both: the user read it, pressed the button, and got a fatal several
+    seconds later with none of their words in it.
+    """
+    card = _use_pattern(panel, "dev/rem/{user}/{name}")
+    card.name_edit.setText(typed)
+
+    name = panel._full_branch_name()
+    if not name:
+        assert not panel.create_branch_btn.isEnabled()
+        return
+    assert (
+        subprocess.run(
+            ["git", "check-ref-format", "--branch", name], capture_output=True
+        ).returncode
+        == 0
+    ), name
+
+
+def test_a_branch_the_preview_promised_can_really_be_created(panel, repo):
+    """The end of it: git itself takes the name, not just check-ref-format."""
+    card = _use_pattern(panel, "dev/rem/{user}/{name}")
+    card.name_edit.setText("index.lock and spaces")
+
+    panel._on_create_branch()
+
+    # `.lock` only has to go from the *end* of a piece, and it is not at the
+    # end of this one -- git takes it, so it is kept rather than mangled.
+    assert (
+        git_ops.current_branch(repo)
+        == "dev/rem/Stefan-Ghitescu/index.lock-and-spaces"
+    )
+
+
+def test_a_name_that_is_only_lock_is_not_left_as_a_ref_git_refuses(panel, repo):
+    card = _use_pattern(panel, "dev/rem/{user}/{name}")
+    card.name_edit.setText("index.lock")
+
+    panel._on_create_branch()
+
+    assert git_ops.current_branch(repo) == "dev/rem/Stefan-Ghitescu/index"
+
+
+# ---- a name git has no room for ------------------------------------------------------
+def test_a_branch_in_the_way_is_said_before_the_button_is_pressed(panel, repo):
+    """Git's own message arrives after the click. This one arrives while typing."""
+    _git(repo, "branch", "dev")
+    panel._reload_branches()
+    card = _use_pattern(panel, "dev/rem/{user}/{name}")
+
+    card.name_edit.setText("login")
+
+    assert "'dev' is already a branch" in panel.branch_conflict.text()
+    assert not panel.create_branch_btn.isEnabled()
+
+
+def test_the_name_is_still_shown_so_the_problem_is_readable(panel, repo):
+    """Hiding the name would leave a warning about something invisible."""
+    _git(repo, "branch", "dev")
+    panel._reload_branches()
+    card = _use_pattern(panel, "dev/rem/{user}/{name}")
+
+    card.name_edit.setText("login")
+
+    assert "dev/rem/Stefan-Ghitescu/login" in panel.branch_preview.text()
+
+
+def test_a_name_that_is_already_a_folder_of_branches_says_the_other_thing(panel, repo):
+    _git(repo, "branch", "dev/rem/x")
+    panel._reload_branches()
+    panel.plain_card.name_edit.setText("dev/rem")
+
+    assert "already a folder of branches" in panel.branch_conflict.text()
+    assert not panel.create_branch_btn.isEnabled()
+
+
+def test_nothing_is_said_when_there_is_no_conflict(panel, repo):
+    card = _use_pattern(panel, "dev/rem/{user}/{name}")
+    card.name_edit.setText("login")
+
+    assert panel.branch_conflict.text() == ""
+    assert panel.create_branch_btn.isEnabled()
+
+
+def test_deleting_what_was_in_the_way_clears_the_warning(panel, repo):
+    _git(repo, "branch", "dev")
+    panel._reload_branches()
+    card = _use_pattern(panel, "dev/rem/{user}/{name}")
+    card.name_edit.setText("login")
+    assert panel.branch_conflict.text()
+
+    _git(repo, "branch", "-D", "dev")
+    panel._reload_branches()
+
+    assert panel.branch_conflict.text() == ""
+    assert panel.create_branch_btn.isEnabled()
+
+
+# ---- who {user} is --------------------------------------------------------------------
+def _identity(name, email):
+    from git_assistant.identities import Identity, IdentityStore
+
+    return IdentityStore([Identity(name=name, email=email)])
+
+
+def test_the_user_is_the_saved_identity_rather_than_what_git_says(qapp, repo):
+    """The saved name is the one the user curated, and the one the bar shows.
+
+    Git's `user.name` in a repository is whatever was typed into a config file
+    once. A commit stamped with that email should not put a second spelling of
+    the same person into a branch name.
+    """
+    _git(repo, "config", "user.email", "s@e.example")
+    _git(repo, "config", "user.name", "stefan g")
+    settings = Settings(repos=[RepoEntry(str(repo))], active_repo=str(repo))
+    settings.save = lambda: None
+
+    panel = BranchesTagsPanel(settings, _identity("Stefan Ghitescu", "s@e.example"))
+    card = _use_pattern(panel, "dev/rem/{user}/{name}")
+    card.name_edit.setText("thing")
+
+    assert "dev/rem/Stefan-Ghitescu/thing" in panel.branch_preview.text()
+
+
+def test_an_email_nobody_saved_falls_back_to_what_git_says(qapp, repo):
+    """Which is every repository until somebody saves the identity."""
+    _git(repo, "config", "user.email", "someone@else.example")
+    _git(repo, "config", "user.name", "Someone Else")
+    settings = Settings(repos=[RepoEntry(str(repo))], active_repo=str(repo))
+    settings.save = lambda: None
+
+    panel = BranchesTagsPanel(settings, _identity("Stefan Ghitescu", "s@e.example"))
+    card = _use_pattern(panel, "dev/rem/{user}/{name}")
+    card.name_edit.setText("thing")
+
+    assert "dev/rem/Someone-Else/thing" in panel.branch_preview.text()
+
+
+def test_the_email_is_matched_whatever_its_case(qapp, repo):
+    _git(repo, "config", "user.email", "S@E.Example")
+    _git(repo, "config", "user.name", "typed by hand")
+    settings = Settings(repos=[RepoEntry(str(repo))], active_repo=str(repo))
+    settings.save = lambda: None
+
+    panel = BranchesTagsPanel(settings, _identity("Stefan Ghitescu", "s@e.example"))
+    card = _use_pattern(panel, "dev/rem/{user}/{name}")
+    card.name_edit.setText("thing")
+
+    assert "dev/rem/Stefan-Ghitescu/thing" in panel.branch_preview.text()
+
+
+def test_an_identity_saved_without_a_name_does_not_blank_the_user(qapp, repo):
+    """An identity is an email; the name is optional and often left out."""
+    from git_assistant.identities import Identity, IdentityStore
+
+    _git(repo, "config", "user.email", "s@e.example")
+    _git(repo, "config", "user.name", "Stefan Ghitescu")
+    settings = Settings(repos=[RepoEntry(str(repo))], active_repo=str(repo))
+    settings.save = lambda: None
+    store = IdentityStore([Identity(name="", email="s@e.example")])
+
+    panel = BranchesTagsPanel(settings, store)
+    card = _use_pattern(panel, "dev/rem/{user}/{name}")
+    card.name_edit.setText("thing")
+
+    assert "dev/rem/Stefan-Ghitescu/thing" in panel.branch_preview.text()

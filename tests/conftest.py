@@ -22,6 +22,7 @@ import pytest
 #: Each module here reads `user_config_dir` at call time, which is what makes
 #: redirecting it enough.
 _STORES = (
+    "git_assistant.config",
     "git_assistant.repo_config",
     "git_assistant.settings_backup",
     "git_assistant.commit_history",
@@ -80,3 +81,72 @@ def _no_unanswered_dialogs(monkeypatch):
     for name in _MODALS:
         if hasattr(box, name):
             monkeypatch.setattr(box, name, staticmethod(refuse(name)))
+
+
+def user_tier(**values):
+    """Set repo-scoped values in the user tier, for settings that already exist.
+
+    The names are the ones deep code reads -- ``langfuse_host``,
+    ``context_window`` -- which are keys in the settings a repository carries
+    and no longer fields on ``Settings``. ``endpoints`` is spelled out because
+    it is a map rather than one value.
+    """
+    from git_assistant import repo_config
+
+    rules: dict = {}
+    for name, value in values.items():
+        if name == "endpoints":
+            rules.setdefault("model", {})["endpoints"] = value
+            continue
+        section, key = repo_config._BOUND[name]
+        rules.setdefault(section, {})[key] = value
+    data = repo_config.source_dict(repo_config.Tier.USER)
+    for section, entries in rules.items():
+        data.setdefault(section, {}).update(entries)
+    repo_config.write_text(repo_config.Tier.USER, "", repo_config.text_from(data))
+
+
+def settings_with(settings=None, **values):
+    """Settings for a test, with the repo-scoped half written to the user tier.
+
+    These names -- ``context_window``, ``diff_mode``, ``ignore_globs`` and the
+    rest -- used to be fields on ``Settings`` and are now the settings a
+    repository carries. Production reads them through ``repo_config.bind``, so
+    a test that wants to set one has to say where it lives; this is the one
+    line that says it.
+
+    Anything not repo-scoped is passed straight to ``Settings``, so a single
+    call still sets a provider and a context window together the way the old
+    constructor did.
+
+    Returns the bound view, which is what every consumer of these is handed.
+    """
+    from git_assistant import repo_config
+    from git_assistant.config import Settings
+
+    rules: dict = {}
+    for name in list(values):
+        where = repo_config._BOUND.get(name)
+        if where is None:
+            continue
+        section, key = where
+        rules.setdefault(section, {})[key] = values.pop(name)
+    stale = values.pop("stale", None)
+    if stale is not None:
+        rules.setdefault("audit", {})["stale"] = stale
+    endpoints = values.pop("endpoints", None)
+    if endpoints is not None:
+        rules.setdefault("model", {})["endpoints"] = endpoints
+
+    if rules:
+        data = repo_config.source_dict(repo_config.Tier.USER)
+        for section, entries in rules.items():
+            data.setdefault(section, {}).update(entries)
+        repo_config.write_text(repo_config.Tier.USER, "", repo_config.text_from(data))
+
+    base = settings if settings is not None else Settings(**values)
+    if settings is not None:
+        for name, value in values.items():
+            setattr(base, name, value)
+    base.save = lambda: None
+    return repo_config.bind(base, base.active_repo)

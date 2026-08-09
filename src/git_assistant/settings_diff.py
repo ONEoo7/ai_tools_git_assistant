@@ -13,6 +13,8 @@ textual diff would report a change nobody made.
 from __future__ import annotations
 
 import json
+
+from git_assistant import jsonc
 from dataclasses import dataclass
 from enum import StrEnum
 
@@ -141,7 +143,7 @@ def merged(left: object, right: object, taken: dict[str, str]) -> dict:
 def parse(text: str) -> dict:
     """``text`` as settings, or ``{}``. For comparing against what is on disk."""
     try:
-        data = json.loads(text)
+        data = jsonc.loads(text)
     except (json.JSONDecodeError, TypeError):
         return {}
     return data if isinstance(data, dict) else {}

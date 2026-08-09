@@ -30,24 +30,62 @@ from PyQt6.QtWidgets import (
 
 from git_assistant import git_ops, repo_config, versioning
 from git_assistant.config import Settings
+from git_assistant.identities import IdentityStore
 from git_assistant.ui.preview_dialog import SECTION_GAP
+from git_assistant.ui.branch_cards import (
+    PatternBranchCard,
+    PlainBranchCard,
+    offered_or_default,
+)
 from git_assistant.ui.repo_picker import RepoPicker
 from git_assistant.ui.workers import FunctionWorker, run_worker
 
 CUSTOM = "custom"
 MUTED_COLOUR = "color: #888;"
 INFO_COLOUR = "color: #8ab;"
+WARN_COLOUR = "color: #b36b00;"
+
+
+def _conflict_note(name: str, blocking: str) -> str:
+    """Why git will refuse ``name``, in the words of the thing in the way.
+
+    Both directions of the same rule, said as the two different problems they
+    are: one is "there is already a branch called that", the other is "that
+    name is already a folder of branches".
+    """
+    if not blocking:
+        return ""
+    if blocking.startswith(f"{name}/"):
+        return (
+            f"Cannot create: '{blocking}' is a branch, so '{name}' is already a "
+            "folder of branches and cannot be one itself."
+        )
+    return (
+        f"Cannot create: '{blocking}' is already a branch, so nothing can be "
+        f"created under '{blocking}/'. Rename or delete it first."
+    )
 
 
 class BranchesTagsPanel(QWidget):
     """Create branches from the project's naming rules, and release tags."""
 
-    def __init__(self, settings: Settings, parent=None) -> None:
+    def __init__(self, settings: Settings, store=None, parent=None) -> None:
         super().__init__(parent)
         self.settings = settings
+        #: The committer identities, which is where `{user}` comes from. The
+        #: window's own store when it has one, so the name here is the name the
+        #: "Commit as" row is showing rather than a second opinion about it.
+        self.identities = store if store is not None else IdentityStore.bootstrap()
         self._thread = None
         self._worker = None
         self._current = None  # versioning.Version | None
+        #: True while a stored choice is being put back on screen, so that
+        #: restoring it is not written back as though someone had chosen it.
+        self._loading = False
+        #: Every local branch by name, for the conflict check the preview runs
+        #: on each keystroke. Refreshed with the list on screen; see
+        #: git_ops.blocking_branch for what it is asked.
+        self._branch_names: list[str] = []
         #: The selected repository's settings, resolved when the repository
         #: changes and held: the branch-name preview asks for them on every
         #: keystroke, and that is a decision about this screen rather than a
@@ -174,16 +212,19 @@ class BranchesTagsPanel(QWidget):
         box.addWidget(header)
 
         # ---- what the project calls a new branch ----------------------------
+        # Two cards, not one field: a convention is worth seeing before it is
+        # applied, and the plain name is not a value of the convention -- it is
+        # the absence of one. See git_assistant.ui.branch_cards.
         new_box = QGroupBox("New branch")
         new_layout = QVBoxLayout(new_box)
-        name_row = QHBoxLayout()
-        name_row.addWidget(QLabel("Name:"))
-        self.branch_name_edit = QLineEdit()
-        self.branch_name_edit.setPlaceholderText("what you are about to work on")
-        self.branch_name_edit.textChanged.connect(self._update_branch_preview)
-        self.branch_name_edit.returnPressed.connect(self._on_create_branch)
-        name_row.addWidget(self.branch_name_edit, 1)
-        new_layout.addLayout(name_row)
+
+        self.plain_card = PlainBranchCard()
+        self.pattern_card = PatternBranchCard()
+        for card in (self.plain_card, self.pattern_card):
+            card.picked.connect(lambda c=card: self._on_card_picked(c))
+            card.changed.connect(self._on_card_changed)
+            card.submitted.connect(self._on_create_branch)
+            new_layout.addWidget(card)
 
         # The whole name, before it is created rather than after. The pattern
         # comes from the repository, and a pattern nobody can see is a rule
@@ -194,6 +235,13 @@ class BranchesTagsPanel(QWidget):
             Qt.TextInteractionFlag.TextSelectableByMouse
         )
         new_layout.addWidget(self.branch_preview)
+
+        # Only ever says one thing, and only when it is true: that git will
+        # refuse this name because of a branch that already exists.
+        self.branch_conflict = QLabel("")
+        self.branch_conflict.setWordWrap(True)
+        self.branch_conflict.setStyleSheet(WARN_COLOUR)
+        new_layout.addWidget(self.branch_conflict)
 
         self.branch_pattern_note = QLabel("")
         self.branch_pattern_note.setWordWrap(True)
@@ -275,34 +323,126 @@ class BranchesTagsPanel(QWidget):
                 font.setBold(True)
                 item.setFont(0, font)
             self.branch_list.addTopLevelItem(item)
+        self._branch_names = [
+            self.branch_list.topLevelItem(i).data(0, Qt.ItemDataRole.UserRole).name
+            for i in range(self.branch_list.topLevelItemCount())
+        ]
         self._on_branch_selection()
+        # The list is what the conflict check reads, and it just changed.
+        self._update_branch_preview()
 
     def _reload_config(self) -> None:
         """Re-read this repository's rules, and who git thinks we are."""
         repo = self._repo_path()
         self._config = repo_config.resolve(repo, self.settings.settings_tier(repo))
-        # `{user}` blank in the config means "ask git", and this is the caller
-        # that can: repo_config runs none of it.
-        self._git_user = git_ops.get_identity(repo)[0] if repo else ""
+        self._git_user = self._who_i_am(repo)
+        self._loading = True  # restoring a choice is not making one
+        try:
+            self._show_stored_card()
+        finally:
+            self._loading = False
+        #: Every local branch by name, for the conflict check the preview runs
+        #: on each keystroke. Refreshed with the list on screen; see
+        #: git_ops.blocking_branch for what it is asked.
+        self._branch_names: list[str] = []
         self._update_branch_preview()
 
+    # ---- the two ways of naming one -----------------------------------------
+    def _card(self):
+        """The card in use: the one that says what would be created."""
+        return self.pattern_card if self.pattern_card.radio.isChecked() else (
+            self.plain_card
+        )
+
+    def _on_card_picked(self, card) -> None:
+        for other in (self.plain_card, self.pattern_card):
+            other.set_selected(other is card)
+        self._remember_card()
+        self._update_branch_preview()
+
+    def _on_card_changed(self) -> None:
+        self._remember_card()
+        self._update_branch_preview()
+
+    def _remember_card(self) -> None:
+        """Which pattern, and any user typed in. The user's, not the repository's.
+
+        A selection: it decides what the next name looks like here and says
+        nothing about how anyone else should name a branch, so it does not go
+        anywhere a repository could carry it.
+        """
+        if self._loading:
+            return
+        repo = self._repo_path()
+        if not repo:
+            return
+        chosen = self.pattern_card.pattern() if self._card() is self.pattern_card else ""
+        typed_user = self.pattern_card.typed_user()
+        if (
+            chosen == self.settings.branch_pattern_for(repo)
+            and typed_user == self.settings.branch_user_for(repo)
+        ):
+            return
+        self.settings.set_branch_pattern(repo, chosen)
+        self.settings.set_branch_user(repo, typed_user)
+        self.settings.save()
+
+    def _show_stored_card(self) -> None:
+        """Open on what was chosen here, or on the plain name."""
+        repo = self._repo_path()
+        rules = self._config.branch
+        chosen = self.settings.branch_pattern_for(repo)
+        self.pattern_card.show_patterns(offered_or_default(rules), chosen)
+        self.pattern_card.show_user(self.settings.branch_user_for(repo))
+        using = self.pattern_card if chosen else self.plain_card
+        for card in (self.plain_card, self.pattern_card):
+            card.set_selected(card is using)
+
+    def _who_i_am(self, repo: str) -> str:
+        """The name `{user}` stands for: the saved identity, else git's.
+
+        Git is asked which email is configured here -- ``repo_config`` runs
+        none of it, so this is the caller that can -- and the answer is looked
+        up in the saved identities. The name on the identity wins, because that
+        is the one the user curated and the one the "Commit as" row is showing.
+        A commit stamped `stefan.ghitescu@work.example` should not put a
+        different spelling of the same person into a branch name.
+
+        Falls back to what git says when the email is not one of the saved
+        ones, which is every repository until somebody saves it.
+        """
+        if not repo:
+            return ""
+        name, email = git_ops.get_identity(repo)
+        found = self.identities.find(email)
+        return (found.name if found and found.name else name) or ""
+
     def _full_branch_name(self) -> str:
-        return self._config.branch.render(
-            self.branch_name_edit.text(), user=self._git_user
+        card = self._card()
+        rules = self._config.branch
+        return rules.render(
+            card.typed(),
+            pattern=card.pattern() or repo_config.PLAIN,
+            user=rules.user_for(card.typed_user(), self._git_user),
         )
 
     def _update_branch_preview(self, _text: str = "") -> None:
-        pattern = self._config.branch.pattern
-        typed = self.branch_name_edit.text().strip()
+        card = self._card()
         full = self._full_branch_name()
         self.branch_preview.setText(f"Will create:  {full}" if full else "")
         # Named by tier rather than by file: which settings are in force is the
         # thing the user chose, and the thing they would change.
         tier = self._config.tier or repo_config.Tier.USER
         self.branch_pattern_note.setText(
-            f"Pattern {pattern} - from the {tier.label()} settings."
+            f"Patterns from the {tier.label()} settings."
+            if card is self.pattern_card
+            else "No pattern: the name is what you type."
         )
-        self.create_branch_btn.setEnabled(bool(full) and bool(typed))
+        blocking = git_ops.blocking_branch(self._branch_names, full)
+        self.branch_conflict.setText(_conflict_note(full, blocking))
+        self.create_branch_btn.setEnabled(
+            bool(full) and bool(card.typed()) and not blocking
+        )
 
     # ---- state -------------------------------------------------------------
     def _repo_path(self) -> str:
@@ -397,7 +537,7 @@ class BranchesTagsPanel(QWidget):
                 result.stderr.strip() or f"git refused to create '{name}'.",
             )
             return
-        self.branch_name_edit.clear()
+        self._card().name_edit.clear()
         self._reload_branches()
         self.branch_status.setText(f"Created and switched to '{name}'.")
 

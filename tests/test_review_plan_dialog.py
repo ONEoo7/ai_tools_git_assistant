@@ -7,6 +7,7 @@ pytest.importorskip("PyQt6.QtWidgets")
 from PyQt6.QtCore import Qt  # noqa: E402
 from PyQt6.QtWidgets import QApplication  # noqa: E402
 
+from conftest import settings_with
 from git_assistant import git_ops  # noqa: E402
 from git_assistant.config import Settings  # noqa: E402
 from git_assistant.estimate import Estimate  # noqa: E402
@@ -38,8 +39,7 @@ def staged(monkeypatch):
 
 @pytest.fixture
 def settings():
-    s = Settings(selected_model="m")
-    s.save = lambda: None
+    s = settings_with(selected_model="m")
     return s
 
 

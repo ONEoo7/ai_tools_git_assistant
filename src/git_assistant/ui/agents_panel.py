@@ -305,6 +305,10 @@ class AgentsPanel(QWidget):
     fast_check = property(lambda self: self._options("size-audit").fast_check)
 
     # ---- the settings in force for this repository ---------------------------
+    def bound(self):
+        """The settings as this repository sees them; see repo_config.Bound."""
+        return repo_config.bind(self.settings, self._repo_path())
+
     def audit_rules(self):
         """What the audits are configured with here. Read, never held."""
         return repo_config.for_repo(self.settings, self._repo_path()).audit
@@ -475,7 +479,7 @@ class AgentsPanel(QWidget):
         return any(card.agent_id == agent_id for card in self.cards)
 
     def _select_stored_agent(self) -> None:
-        stored = self.audit_rules().last
+        stored = self.settings.audit_shown(self._repo_path())
         first = self.cards[0].agent_id if self.cards else ""
         self._select_agent(stored if self._known(stored) else first)
 
@@ -487,7 +491,7 @@ class AgentsPanel(QWidget):
         """
         wanted = [
             agent_id
-            for agent_id in self.audit_rules().selected
+            for agent_id in self.settings.audits_selected(self._repo_path())
             if self._known(agent_id)
         ]
         self._set_ticks(wanted or [self._agent_id()])
@@ -500,10 +504,16 @@ class AgentsPanel(QWidget):
 
     def _on_ticks_changed(self) -> None:
         chosen = self._checked_ids()
-        if chosen != self.audit_rules().selected:
-            self.write_audit(
-                lambda data: data.setdefault("audit", {}).update({"selected": chosen})
-            )
+        # Straight to the user's own file. A tick is a selection: it changes
+        # what is on screen and nothing about what an audit does, so it is not
+        # a repository's business -- and writing it through the settings used
+        # to fork them to Custom, which made a file nobody asked for out of a
+        # checkbox.
+        if not self._loading and chosen != self.settings.audits_selected(
+            self._repo_path()
+        ):
+            self.settings.set_audits_selected(self._repo_path(), chosen)
+            self.settings.save()
         self.run_btn.setText(f"Run {len(chosen)} audits" if len(chosen) > 1 else "Run")
         self.run_btn.setToolTip(
             "Runs: " + ", ".join(self._label_of(a) for a in chosen)
@@ -598,10 +608,11 @@ class AgentsPanel(QWidget):
             # it is no use below the fold.
             if card.agent_id == agent_id:
                 self.audits_scroll.ensureWidgetVisible(card)
-        if self.audit_rules().last != agent_id:
-            self.write_audit(
-                lambda data: data.setdefault("audit", {}).update({"last": agent_id})
-            )
+        if not self._loading and self.settings.audit_shown(
+            self._repo_path()
+        ) != agent_id:
+            self.settings.set_audit_shown(self._repo_path(), agent_id)
+            self.settings.save()
         self._refresh_header()
         self._sync_shown_report()
         self._refresh_history()
@@ -672,7 +683,7 @@ class AgentsPanel(QWidget):
         if not confirm(
             self,
             estimate.for_audits(
-                self.settings, chosen, narrate=self.narrate_check.isChecked()
+                self.bound(), chosen, narrate=self.narrate_check.isChecked()
             ),
         ):
             return

@@ -381,3 +381,71 @@ def test_a_depth_of_nothing_is_still_a_fetch_of_something(deep, tmp_path):
     shallow = _clone(deep, tmp_path / "shallow", depth=1)
 
     assert git_ops.fetch(shallow, depth=0).ok
+
+
+
+
+# ---- a name git has no room for ------------------------------------------------------
+# Git keeps refs as paths: `dev` is a file, and `dev/rem/x` needs `dev` to be a
+# directory. Answered from the list already on screen, so the preview can say so
+# while the name is being typed rather than after the button is pressed.
+def test_nothing_blocks_a_name_in_an_empty_repository():
+    assert git_ops.blocking_branch([], "dev/rem/stefan/x") == ""
+
+
+def test_a_branch_above_it_blocks_it():
+    assert git_ops.blocking_branch(["dev", "main"], "dev/rem/stefan/x") == "dev"
+
+
+def test_the_nearest_branch_above_it_is_the_one_named():
+    """The one to delete is the one in the way, not the shortest prefix."""
+    assert (
+        git_ops.blocking_branch(["dev/rem"], "dev/rem/stefan/x") == "dev/rem"
+    )
+
+
+def test_a_branch_below_it_blocks_it():
+    assert (
+        git_ops.blocking_branch(["dev/rem/stefan/x"], "dev/rem/stefan")
+        == "dev/rem/stefan/x"
+    )
+
+
+def test_a_name_that_is_merely_a_prefix_of_another_is_not_blocked():
+    """`dev/rem/stefan-2` is not inside `dev/rem/stefan`."""
+    assert git_ops.blocking_branch(["dev/rem/stefan"], "dev/rem/stefan-2") == ""
+
+
+def test_the_same_name_is_not_a_conflict_of_this_kind():
+    """Already existing is a different problem, and git says it plainly."""
+    assert git_ops.blocking_branch(["dev/rem/x"], "dev/rem/x") == ""
+
+
+def test_a_plain_name_beside_plain_names_is_fine():
+    assert git_ops.blocking_branch(["main", "develop"], "fix-login") == ""
+
+
+def test_nothing_blocks_nothing():
+    assert git_ops.blocking_branch(["main"], "") == ""
+
+
+def test_what_it_reports_is_what_git_refuses(tmp_path):
+    """The authority is git, so the test asks git."""
+    repo = tmp_path / "r"
+    repo.mkdir()
+    for args in (
+        ["init", "-q", "."],
+        ["-c", "user.email=t@e.x", "-c", "user.name=T", "commit", "-q",
+         "--allow-empty", "-m", "first"],
+        ["branch", "dev"],
+    ):
+        subprocess.run(["git", "-C", str(repo)] + args, capture_output=True)
+
+    blocked = "dev/rem/stefan/x"
+    assert git_ops.blocking_branch(["dev"], blocked) == "dev"
+
+    result = subprocess.run(
+        ["git", "-C", str(repo), "branch", blocked], capture_output=True, text=True
+    )
+    assert result.returncode != 0
+    assert "cannot create" in result.stderr

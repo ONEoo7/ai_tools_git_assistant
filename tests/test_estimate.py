@@ -2,6 +2,7 @@
 
 import pytest
 
+from conftest import settings_with
 from git_assistant import estimate, git_ops, usage
 from git_assistant.commit_generator import CommitGenerator
 from git_assistant.config import RepoEntry, Settings
@@ -30,11 +31,13 @@ TABLE = RuleTable(
 
 @pytest.fixture
 def settings(tmp_path):
-    s = Settings(selected_model="qwen3.5-4b", context_window=32768, parallel_calls=4)
-    s.save = lambda: None
-    s.repos = [RepoEntry(str(tmp_path))]
-    s.active_repo = str(tmp_path)
-    return s
+    return settings_with(
+        selected_model="qwen3.5-4b",
+        context_window=32768,
+        parallel_calls=4,
+        repos=[RepoEntry(str(tmp_path))],
+        active_repo=str(tmp_path),
+    )
 
 
 def _file(path, lines=3):
@@ -170,7 +173,12 @@ def test_the_rules_the_diff_and_the_file_are_all_counted(settings, small_diff):
 
 
 def test_a_review_says_which_files_will_not_fit_whole(settings, huge_diff):
-    settings.context_window = 4096
+    settings = settings_with(
+        selected_model="qwen3.5-4b",
+        context_window=4096,
+        repos=settings.repos,
+        active_repo=settings.active_repo,
+    )
     out = estimate.for_review(settings, _plan(settings, ["f0.py", "f1.py"]))
     assert "cut to the budget" in " ".join(out.lines)
 

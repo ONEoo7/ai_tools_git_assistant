@@ -144,15 +144,22 @@ def test_choosing_an_agent_is_remembered(qapp, with_repo):
     panel._select_agent(info.id)
 
     assert panel._agent_id() == info.id
-    assert _audit(with_repo).last == info.id
+    # In the user's own settings, not the repository's: which report is on
+    # screen alters nothing about what an audit does.
+    assert with_repo.audit_shown("/x/demo") == info.id
 
 
 def test_the_stored_agent_is_selected_on_open(qapp, with_repo):
-    repo_config.write_text(
-        repo_config.Tier.USER, "", '{"audit": {"last": "config-audit"}}'
-    )
+    with_repo.set_audit_shown("/x/demo", "config-audit")
     panel = AgentsPanel(with_repo)
     assert panel._agent_id() == "config-audit"
+
+
+def test_what_is_read_is_remembered_per_repository(qapp, with_repo):
+    with_repo.set_audit_shown("/x/other", "config-audit")
+    with_repo.set_audit_shown("/x/demo", "size-audit")
+
+    assert AgentsPanel(with_repo)._agent_id() == "size-audit"
 
 
 # ---- ticking what runs, selecting what is read ---------------------------------
@@ -173,8 +180,29 @@ def test_the_ticked_audits_are_remembered(qapp, with_repo):
     panel = AgentsPanel(with_repo)
     _tick(panel, "size-audit", "consistency-audit")
 
-    assert _audit(with_repo).selected == ["size-audit", "consistency-audit"]
+    assert with_repo.audits_selected("/x/demo") == ["size-audit", "consistency-audit"]
     assert _ticked(AgentsPanel(with_repo)) == ["size-audit", "consistency-audit"]
+
+
+def test_ticking_an_audit_does_not_fork_the_repositorys_settings(
+    qapp, with_repo, tmp_path
+):
+    """A checkbox must not make a settings file nobody asked for.
+
+    Ticking used to go through the repository's settings, which forks to Custom
+    on the first change -- so opening the tab and ticking a box left a
+    custom_repo_settings.json behind.
+    """
+    repo = tmp_path / "demo"
+    repo.mkdir()
+    with_repo.repos = [RepoEntry(str(repo))]
+    with_repo.active_repo = str(repo)
+    panel = AgentsPanel(with_repo)
+
+    _tick(panel, "size-audit", "consistency-audit")
+
+    assert not repo_config.exists(repo_config.Tier.CUSTOM, str(repo))
+    assert not repo_config.exists(repo_config.Tier.REPO, str(repo))
 
 
 def test_ticking_and_selecting_are_different_questions(qapp, with_repo):
@@ -752,7 +780,9 @@ def test_a_finished_setup_shows_what_it_configured(qapp, with_repo):
 
     dlg = SettingsDialog(with_repo)
     with_repo.set_provider_model("lmstudio", "qwen3.5-4b")
-    with_repo.context_window = 32768
+    repo_config.write_text(
+        repo_config.Tier.USER, "", '{"model": {"context_window": 32768}}'
+    )
     outcome = lmstudio_setup.SetupOutcome(
         results=[lmstudio_setup.StepResult("install", "Install LM Studio", "installed")]
     )
@@ -896,8 +926,18 @@ def test_declining_an_audit_sends_nothing(qapp, with_repo, monkeypatch):
 
 # ---- a repository's own settings, in the Repositories tab ---------------------------
 def _pick_tier(dlg, tier: str):
-    """Choose which settings the pane is showing, as the dropdown does."""
+    """Show one of the three files in the pane, as the "Editing:" dropdown does.
+
+    Showing only. Which settings a run uses is "Active Settings" in the bar
+    above the tabs -- see `_activate_tier`.
+    """
     dlg.settings_tier_combo.setCurrentIndex(dlg.settings_tier_combo.findData(tier))
+
+
+def _activate_tier(dlg, tier: str):
+    """Choose which settings the repository runs on, as the bar's dropdown does."""
+    combo = dlg.identity_bar.tier_combo
+    combo.setCurrentIndex(combo.findData(tier))
 
 
 def _repos_tab(dlg, repo_path: str):
@@ -1100,7 +1140,14 @@ def test_open_is_withdrawn_while_more_than_one_audit_run_is_selected(qapp, with_
 
 # ---- which settings are in force ---------------------------------------------------
 def _dialog_for(with_repo, repo):
+    """A dialog with ``repo`` both active and selected in the tree.
+
+    Both, because the two panes answer to different things: the bar is about
+    the active repository, as it already was for the identity, and the tree is
+    a management list where selecting a row is not choosing to work in it.
+    """
     with_repo.repos = [RepoEntry(str(repo))]
+    with_repo.active_repo = str(repo)
     dlg = SettingsDialog(with_repo)
     _repos_tab(dlg, str(repo))
     return dlg
@@ -1141,7 +1188,7 @@ def test_the_dropdown_opens_on_what_is_actually_in_force(
     assert dlg.settings_tier_combo.currentData() == "repo"
 
 
-def test_choosing_a_tier_is_remembered_and_shows_that_file(
+def test_choosing_a_tier_in_the_bar_is_remembered(
     qapp, with_repo, config_store, tmp_path
 ):
     repo = tmp_path / "demo"
@@ -1149,11 +1196,47 @@ def test_choosing_a_tier_is_remembered_and_shows_that_file(
     dlg = _dialog_for(with_repo, repo)
     config_store.create(config_store.Tier.CUSTOM, repo)
 
-    _pick_tier(dlg, "custom")
+    _activate_tier(dlg, "custom")
 
     assert with_repo.settings_tier(str(repo)) == "custom"
-    assert str(config_store.custom_config_path(repo)) == dlg.repo_config_label.text()
     assert config_store.resolve(repo, "custom").tier is config_store.Tier.CUSTOM
+
+
+def test_the_pane_opens_on_the_file_the_bar_chose(
+    qapp, with_repo, config_store, tmp_path
+):
+    repo = tmp_path / "demo"
+    repo.mkdir()
+    dlg = _dialog_for(with_repo, repo)
+    config_store.create(config_store.Tier.CUSTOM, repo)
+
+    _activate_tier(dlg, "custom")
+
+    assert str(config_store.custom_config_path(repo)) == dlg.repo_config_label.text()
+
+
+def test_reading_another_file_does_not_switch_the_repository_onto_it(
+    qapp, with_repo, config_store, tmp_path
+):
+    """Opening a colleague's checked-in settings to look at them is not adopting them.
+
+    The pane's dropdown used to be the same control as the bar's, so reading
+    the Repo file put the repository on it -- a side effect nobody asked for
+    from something that reads as a view selector.
+    """
+    repo = tmp_path / "demo"
+    repo.mkdir()
+    config_store.create(config_store.Tier.CUSTOM, repo)
+    dlg = _dialog_for(with_repo, repo)
+    _activate_tier(dlg, "custom")
+
+    _pick_tier(dlg, "user")
+
+    assert str(config_store.path_for(config_store.Tier.USER)) == (
+        dlg.repo_config_label.text()
+    )  # showing the User file...
+    assert with_repo.settings_tier(str(repo)) == "custom"  # ...still running on Custom
+    assert dlg.identity_bar.tier_combo.currentData() == "custom"
 
 
 def test_ignoring_a_repositorys_own_settings_is_called_out(
@@ -1166,11 +1249,38 @@ def test_ignoring_a_repositorys_own_settings_is_called_out(
     dlg = _dialog_for(with_repo, repo)
     assert dlg.settings_tier_warning.text() == ""  # Repo is in force; nothing to say
 
-    _pick_tier(dlg, "user")
+    _activate_tier(dlg, "user")
 
     assert dlg.settings_tier_warning.text() == (
         "Not recommended setup, Repo settings exist."
     )
+    # And in the bar, where the choice is made, as a flag with the sentence on it.
+    assert dlg.identity_bar.tier_warning.text() == "Repo settings exist"
+    assert "Not recommended setup" in dlg.identity_bar.tier_warning.toolTip()
+
+
+def test_the_bar_says_which_settings_the_active_repository_runs_on(
+    qapp, with_repo, config_store, tmp_path
+):
+    repo = tmp_path / "demo"
+    repo.mkdir()
+    config_store.create(config_store.Tier.REPO, repo)
+
+    dlg = _dialog_for(with_repo, repo)
+
+    assert dlg.identity_bar.tier_combo.currentData() == "repo"
+    assert dlg.identity_bar.tier_warning.text() == ""
+
+
+def test_the_bar_offers_nothing_to_choose_without_a_repository(qapp, with_repo):
+    from git_assistant.config import Settings
+
+    empty = Settings()
+    empty.save = lambda: None
+    dlg = SettingsDialog(empty)
+
+    assert not dlg.identity_bar.tier_combo.isEnabled()
+    assert dlg.identity_bar.tier_warning.text() == ""
 
 
 def test_no_warning_when_there_are_no_repo_settings_to_ignore(

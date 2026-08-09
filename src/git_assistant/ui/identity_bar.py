@@ -24,7 +24,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from git_assistant import git_ops
+from git_assistant import git_ops, repo_config
 from git_assistant.config import Settings
 from git_assistant.identities import IdentityStore
 
@@ -49,6 +49,10 @@ class IdentityBar(QWidget):
     #: bring the Identities tab forward.
     manageRequested = pyqtSignal()  # noqa: N815 - Qt signal naming
 
+    #: Emitted after the active repository's settings tier has been changed, so
+    #: the pane that edits those files can show the one now in force.
+    settingsTierChanged = pyqtSignal()  # noqa: N815 - Qt signal naming
+
     def __init__(self, settings: Settings, store: IdentityStore, parent=None) -> None:
         super().__init__(parent)
         self.settings = settings
@@ -69,11 +73,36 @@ class IdentityBar(QWidget):
         self.auth_status = QLabel("")
         self.auth_status.setStyleSheet(INFO_STYLE)
 
+        # Which of the three sets of settings this repository runs on. Here
+        # rather than on the tab that edits them, for the same reason the
+        # identity is here: it belongs to the repository being worked on, it
+        # decides what every tab does, and it was previously only visible on
+        # the tab you would have to already suspect something to go and open.
+        self.tier_combo = QComboBox()
+        self.tier_combo.setToolTip(
+            "Which settings this repository uses. They are not combined -- the "
+            "one chosen here is the one that applies."
+        )
+        for tier in repo_config.Tier:
+            self.tier_combo.addItem(tier.label(), tier.value)
+        self.tier_combo.currentIndexChanged.connect(self._on_tier_selected)
+
+        # The long version is on the tab that can do something about it. Here it
+        # is a flag, because a sentence in this row would push the identity off
+        # the side of the window to say something that is true most of the time
+        # and worth acting on rarely.
+        self.tier_warning = QLabel("")
+        self.tier_warning.setStyleSheet(WARN_STYLE)
+
         box = QHBoxLayout(self)
         box.setContentsMargins(0, 0, 0, 0)
         box.addWidget(QLabel("Commit as:"))
         box.addWidget(self.combo)
         box.addWidget(self.status)
+        box.addSpacing(16)
+        box.addWidget(QLabel("Active Settings:"))
+        box.addWidget(self.tier_combo)
+        box.addWidget(self.tier_warning)
         box.addStretch(1)
         box.addWidget(self.auth_status)
 
@@ -90,6 +119,7 @@ class IdentityBar(QWidget):
         try:
             self.combo.clear()
             repo = self._repo or self.settings.active_repo
+            self._show_tier(repo)
             if not repo:
                 self.combo.setEnabled(False)
                 self.status.setText("No repository selected")
@@ -132,6 +162,48 @@ class IdentityBar(QWidget):
             self._describe_auth(repo)
         finally:
             self._loading = False
+
+    # ---- which settings are in force ---------------------------------------
+    def _show_tier(self, repo: str) -> None:
+        """Put the combo on the tier in force, without calling that a choice."""
+        self.tier_combo.setEnabled(bool(repo))
+        if not repo:
+            self.tier_warning.setText("")
+            self.tier_warning.setToolTip("")
+            return
+
+        tier = repo_config.effective_tier(repo, self.settings.settings_tier(repo))
+        index = self.tier_combo.findData(tier.value)
+        self.tier_combo.blockSignals(True)
+        self.tier_combo.setCurrentIndex(max(0, index))
+        self.tier_combo.blockSignals(False)
+
+        # A repository carrying settings that nobody is reading. Worth saying
+        # because it is invisible otherwise: the file is right there in the
+        # working tree, checked in, and being ignored.
+        stranded = tier is not repo_config.Tier.REPO and repo_config.has_repo_config(
+            repo
+        )
+        self.tier_warning.setText("Repo settings exist" if stranded else "")
+        self.tier_warning.setToolTip(
+            "Not recommended setup, Repo settings exist.\n\n"
+            f"This repository has {repo_config.path_for(repo_config.Tier.REPO, repo)}, "
+            f"which is checked in and shared, but it is running on its "
+            f"{tier.label()} settings instead."
+            if stranded
+            else ""
+        )
+
+    def _on_tier_selected(self, _index: int) -> None:
+        if self._loading:
+            return
+        repo = self._repo or self.settings.active_repo
+        if not repo:
+            return
+        self.settings.set_settings_tier(repo, self.tier_combo.currentData())
+        self.settings.save()
+        self._show_tier(repo)
+        self.settingsTierChanged.emit()
 
     def _describe_scope(self, repo: str, email: str) -> None:
         """Say where the identity came from -- pinned here, or inherited."""

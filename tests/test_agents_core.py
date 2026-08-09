@@ -3,6 +3,7 @@
 Pure functions: no git, no Qt, no provider.
 """
 
+from conftest import settings_with
 from git_assistant.agents.base import AgentInfo, Fact, Report, Section, Table
 from git_assistant.config import Settings
 from git_assistant.llm import ModelInfo
@@ -240,8 +241,7 @@ def _stub_run(monkeypatch, **kw):
 
     monkeypatch.setattr(agents_pkg, "get", lambda agent_id: _Narratable())
     monkeypatch.setattr(agents_pkg, "_sample_point", lambda repo: ("abc", "main", False))
-    settings = Settings(selected_model="m")
-    settings.save = lambda: None
+    settings = settings_with(selected_model="m")
     return agents_pkg.run("stub", settings, repo="/x/demo", narrate=True, **kw)
 
 

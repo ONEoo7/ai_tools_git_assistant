@@ -91,22 +91,26 @@ def card_colours(palette: QPalette) -> tuple[QColor, QColor, QColor]:
     return fill, _blend(fill, highlight, _SELECTED_TINT), border
 
 
-def card_stylesheet(palette: QPalette) -> str:
+def card_stylesheet(palette: QPalette, name: str = "auditCard") -> str:
     """A border around what belongs together, and a tint on what is being read.
 
     The selected card differs by colour and by nothing else -- same border
     width, same contents -- so clicking one moves the highlight and never the
     layout.
+
+    ``name`` is the object name to select on, so that anything else drawn as a
+    card is drawn as the *same* card. Two card looks in one window is two
+    answers to "is this thing selected".
     """
     fill, selected, border = card_colours(palette)
     highlight = palette.color(QPalette.ColorRole.Highlight).name()
     return f"""
-QFrame#auditCard {{
+QFrame#{name} {{
     border: 1px solid {border.name()};
     border-radius: 6px;
     background-color: {fill.name()};
 }}
-QFrame#auditCard[selected="true"] {{
+QFrame#{name}[selected="true"] {{
     border: 1px solid {highlight};
     background-color: {selected.name()};
 }}

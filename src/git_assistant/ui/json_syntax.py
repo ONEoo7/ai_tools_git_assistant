@@ -7,10 +7,10 @@ a key mistaken for a string, a number swallowing the digits in a name -- and
 splitting it out is what lets those be tested against a string instead of
 against a repainted widget.
 
-Line at a time, with no state carried between them. That is not a shortcut: a
-JSON string cannot contain a literal newline, so no token here spans a line,
-and a highlighter that tracked block state would be tracking a state that never
-changes.
+Line at a time, and one thing carries between them: a ``/* ... */`` left open.
+Nothing else can span a line -- a JSON string may not contain a literal newline
+-- so that is the only state there is, and it is kept where Qt keeps it, in the
+block state rather than on this object.
 
 The colours are worked out from the palette rather than written down, so the
 same code reads on a white background, a near-black one and a pink one. See
@@ -34,6 +34,7 @@ STRING = "string"
 NUMBER = "number"
 KEYWORD = "keyword"  # true, false, null
 PUNCT = "punct"  # the braces, brackets, commas and colons
+COMMENT = "comment"  # // to the end of the line, and /* ... */
 
 #: A JSON string, including its quotes, with backslash escapes honoured so that
 #: a `\"` inside one does not end it.
@@ -64,6 +65,10 @@ def tokens(line: str) -> list[Span]:
     An unterminated string, which is every string half way through being typed,
     matches nothing and stays the ordinary text colour. That is the honest
     answer: there is no token there yet.
+
+    Comments win over everything, because everything inside one is a comment --
+    including the quotes, which is exactly the case a naive pass gets wrong:
+    `// see "diff_mode"` is one comment, not a comment and a string.
     """
     spans = [Span(m.start(), 1, PUNCT) for m in _PUNCT.finditer(line)]
     spans += [Span(m.start(), len(m.group()), NUMBER) for m in _NUMBER.finditer(line)]
@@ -71,7 +76,53 @@ def tokens(line: str) -> list[Span]:
     for match in _STRING.finditer(line):
         kind = KEY if _IS_KEY.match(line, match.end()) else STRING
         spans.append(Span(match.start(), len(match.group()), kind))
+    comment = _comment_at(line)
+    if comment is not None:
+        spans.append(comment)
     return spans
+
+
+def _comment_at(line: str) -> Span | None:
+    """The comment on this line, if the `//` is not inside a string.
+
+    Found by scanning rather than by regex, because `"http://x"` contains two
+    slashes and is not a comment -- and a pattern that could tell the
+    difference would have to parse the line, which is what this is.
+
+    A `/* ... */` that closes on the same line ends where it closes; one that
+    does not runs to the end, and `leaves_block_open` says so.
+    """
+    in_string = False
+    i = 0
+    while i < len(line):
+        char = line[i]
+        if in_string:
+            if char == "\\":
+                i += 2
+                continue
+            if char == '"':
+                in_string = False
+        elif char == '"':
+            in_string = True
+        elif line[i : i + 2] == "//":
+            return Span(i, len(line) - i, COMMENT)
+        elif line[i : i + 2] == "/*":
+            end = line.find("*/", i + 2)
+            length = len(line) - i if end < 0 else end + 2 - i
+            return Span(i, length, COMMENT)
+        i += 1
+    return None
+
+
+def leaves_block_open(line: str) -> bool:
+    """Whether a ``/*`` on this line is still open at the end of it."""
+    found = _comment_at(line)
+    if found is None or line[found.start : found.start + 2] != "/*":
+        return False
+    # Open when there is no `*/` after the `/*` -- not when the *line* fails to
+    # end with one, which is a different question and the wrong one:
+    # `/* x */ "a": 1` ends with a digit and closes perfectly well.
+    return line.find("*/", found.start + 2) < 0
 
 
 # ---- what colour that is -------------------------------------------------------------
@@ -92,6 +143,13 @@ _ON_LIGHT = 80
 #: How far the punctuation is faded towards the background. Past about half it
 #: stops being readable; below a third it stops being faded.
 _PUNCT_FADE = 0.35
+#: And the comments. Less faded than the punctuation, not more, which is the
+#: opposite of the first guess: a comment is the sentence explaining the line
+#: under it and braces are scaffolding. It is also what the measurements
+#: allowed -- 0.42 put the pink theme at 3.96:1, under the 4.5 the tests hold
+#: every colour to, because that theme's background is the lightest of the
+#: three and there is least room to fade into it.
+_COMMENT_FADE = 0.30
 
 
 def palette_colours(palette) -> dict[str, QColor]:
@@ -117,6 +175,11 @@ def palette_colours(palette) -> dict[str, QColor]:
     # saturation, and the pink theme's plum text lightened is a loud pink --
     # brighter than the colours it was supposed to sit behind.
     colours[PUNCT] = _towards(palette.text().color(), base, _PUNCT_FADE)
+    # Quiet, but the least quiet of the quiet things: these files have a
+    # comment above every key, and a comment is what somebody opened the file
+    # to read. Italic as well, so it is told apart by shape and not by a shade
+    # of grey.
+    colours[COMMENT] = _towards(palette.text().color(), base, _COMMENT_FADE)
     return colours
 
 
@@ -131,6 +194,11 @@ def _towards(colour: QColor, other: QColor, amount: float) -> QColor:
             )
         )
     )
+
+
+#: Qt's per-block state for "a /* ... */ is still open here". -1 is Qt's own
+#: value for "nothing to carry", so this only needs to name the other one.
+_IN_BLOCK = 1
 
 
 class JsonHighlighter(QSyntaxHighlighter):
@@ -177,6 +245,7 @@ class JsonHighlighter(QSyntaxHighlighter):
         # A key is the one thing worth finding by shape rather than by colour:
         # it is what you scroll looking for.
         formats[KEY].setFontWeight(600)
+        formats[COMMENT].setFontItalic(True)
         return formats
 
     def repaint_for_theme(self) -> None:
@@ -185,8 +254,27 @@ class JsonHighlighter(QSyntaxHighlighter):
         self.rehighlight()
 
     def highlightBlock(self, text: str) -> None:  # noqa: N802 - Qt's name
-        for span in tokens(text):
-            self.setFormat(span.start, span.length, self._formats[span.kind])
+        """Colour one line, continuing a block comment left open by the last.
+
+        The state lives in Qt's per-block state rather than on this object
+        because Qt re-highlights one line when one line changes: an attribute
+        here would hold whatever the *last edited* line left behind, which is
+        not the line above this one.
+        """
+        start = 0
+        if self.previousBlockState() == _IN_BLOCK:
+            end = text.find("*/")
+            if end < 0:
+                self.setFormat(0, len(text), self._formats[COMMENT])
+                self.setCurrentBlockState(_IN_BLOCK)
+                return
+            self.setFormat(0, end + 2, self._formats[COMMENT])
+            start = end + 2
+
+        rest = text[start:]
+        for span in tokens(rest):
+            self.setFormat(start + span.start, span.length, self._formats[span.kind])
+        self.setCurrentBlockState(_IN_BLOCK if leaves_block_open(rest) else -1)
 
 
 def attach(editor) -> JsonHighlighter:

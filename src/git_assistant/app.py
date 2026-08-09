@@ -96,14 +96,15 @@ def main() -> int:
     # back to following the system.
     theme.apply(app, Settings.load().theme)
 
+    # Whatever this machine has, turned into the three files this build reads.
+    # Before `ensure_defaults`, which would otherwise write a default user tier
+    # over the one an upgrade is entitled to keep.
+    repo_config.migrate_files()
     # The defaults every repository inherits, written out on first run so they
     # can be found and read before anyone has changed one. A disk that refuses
     # costs the file, not the launch: everything falls back to the built-in
     # values, which are what the file would have said.
     repo_config.ensure_defaults()
-    # Anything configured under the old per-repository keys becomes the
-    # user tier, so an upgrade does not silently reset it.
-    repo_config.migrate_user_settings(Settings.load())
     # The same, for the settings that are the user's rather than a repository's.
     # Written once and never rewritten over damage -- see settings_backup.
     settings_backup.ensure_defaults()

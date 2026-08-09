@@ -211,11 +211,14 @@ def test_a_profile_survives_a_round_trip_through_the_settings_file():
         ),
         overrides={".h": "cpp"},
     )
-    s = Settings(review_profiles=[profile], repos=[RepoEntry("/x/a", review_profile="Mine")])
+    from git_assistant import repo_config
+
+    repo_config.save_user_profiles([profile])
+    s = Settings(repos=[RepoEntry("/x/a", review_profile="Mine")])
 
     back = Settings.from_dict(s.to_dict())
 
-    kept = back.review_profiles[0]
+    kept = repo_config.bind(back).review_profiles_built()[0]
     assert kept.name == "Mine"
     assert kept.languages[0].version == "py312"
     assert kept.languages[0].selections[0].exclude == ["PY-06"]

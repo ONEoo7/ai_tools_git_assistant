@@ -3,6 +3,7 @@
 import pytest
 
 from git_assistant import git_ops
+from conftest import settings_with
 from git_assistant.config import Settings
 from git_assistant.llm import ModelInfo
 from git_assistant.parallel import CancelledError
@@ -37,11 +38,9 @@ class _Client:
 
 
 def _settings(**kw):
-    s = Settings(selected_model="m", context_window=kw.pop("context", 32768))
-    s.save = lambda: None
-    for key, value in kw.items():
-        setattr(s, key, value)
-    return s
+    return settings_with(
+        selected_model="m", context_window=kw.pop("context", 32768), **kw
+    )
 
 
 def _diff(path, lines=3):
