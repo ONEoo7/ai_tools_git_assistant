@@ -62,6 +62,8 @@ CLASSIFIED = {
     "audit_last": "selection",
     "branch_pattern": "selection",
     "branch_user": "selection",
+    "repo_templates": "selection",
+    "default_template": "library",
 }
 
 KINDS = {"account", "workspace", "library", "selection"}
@@ -125,7 +127,6 @@ CHANGES = {
     "model.safety_margin": "how much is reserved for the answer",
     "model.parallel_calls": "how many calls run at once",
     "model.endpoints": "which server the request is sent to",
-    "prompt.template": "what the model is asked, for a repository with no named one",
     "prompt.templates": "what the model is asked, for the ones that name one",
     "review.profiles": "which rules a review runs against",
     "tracing.enabled": "whether a trace is sent at all",

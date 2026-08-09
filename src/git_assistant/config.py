@@ -160,6 +160,17 @@ FIELD_COMMENTS = {
         "A {user} typed in by hand, per repository. Blank asks git for the "
         "committer name."
     ),
+    "default_template": (
+        "The commit-message prompt that is always offered, whatever a "
+        "repository ships.\nA project's own templates replace the named ones "
+        "in user_settings.json and never this one, so there is always "
+        "something to fall back to."
+    ),
+    "repo_templates": (
+        "Which template each repository uses, by repository key. A selection: "
+        "it names one of the templates on offer and decides nothing about what "
+        "any of them say."
+    ),
 }
 
 DEFAULT_TEMPLATE_NAME = "Default"
@@ -365,6 +376,15 @@ class Settings:
     #: A `{user}` typed in by hand, per repo key. Blank -- the usual case -- is
     #: whatever git says the committer is called here.
     branch_user: dict[str, str] = field(default_factory=dict)
+    #: The commit-message prompt that is always offered, whatever a repository
+    #: ships. Here rather than in the settings a repository can carry, because
+    #: that is the point of it: a project's own prompt replaces the *named*
+    #: templates and never this one, so there is always something to fall back
+    #: to without editing a file the whole team shares.
+    default_template: str = DEFAULT_TEMPLATE
+    #: Which template each repository uses, by repo key. A selection: it names
+    #: one of the templates on offer and decides nothing about what they say.
+    repo_templates: dict[str, str] = field(default_factory=dict)
     theme: str = "system"
 
     # ---- per-provider settings ---------------------------------------------
@@ -516,17 +536,17 @@ class Settings:
     # repo_config.Bound, which is what every consumer is handed.
     def repo_template(self, repo_path: str) -> str:
         """The name of the template chosen for a repository, or ``""``."""
-        for r in self.repos:
-            if r.path == repo_path:
-                return r.template
-        return ""
+        return self.repo_templates.get(repo_key(repo_path), "") if repo_path else ""
 
     def set_repo_template(self, repo_path: str, name: str) -> None:
         """Assign a template to a repository ("" or the default clears it)."""
-        for r in self.repos:
-            if r.path == repo_path:
-                r.template = "" if name == DEFAULT_TEMPLATE_NAME else name
-                return
+        if not repo_path:
+            return
+        key = repo_key(repo_path)
+        if name and name != DEFAULT_TEMPLATE_NAME:
+            self.repo_templates[key] = name
+        else:
+            self.repo_templates.pop(key, None)  # back to the default; say nothing
 
     def repoint_template(self, old: str, new: str) -> None:
         """Follow a rename, or a removal when ``new`` is ``""``.
@@ -535,9 +555,13 @@ class Settings:
         and the caller that renames one there calls this so the repositories
         that named it do not quietly fall back to the default.
         """
-        for r in self.repos:
-            if r.template == old:
-                r.template = new
+        for key, name in list(self.repo_templates.items()):
+            if name != old:
+                continue
+            if new:
+                self.repo_templates[key] = new
+            else:
+                self.repo_templates.pop(key, None)
 
     # ---- code-review rule tables -------------------------------------------
     # Only the *assignment* lives here. The tables are in their own file, so
@@ -644,6 +668,21 @@ class Settings:
             for r in repos
             if isinstance(r, dict) and r.get("path")
         ]
+        # Where these used to live. `RepoEntry.template` held the pointer and
+        # the old single settings file held the default; both are read here so
+        # an upgrade does not silently reset a prompt somebody wrote.
+        carried = dict(clean.get("repo_templates") or {})
+        for entry in clean["repos"]:
+            if entry.template and repo_key(entry.path) not in carried:
+                carried[repo_key(entry.path)] = entry.template
+        clean["repo_templates"] = {
+            str(k): str(v) for k, v in carried.items() if isinstance(v, str) and v
+        }
+        if not clean.get("default_template"):
+            legacy = data.get("prompt_template")
+            clean["default_template"] = (
+                str(legacy) if isinstance(legacy, str) and legacy else DEFAULT_TEMPLATE
+            )
         return cls(**clean)
 
     # ---- load / save -------------------------------------------------------

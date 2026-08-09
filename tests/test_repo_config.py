@@ -1243,17 +1243,13 @@ def test_the_prompt_and_the_tracing_round_trip_through_a_file(repo):
     _write_repo(
         repo,
         {
-            "prompt": {
-                "template": "HOUSE STYLE",
-                "templates": [{"name": "Work", "text": "WORK"}],
-            },
+            "prompt": {"templates": [{"name": "Work", "text": "WORK"}]},
             "tracing": {"enabled": True, "host": "https://lf.example", "send_prompts": False},
         },
     )
 
     settings = repo_config.resolve(repo)
 
-    assert settings.prompt.template == "HOUSE STYLE"
     assert settings.prompt.templates == [{"name": "Work", "text": "WORK"}]
     assert settings.tracing.enabled and settings.tracing.host == "https://lf.example"
     assert settings.tracing.send_prompts is False

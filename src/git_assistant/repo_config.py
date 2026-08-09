@@ -50,7 +50,11 @@ from platformdirs import user_config_dir
 
 from git_assistant import jsonc
 from git_assistant.config import APP_NAME, DEFAULT_IGNORE_GLOBS, repo_key
-from git_assistant.prompts import DEFAULT_TEMPLATE
+from git_assistant.prompts import (
+    DEFAULT_TEMPLATE,
+    SHORT_TEMPLATE,
+    SHORT_TEMPLATE_NAME,
+)
 
 SCHEMA_VERSION = 1
 
@@ -207,16 +211,14 @@ FIELD_COMMENTS = {
         "Windows Credential Manager."
     ),
     "prompt": "What the model is asked for a commit message.",
-    "prompt.template": (
-        "What the model is asked for a commit message, for any repository "
-        "that has not named one of the templates below.\n"
-        "Blank falls back to the one this build ships with, which is what "
-        "this says by default."
-    ),
     "prompt.templates": (
-        'Named templates, as [{"name": ..., "text": ...}]. Which one a '
-        "repository uses is chosen in the window and kept with your own "
-        "settings, not here."
+        'Named commit-message prompts, as [{"name": ..., "text": ...}].\n'
+        "A repository that ships any of these replaces the ones in "
+        "user_settings.json.\n"
+        "The default template is never replaced: it is in "
+        "static_user_settings.json and is always offered.\n"
+        "Which one a repository uses is chosen in the window and kept with "
+        "your own settings, not here."
     ),
     "review.profiles": (
         "Named review profiles: which rules apply to which language at which "
@@ -454,24 +456,31 @@ class CommitRules:
 
 @dataclass
 class PromptRules:
-    """The commit-message prompt, and the named ones to pick from.
+    """The named commit-message prompts to pick from.
 
-    Here rather than in the user's own settings because it decides what is
-    sent: a project whose commits follow a house style is a project that can
-    ship the prompt producing it. Which of the named ones a repository uses is
-    a selection and stays with the user; see `config.RepoEntry.template`.
+    Here rather than in the user's own settings because a template decides what
+    is sent: a project whose commits follow a house style is a project that can
+    ship the prompt producing it.
+
+    The *default* template is deliberately not here. It lives in
+    `config.Settings.default_template`, is always offered, and is the thing a
+    project's own templates cannot take away -- see `offered_templates`. Which
+    of the named ones a repository uses is a selection and stays with the user
+    too; see `config.Settings.repo_templates`.
     """
 
-    #: Written out in full rather than left blank to mean "the built-in one".
-    #: The user tier is a file somebody is invited to open and change, and a
-    #: prompt they cannot see is a prompt they cannot edit -- they would have
-    #: to know the key existed, guess the shape, and type it from nothing.
-    #: Blank still falls back, so a file trimmed by hand keeps working.
-    template: str = DEFAULT_TEMPLATE
     #: ``[{"name": ..., "text": ...}]``. Plain dicts rather than a dataclass:
     #: this module owns no shape it does not have to, and `config.Template` is
     #: what the window builds from these.
-    templates: list = field(default_factory=list)
+    #:
+    #: Shipped with one entry, so the file arrives saying what an entry looks
+    #: like rather than showing an empty list and leaving the shape to be
+    #: guessed.
+    templates: list = field(
+        default_factory=lambda: [
+            {"name": SHORT_TEMPLATE_NAME, "text": SHORT_TEMPLATE}
+        ]
+    )
 
 
 @dataclass
@@ -576,7 +585,6 @@ class RepoSettings:
                 "ignore_globs": list(self.commit.ignore_globs),
             },
             "prompt": {
-                "template": self.prompt.template,
                 "templates": [dict(one) for one in self.prompt.templates],
             },
             "review": {
@@ -801,7 +809,6 @@ def _overlay(settings: RepoSettings, data: dict) -> RepoSettings:
             ),
         ),
         prompt=PromptRules(
-            template=_str(prompt, "template", settings.prompt.template),
             templates=_named(
                 prompt, "templates", ("name", "text"), settings.prompt.templates
             ),
@@ -909,7 +916,6 @@ _BOUND: dict[str, tuple[str, str]] = {
     "agent_fast_mode": ("audit", "fast"),
     "agent_large_file_mb": ("audit", "large_file_mb"),
     "agent_history_limit": ("audit", "history_limit"),
-    "prompt_template": ("prompt", "template"),
     "langfuse_enabled": ("tracing", "enabled"),
     "langfuse_host": ("tracing", "host"),
     "langfuse_environment": ("tracing", "environment"),
@@ -976,12 +982,16 @@ class Bound:
     # calls them by the same name, which is the whole point of this class.
     @property
     def templates(self) -> list:
-        """The named prompt templates, as the window's own objects."""
+        """The named templates on offer here, as the window's own objects.
+
+        The repository's own if it ships any, else yours. The default is not
+        among them; `template_names` puts it first.
+        """
         from git_assistant.config import Template
 
         return [
             Template(name=one.get("name", ""), text=one.get("text", ""))
-            for one in self._rules.prompt.templates
+            for one in offered_templates(self.repo)
             if one.get("name")
         ]
 
@@ -1003,13 +1013,17 @@ class Bound:
     def template_text(self, name: str) -> str:
         """Body of a named template, falling back to the default."""
         from git_assistant.config import DEFAULT_TEMPLATE_NAME
-        from git_assistant.prompts import DEFAULT_TEMPLATE
+        from git_assistant.prompts import (
+    DEFAULT_TEMPLATE,
+    SHORT_TEMPLATE,
+    SHORT_TEMPLATE_NAME,
+)
 
         if name and name != DEFAULT_TEMPLATE_NAME:
             for one in self.templates:
                 if one.name == name:
                     return one.text
-        return self._rules.prompt.template or DEFAULT_TEMPLATE
+        return getattr(self._settings, "default_template", "") or DEFAULT_TEMPLATE
 
     def template_for_repo(self, repo_path: str) -> str:
         """The template a repository should be described with."""
@@ -1164,19 +1178,41 @@ def set_user_values(**sections: dict) -> None:
 # the Template tab, the review profiles list -- is not about a repository, so it
 # edits the answer every repository without one of its own gets. A repository
 # that ships its own keeps it, which is the point of it being a setting.
+def offered_templates(repo_path: str | Path = "") -> list:
+    """The named templates on offer for ``repo_path``, as plain dicts.
+
+    A repository that ships templates **replaces** yours; one that does not
+    leaves them alone. The default is not in this list -- it is always offered
+    and is added by the caller, which is what "a project cannot take it away"
+    means in practice.
+
+    Deliberately not the tier in force. A project that checked a prompt in did
+    so to be used, and choosing "User settings" to change a fetch depth is not
+    a decision about that. So this reads the repository's own file directly
+    and falls back to whichever of yours applies.
+    """
+    theirs = _templates_in(source_dict(Tier.REPO, repo_path))
+    return theirs if theirs else user_templates()
+
+
+def _templates_in(data: dict) -> list:
+    """The `prompt.templates` of one file, with the unusable entries dropped."""
+    section = data.get("prompt")
+    section = section if isinstance(section, dict) else {}
+    return _named(section, "templates", ("name", "text"), [])
+
+
 def user_templates() -> list:
-    """The named prompt templates in the user tier, as plain dicts."""
+    """The named prompt templates in the user tier, as plain dicts.
+
+    What the Template tab edits: yours, whatever any repository ships.
+    """
     return [dict(one) for one in defaults().prompt.templates]
 
 
 def save_user_templates(templates) -> None:
     """Replace them. ``templates`` may hold dicts or anything with name/text."""
     set_user_values(prompt={"templates": [_named_dict(one) for one in templates]})
-
-
-def save_user_prompt(text: str) -> None:
-    """The default template's body."""
-    set_user_values(prompt={"template": text})
 
 
 def user_profiles() -> list:
@@ -1318,7 +1354,6 @@ _MIGRATED = {
     "context_window": ("model", "context_window"),
     "safety_margin": ("model", "safety_margin"),
     "parallel_calls": ("model", "parallel_calls"),
-    "prompt_template": ("prompt", "template"),
     "review_profiles": ("review", "profiles"),
     "templates": ("prompt", "templates"),
     "langfuse_enabled": ("tracing", "enabled"),

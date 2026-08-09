@@ -20,16 +20,45 @@ For a map-reduce run that is every chunk summary as well as the synthesis.
 The prompt is a template, and templates are named. Each repository picks one on
 the Generate tab; the rest use the default.
 
-The templates live in the settings a repository can carry, because a template
-decides what gets sent — a project whose commits follow a house style can check
-the prompt that produces it into `repo_settings.json`. Which one a repository
-uses is *your* choice and stays in your own settings. See
-[settings files](settings.md).
+Three things, in three places, because they answer three questions.
 
-The **Template** tab edits the library: new, duplicate, rename, delete, import
-and export as JSON. It edits your own copy, the same way the Advanced tab does.
-The default prompt is written out in full in `user_settings.json`, so it can be
-read and changed there too.
+**The default** is `default_template` in `static_user_settings.json`. It is
+always offered and **a project cannot replace it** — that is the point of it. A
+repository whose prompt turns out to be wrong should still leave you something
+to fall back to without editing a file the whole team shares. The prompt is
+written out in full, so it can be read and changed in the file as well as in
+the Template tab.
+
+**The named templates** are `prompt.templates` in the shared schema, because a
+template decides what gets sent: a project whose commits follow a house style
+can check the prompt that produces it into `repo_settings.json`. `user_settings.json`
+ships one of its own — **Short**, a subject line and nothing else — so the file
+arrives saying what an entry looks like.
+
+A repository that ships templates **replaces** yours rather than adding to
+them:
+
+| | offered |
+|---|---|
+| nothing configured | Default, Short |
+| your templates only | Default, yours |
+| repository ships some | Default, **theirs** — yours are not offered |
+
+That holds whichever settings are in force. A project that checked a prompt in
+did so to be used, and choosing *User settings* to change a fetch depth is not
+a decision about that. `"templates": []` in a repository is a project that has
+not decided, not one that says none.
+
+**Which one each repository uses** is `repo_templates` in
+`static_user_settings.json` — a mapping from repository to template name. A
+selection: it names one of the templates on offer and decides nothing about
+what any of them say. A mapping to a template that is gone falls back to the
+default rather than erroring.
+
+The **Template** tab edits *your* library — new, duplicate, rename, delete,
+import and export as JSON — and the Default entry, which writes to your own
+settings. It never shows a repository's, because it is the editor for yours;
+what a run is *offered* is the different question above.
 
 Placeholders: `{branch}`, `{diffstat}`, `{diff}`.
 

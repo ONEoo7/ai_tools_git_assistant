@@ -2282,10 +2282,15 @@ class SettingsDialog(QDialog):
         )
 
     # ---- templates ---------------------------------------------------------
-    # The library lives in the settings a repository can carry, because a
-    # template decides what is sent. This tab is about no repository in
-    # particular, so it reads and writes the User tier -- the answer every
-    # repository without one of its own gets. See repo_config.PromptRules.
+    # The named templates live in the settings a repository can carry, because
+    # a template decides what is sent. This tab is about no repository in
+    # particular, so it reads and writes the User tier -- and it is always
+    # *yours* that it shows, never a repository's, because this is the editor
+    # for your own library. What a run is offered is a different question; see
+    # repo_config.offered_templates.
+    #
+    # The Default entry is the exception. It is in the user's own settings, is
+    # always offered, and is the thing a project's templates cannot replace.
     def _templates(self) -> list:
         return [
             Template(name=one.get("name", ""), text=one.get("text", ""))
@@ -2301,7 +2306,7 @@ class SettingsDialog(QDialog):
             for one in self._templates():
                 if one.name == name:
                     return one.text
-        return repo_config.defaults().prompt.template or DEFAULT_TEMPLATE
+        return self.settings.default_template or DEFAULT_TEMPLATE
 
     def _reload_templates(self, select: str | None = None) -> None:
         """Rebuild the list from settings, keeping (or choosing) a selection."""
@@ -2348,7 +2353,10 @@ class SettingsDialog(QDialog):
         name = self._current_template()
         text = self.template_edit.toPlainText()
         if name == DEFAULT_TEMPLATE_NAME:
-            repo_config.save_user_prompt(text)
+            # The default lives in the user's own file, not in the settings a
+            # repository can carry: it is the one a project cannot take away.
+            self.settings.default_template = text
+            self._schedule_save()
             return
         kept = self._templates()
         for one in kept:

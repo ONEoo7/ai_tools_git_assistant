@@ -8,7 +8,11 @@ The commit template supports these placeholders (all optional):
 
 from __future__ import annotations
 
-# Default final template (Conventional Commits). Editable in Settings.
+#: The template that is always offered, whatever any repository says. It
+#: lives in the user's own settings -- `static_user_settings.json` -- because
+#: it is the one answer that must survive a project shipping its own: a
+#: repository whose prompt turns out to be wrong should still leave you
+#: something to fall back to without editing a file the whole team shares.
 DEFAULT_TEMPLATE = """\
 You are an expert developer writing a git commit message that follows the
 Conventional Commits specification.
@@ -29,6 +33,31 @@ Summary of changed files (git diff --stat):
 Changes:
 {diff}
 """
+
+#: The named template shipped in the *user* settings, so that file arrives with
+#: something in it rather than an empty list. Deliberately not a copy of the
+#: default: two identical entries in a dropdown teach nothing about what the
+#: dropdown is for.
+SHORT_TEMPLATE_NAME = "Short"
+SHORT_TEMPLATE = """\
+You are an expert developer writing a one-line git commit message that follows
+the Conventional Commits specification.
+
+Rules:
+- Exactly one line: `<type>(<optional scope>): <short imperative summary>`.
+- No more than 72 characters. No body, no footer, no blank line after it.
+- type is one of: feat, fix, docs, style, refactor, perf, test, build, ci, chore, revert.
+- Output ONLY that line. No markdown fences, no commentary.
+
+Current branch: {branch}
+
+Summary of changed files (git diff --stat):
+{diffstat}
+
+Changes:
+{diff}
+"""
+
 
 # System message used for the final commit-message generation call.
 COMMIT_SYSTEM = (

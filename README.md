@@ -143,7 +143,8 @@ More: [MCP server](docs/mcp.md), including the tool list.
 
 | | |
 |---|---|
-| **New / Duplicate / Rename / Delete** | Named prompt templates. Each repository picks one. |
+| **New / Duplicate / Rename / Delete** | Your named prompt templates. Each repository picks one. |
+| **Default** | The prompt that is always offered, whatever a repository ships. |
 | **Reset to default text** | Back to the prompt this build ships with. |
 | **Import… / Export…** | JSON, one template or many. |
 

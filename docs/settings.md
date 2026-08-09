@@ -86,14 +86,20 @@ Every key carries a comment, and a test refuses a key that does not.
 
 **`static_user_settings.json`** — the account (provider, models, temperatures,
 Azure API version, MCP registration), the workspace (repositories, scan roots,
-watched roots), and the selections (which settings tier per repository, which
-audits are ticked, which branch pattern, the theme).
+watched roots), the selections (which settings tier per repository, which audits
+are ticked, which branch pattern, which template each repository uses, the
+theme), and the **default commit-message template**, which is here because it is
+the one thing a project's own settings cannot replace.
 
 **The shared schema** — `branch`, `fetch`, `audit`, `commit`, `prompt`,
 `review`, `model`, `tracing`. Between them: naming conventions, fetch depth,
-audit rules, commit length limits and ignore globs, the prompt template library,
+audit rules, commit length limits and ignore globs, the named prompt templates,
 review profiles, the context window and per-provider endpoints, and where a
 trace goes.
+
+`prompt.templates` is the one place the pick-one rule bends: a repository that
+ships templates replaces yours whichever tier is in force. See
+[commit messages](commit-messages.md#templates) for why.
 
 **Never in any of them:** API keys and Langfuse keys. Those are in the Windows
 Credential Manager — see [providers](providers.md#api-keys).
