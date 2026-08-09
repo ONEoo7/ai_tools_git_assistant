@@ -139,16 +139,14 @@ def test_the_projects_own_pattern_is_offered_first(panel, repo):
     assert "dev/rem/sg/new-thing" in panel.branch_preview.text()
 
 
-def test_the_note_says_which_settings_the_patterns_came_from(panel, repo):
-    """Named by tier: which settings are in force is what the user chose."""
-    _use_pattern(panel)
-    assert "User settings" in panel.branch_pattern_note.text()
-
+def test_nothing_is_said_about_where_the_patterns_came_from(panel, repo):
+    """Which settings are in force is in the bar above the tabs, said once."""
     _set_repo_config(repo, {"branch": {"patterns": ["x/{name}"]}})
     panel._reload_config()
+
     _use_pattern(panel)
 
-    assert "Repo settings" in panel.branch_pattern_note.text()
+    assert panel.branch_pattern_note.text() == ""
 
 
 def test_the_plain_card_says_it_adds_nothing(panel):

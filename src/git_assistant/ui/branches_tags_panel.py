@@ -430,13 +430,12 @@ class BranchesTagsPanel(QWidget):
         card = self._card()
         full = self._full_branch_name()
         self.branch_preview.setText(f"Will create:  {full}" if full else "")
-        # Named by tier rather than by file: which settings are in force is the
-        # thing the user chose, and the thing they would change.
-        tier = self._config.tier or repo_config.Tier.USER
+        # Nothing said about where the patterns came from. Which settings are in
+        # force is on screen already, in the bar above the tabs, and a second
+        # copy of it under the preview was one more line between the name being
+        # typed and the button that creates it.
         self.branch_pattern_note.setText(
-            f"Patterns from the {tier.label()} settings."
-            if card is self.pattern_card
-            else "No pattern: the name is what you type."
+            "" if card is self.pattern_card else "No pattern: the name is what you type."
         )
         blocking = git_ops.blocking_branch(self._branch_names, full)
         self.branch_conflict.setText(_conflict_note(full, blocking))

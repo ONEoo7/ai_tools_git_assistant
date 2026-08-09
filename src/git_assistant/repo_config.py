@@ -50,6 +50,7 @@ from platformdirs import user_config_dir
 
 from git_assistant import jsonc
 from git_assistant.config import APP_NAME, DEFAULT_IGNORE_GLOBS, repo_key
+from git_assistant.prompts import DEFAULT_TEMPLATE
 
 SCHEMA_VERSION = 1
 
@@ -207,8 +208,10 @@ FIELD_COMMENTS = {
     ),
     "prompt": "What the model is asked for a commit message.",
     "prompt.template": (
-        "Used by any repository that has not named one of the templates below. "
-        "Blank means the one this build ships with."
+        "What the model is asked for a commit message, for any repository "
+        "that has not named one of the templates below.\n"
+        "Blank falls back to the one this build ships with, which is what "
+        "this says by default."
     ),
     "prompt.templates": (
         'Named templates, as [{"name": ..., "text": ...}]. Which one a '
@@ -459,7 +462,12 @@ class PromptRules:
     a selection and stays with the user; see `config.RepoEntry.template`.
     """
 
-    template: str = ""  # blank means the built-in one; see prompts.DEFAULT_TEMPLATE
+    #: Written out in full rather than left blank to mean "the built-in one".
+    #: The user tier is a file somebody is invited to open and change, and a
+    #: prompt they cannot see is a prompt they cannot edit -- they would have
+    #: to know the key existed, guess the shape, and type it from nothing.
+    #: Blank still falls back, so a file trimmed by hand keeps working.
+    template: str = DEFAULT_TEMPLATE
     #: ``[{"name": ..., "text": ...}]``. Plain dicts rather than a dataclass:
     #: this module owns no shape it does not have to, and `config.Template` is
     #: what the window builds from these.

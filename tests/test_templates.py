@@ -161,3 +161,37 @@ def test_the_library_survives_being_written_as_objects():
     """The window holds `Template`s; the file holds dicts."""
     repo_config.save_user_templates([Template("Work", "WORK BODY")])
     assert repo_config.user_templates() == [{"name": "Work", "text": "WORK BODY"}]
+
+
+# ---- the default is written out, not left blank ---------------------------------------
+def test_the_default_prompt_is_in_the_file_rather_than_only_in_the_code():
+    """A prompt you cannot see is a prompt you cannot edit.
+
+    Leaving it blank to mean "the built-in one" costs nothing to the code and
+    everything to the person editing the file: they would have to know the key
+    existed, guess its shape, and type the whole prompt from nothing.
+    """
+    repo_config.ensure_defaults()
+
+    written = repo_config.read_text(repo_config.Tier.USER, "")
+
+    assert repo_config.defaults().prompt.template == DEFAULT_TEMPLATE
+    assert "Conventional Commits" in written
+
+
+def test_a_prompt_edited_to_nothing_still_falls_back():
+    """A file trimmed by hand keeps working."""
+    bound = _bound(template="")
+    assert bound.template_text(DEFAULT_TEMPLATE_NAME) == DEFAULT_TEMPLATE
+
+
+def test_a_repository_can_still_override_the_written_out_default(tmp_path):
+    repo = tmp_path / "demo"
+    repo.mkdir()
+    repo_config.write_text(
+        repo_config.Tier.REPO, str(repo), '{"prompt": {"template": "THEIRS"}}'
+    )
+    settings = Settings(repos=[RepoEntry(str(repo))])
+    settings.save = lambda: None
+
+    assert repo_config.bind(settings, repo).template_text("") == "THEIRS"

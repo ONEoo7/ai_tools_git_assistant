@@ -119,21 +119,56 @@
     ]
   },
 
+  // What the model is asked for a commit message.
+  "prompt": {
+    // What the model is asked for a commit message, for any repository that has not named one of the templates below.
+    // Blank falls back to the one this build ships with, which is what this says by default.
+    "template": "You are an expert developer writing a git commit message that follows the\nConventional Commits specification.\n\nRules:\n- First line: `<type>(<optional scope>): <short imperative summary>` (<= 72 chars).\n- type is one of: feat, fix, docs, style, refactor, perf, test, build, ci, chore, revert.\n- Blank line, then a body explaining WHAT changed and WHY (wrap at ~72 chars).\n- Use bullet points in the body when several distinct changes are present.\n- Add `BREAKING CHANGE: <description>` in the footer if applicable.\n- Output ONLY the commit message. No markdown fences, no commentary.\n\nCurrent branch: {branch}\n\nSummary of changed files (git diff --stat):\n{diffstat}\n\nChanges:\n{diff}\n",
+
+    // Named templates, as [{"name": ..., "text": ...}]. Which one a repository uses is chosen in the window and kept with your own settings, not here.
+    "templates": []
+  },
+
   // Code review.
   "review": {
     // Reviews kept per repository. 0 keeps every one.
-    "history_limit": 20
+    "history_limit": 20,
+
+    // Named review profiles: which rules apply to which language at which version. The rules themselves are files under code_review/.
+    "profiles": []
   },
 
   // How much of the model one run of this repository may use.
   "model": {
     // Total tokens per request, input and output together. 0 asks the provider. Set it to match how the model is actually loaded.
-    "context_window": 4096,
+    "context_window": 32768,
 
     // Fraction of the window reserved for the model's answer. The rest is available for the diff.
     "safety_margin": 0.1,
 
     // How many requests may be in flight at once. The provider's own limit still applies.
-    "parallel_calls": 4
+    "parallel_calls": 4,
+
+    // Where each backend is, by provider key. Only the ones whose address is yours to give -- a hosted provider has one and it is not a setting.
+    // API keys are NOT here and must never be: they are in the Windows Credential Manager.
+    "endpoints": {}
+  },
+
+  // Where a run's trace goes. Neither Langfuse key is here and neither may ever be -- both are in the Windows Credential Manager.
+  "tracing": {
+    // Send traces at all.
+    "enabled": false,
+
+    // The Langfuse instance to send them to.
+    "host": "",
+
+    // The environment name traces are filed under.
+    "environment": "development",
+
+    // The release traces are filed under. Blank means this build's version.
+    "release": "",
+
+    // Whether the prompt and the reply travel with the trace. Off, a trace still carries the model, the timings, the tokens and any error.
+    "send_prompts": true
   }
 }
