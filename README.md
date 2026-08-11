@@ -77,11 +77,14 @@ More: [audits](docs/audits.md)
 | **Rules profile** | Which rules apply to which language at which version. Remembered per repository. |
 | **Mark all / Mark none** | Everything staged starts marked; unmark what you do not want checked. |
 | **A window before it runs** | Every marked file with its language, its version and the rules that will be checked, beside the token estimate. |
-| **Add / Remove language**, **Rename** | Edit a profile: a row per language, a version dropdown, a checkbox per rule. |
+| **Profiles tab** | Edit a profile: a row per language, a version dropdown, and the rule sets it draws on. Tick a whole set, or individual rules within it. |
+| **Add / Remove rule set** | A language can be checked against several sets at once — its own shipped rules, another language's, and any table of yours. |
+| **Rule Sets tab** | Every set there is: the built-in one per language, and your own imported tables. Shows each rule and, for the built-in ones, the language versions it applies to. |
+| **Languages tab** | The languages a review recognises, the file types that reach each, and how many built-in rules apply at each version. |
 | **Share with the repository** | Writes the profile into the working tree so whoever clones it is reviewed against the same standard. |
 | **Import / Export spreadsheet** | `.xlsx` in and out — the header is looked for rather than assumed. |
 | **Import / Export JSON** | Move tables between machines. An import never overwrites a table you already have. |
-| **Open rules folder** | The per-language rule files, which are yours to edit. |
+| **Open rules folder**, **Reset to shipped** | The per-language rule files are yours to edit; Reset puts the ones this build shipped with back. |
 | **Previous reviews** | Every run per repository. A stored review still reads after its rules are edited or deleted. |
 
 More: [code review](docs/code-review.md)

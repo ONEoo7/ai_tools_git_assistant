@@ -11,6 +11,7 @@ from git_assistant import repo_config
 from git_assistant import git_ops  # noqa: E402
 from git_assistant.config import RepoEntry, Settings  # noqa: E402
 from git_assistant.review import history  # noqa: E402
+from git_assistant.review import profiles as profiles_mod  # noqa: E402
 from git_assistant.review import rules as rules_mod  # noqa: E402
 from git_assistant.review.parse import Finding  # noqa: E402
 from git_assistant.review.reviewer import FileReview, ReviewRun  # noqa: E402
@@ -19,6 +20,26 @@ from git_assistant.ui.review_panel import (  # noqa: E402
     NO_REPOS_MESSAGE,
     ReviewPanel,
 )
+
+DEFAULTS = profiles_mod.DEFAULTS_NAME
+
+
+def _select_set(panel, ref: str) -> None:
+    """Open a rule set in the Rule Sets tab.
+
+    Rename, Delete and Export act on what is selected there, so a test that
+    drives one of those has to say which set it means -- the tab opens on a
+    built-in, where those buttons are greyed.
+    """
+    tree = panel.rule_sets_tab.sets_tree
+    for group in range(tree.topLevelItemCount()):
+        head = tree.topLevelItem(group)
+        for index in range(head.childCount()):
+            child = head.child(index)
+            if child.data(0, Qt.ItemDataRole.UserRole) == ref:
+                tree.setCurrentItem(child)
+                return
+    raise AssertionError(f"no rule set called {ref!r}")
 
 
 @pytest.fixture(scope="module")
@@ -120,7 +141,7 @@ def test_the_shipped_rules_are_offered_when_the_user_has_none_of_their_own(
     panel = ReviewPanel(with_repo)
 
     assert panel.files_list.count() == 3
-    assert panel.profile_combo.currentData() == "Built-in defaults"
+    assert panel.profile_combo.currentData() == DEFAULTS
     assert panel.review_btn.isEnabled()
 
 
@@ -213,9 +234,35 @@ def test_a_repository_that_had_one_table_keeps_reviewing_with_it(
     panel = ReviewPanel(with_repo)
 
     assert panel.profile_combo.currentData() == "House rules (imported)"
-    assert panel.rules_table.rowCount() == 2
+    _select_set(panel, "table:House rules")
+    assert panel.rule_sets_tab.rules_table.rowCount() == 2
     profile = panel._current_profile()
     assert [e.language for e in profile.languages] == ["*"]
+
+
+def test_a_repository_assigned_the_old_default_name_still_finds_it(
+    qapp, with_repo, staged
+):
+    """The shipped profile was renamed, and it is generated rather than stored.
+
+    A pointer at a name nothing generates any more matches nothing, so the
+    repository would quietly review against no profile at all.
+    """
+    with_repo.set_repo_review_profile("/x/demo", "Built-in defaults")
+
+    panel = ReviewPanel(with_repo)
+
+    assert panel.profile_combo.currentData() == DEFAULTS
+    assert with_repo.review_profile_for_repo("/x/demo") == DEFAULTS
+
+
+def test_the_old_default_name_is_not_left_in_the_settings_file(qapp, with_repo, staged):
+    """Migrated once, not resolved on every read."""
+    with_repo.set_repo_review_profile("/x/demo", "Built-in defaults")
+
+    ReviewPanel(with_repo)
+
+    assert with_repo.review_profile_for_repo("/x/demo") != "Built-in defaults"
 
 
 def test_the_profile_a_repository_is_assigned_is_the_one_selected(
@@ -283,7 +330,7 @@ def test_the_tab_lists_every_profile_there_is(qapp, with_repo, staged):
         panel.profile_tab.profiles_list.item(i).text()
         for i in range(panel.profile_tab.profiles_list.count())
     ]
-    assert listed == ["Mine", "Theirs", "Built-in defaults"]
+    assert listed == ["Mine", "Theirs", DEFAULTS]
 
 
 def test_the_tab_opens_the_one_under_review_to_begin_with(qapp, with_repo, staged):
@@ -314,10 +361,10 @@ def test_choosing_in_the_dropdown_does_not_change_what_the_tab_has_open(
     panel = ReviewPanel(with_repo)
     panel.profile_tab.profiles_list.setCurrentRow(1)
 
-    panel.profile_combo.setCurrentIndex(panel.profile_combo.findData("Built-in defaults"))
+    panel.profile_combo.setCurrentIndex(panel.profile_combo.findData(DEFAULTS))
 
     assert panel.profile_tab.profile().name == "Theirs"
-    assert "Built-in defaults" in panel.profile_tab.in_use.text()
+    assert DEFAULTS in panel.profile_tab.in_use.text()
 
 
 def test_editing_a_profile_that_is_not_under_review_leaves_the_review_alone(
@@ -337,12 +384,12 @@ def test_editing_a_profile_that_is_not_under_review_leaves_the_review_alone(
 def test_editing_the_shipped_rules_keeps_the_edit_in_the_copy(qapp, with_repo, staged):
     """The defaults are rebuilt on every lookup; the edit must not be looked up again."""
     panel = ReviewPanel(with_repo)
-    assert panel.profile_combo.currentData() == "Built-in defaults"
+    assert panel.profile_combo.currentData() == DEFAULTS
 
     entry = [e for e in panel.profile_tab.profile().languages if e.language == "python"][0]
     panel.profile_tab._on_version_changed(entry, "py38")
 
-    copies = [p for p in _profiles(with_repo) if p.name == "Built-in defaults (edited)"]
+    copies = [p for p in _profiles(with_repo) if p.name == f"{DEFAULTS} (edited)"]
     assert len(copies) == 1
     assert copies[0].version_for("python") == "py38"
 
@@ -355,11 +402,11 @@ def test_the_copy_is_not_put_under_review_behind_the_user_s_back(
 
     panel.profile_tab._on_version_changed(entry, "py38")
 
-    assert panel.profile_combo.currentData() == "Built-in defaults"
-    assert with_repo.review_profile_for_repo("/x/demo") == "Built-in defaults"
+    assert panel.profile_combo.currentData() == DEFAULTS
+    assert with_repo.review_profile_for_repo("/x/demo") == DEFAULTS
     assert "read-only" in panel.status.text()
     # ...but it is what the tab now has open, or the next edit would copy again.
-    assert panel.profile_tab.profile().name == "Built-in defaults (edited)"
+    assert panel.profile_tab.profile().name == f"{DEFAULTS} (edited)"
 
 
 def test_editing_the_shipped_rules_twice_does_not_make_two_of_one_name(
@@ -368,7 +415,7 @@ def test_editing_the_shipped_rules_twice_does_not_make_two_of_one_name(
     panel = ReviewPanel(with_repo)
 
     for _ in range(2):
-        index = panel.profile_combo.findData("Built-in defaults")
+        index = panel.profile_combo.findData(DEFAULTS)
         panel.profile_tab.profiles_list.setCurrentRow(index)
         entry = [
             e for e in panel.profile_tab.profile().languages if e.language == "python"
@@ -376,7 +423,7 @@ def test_editing_the_shipped_rules_twice_does_not_make_two_of_one_name(
         panel.profile_tab._on_version_changed(entry, "py38")
 
     names = [p.name for p in _profiles(with_repo)]
-    assert names == ["Built-in defaults (edited)", "Built-in defaults (edited) 2"]
+    assert names == [f"{DEFAULTS} (edited)", f"{DEFAULTS} (edited) 2"]
 
 
 def test_renaming_a_table_repoints_the_repositories_that_used_it(
@@ -386,6 +433,7 @@ def test_renaming_a_table_repoints_the_repositories_that_used_it(
     with_repo.repos[0].review_rules = "House rules"
     panel = ReviewPanel(with_repo)
     assert with_repo.review_table_for_repo("/x/demo") == "House rules"
+    _select_set(panel, "table:House rules")
 
     monkeypatch.setattr(
         "git_assistant.ui.review_panel.QInputDialog.getText",
@@ -409,6 +457,7 @@ def test_deleting_a_table_leaves_its_repositories_without_one(
 ):
     monkeypatch.setattr(RuleStore, "load", staticmethod(_with_table))
     panel = ReviewPanel(with_repo)
+    _select_set(panel, "table:House rules")
 
     _confirm(monkeypatch)
     panel._on_delete_table()
@@ -428,10 +477,38 @@ def test_deleting_a_table_leaves_its_repositories_without_one(
 def test_the_rules_grid_shows_what_will_be_sent(qapp, with_repo, staged, monkeypatch):
     monkeypatch.setattr(RuleStore, "load", staticmethod(_with_table))
     panel = ReviewPanel(with_repo)
+    _select_set(panel, "table:House rules")
 
-    assert panel.rules_table.item(0, 0).text() == "R-1"
-    assert panel.rules_table.item(0, 1).text() == "rule 1"
-    assert "2 rule(s)" in panel.rules_note.text()
+    assert panel.rule_sets_tab.rules_table.item(0, 0).text() == "R-1"
+    assert panel.rule_sets_tab.rules_table.item(0, 1).text() == "rule 1"
+    assert "2 rule(s)" in panel.rule_sets_tab.rules_note.text()
+
+
+def test_a_built_in_set_shows_the_versions_each_rule_applies_to(qapp, with_repo, staged):
+    """The one thing the file cannot tell you at a glance."""
+    panel = ReviewPanel(with_repo)
+    _select_set(panel, "builtin:python")
+    table = panel.rule_sets_tab.rules_table
+
+    spans = [table.item(r, 2).text() for r in range(table.rowCount())]
+    assert any("and later" in one for one in spans)
+    assert any(one == "" for one in spans)  # a rule true of every version
+
+
+def test_every_built_in_language_is_listed_even_with_no_tables_of_your_own(
+    qapp, with_repo, staged
+):
+    from git_assistant.review import rule_files
+
+    panel = ReviewPanel(with_repo)
+    refs = [
+        panel.rule_sets_tab.sets_tree.topLevelItem(0).child(i).data(
+            0, Qt.ItemDataRole.UserRole
+        )
+        for i in range(panel.rule_sets_tab.sets_tree.topLevelItem(0).childCount())
+    ]
+
+    assert refs == [f"builtin:{one}" for one in rule_files.languages_covered()]
 
 
 # ---- the provider ---------------------------------------------------------------------
@@ -600,13 +677,16 @@ def test_previous_runs_is_the_default_half_of_the_right_hand_pane(qapp, with_rep
     assert panel.side_panel.tabs.currentIndex() == 0
 
 
-def test_the_middle_pane_is_findings_the_profiles_and_the_rules(qapp, with_repo, staged):
+def test_the_middle_pane_is_findings_profiles_rule_sets_and_languages(
+    qapp, with_repo, staged
+):
     """The reviews moved out to the right, where the other tabs keep theirs."""
     panel = ReviewPanel(with_repo)
     assert [panel.tabs.tabText(i) for i in range(panel.tabs.count())] == [
         "Findings",
         "Profiles",
-        "Rules",
+        "Rule Sets",
+        "Languages",
     ]
 
 

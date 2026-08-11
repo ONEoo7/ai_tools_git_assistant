@@ -17,7 +17,7 @@ absorb:
 
 from __future__ import annotations
 
-from git_assistant import usage
+from git_assistant import net, usage
 from git_assistant.llm import LLMError, ModelInfo
 
 #: Used when the user has not chosen a model. The current Opus is the default
@@ -61,8 +61,19 @@ class ClaudeClient:
         self._timeout = timeout
 
     def _client(self, timeout: float):
+        """The SDK's client, given ours to make the connection with.
+
+        The SDK builds its own httpx client, which verifies against `certifi`
+        and so cannot see a corporate proxy's root certificate. Handing it one
+        that reads the machine's trust store is the whole fix; everything else
+        about the SDK's client is left alone. See git_assistant.net.
+        """
         anthropic = _sdk()
-        return anthropic.Anthropic(api_key=self._api_key, timeout=timeout)
+        return anthropic.Anthropic(
+            api_key=self._api_key,
+            timeout=timeout,
+            http_client=net.http_client(timeout=timeout),
+        )
 
     # ---- models ------------------------------------------------------------
     def list_models(self) -> list[ModelInfo]:

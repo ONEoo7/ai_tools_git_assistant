@@ -28,11 +28,22 @@ from git_assistant.review.rules import Rule, RuleStore, RuleTable, normalize_id
 
 #: The profile every repository starts with: the shipped rules for whatever
 #: language each file turns out to be.
-DEFAULTS_NAME = "Built-in defaults"
+DEFAULTS_NAME = "Default Rules"
+
+#: What this profile used to be called. A repository assigned the old name must
+#: still resolve: the profile is generated rather than stored, so a pointer at a
+#: name nothing generates any more finds nothing and the repository silently
+#: loses its rules.
+LEGACY_DEFAULTS_NAMES = ("Built-in defaults",)
 
 #: How a selection names a shipped table and one of the user's own.
 BUILTIN = "builtin:"
 TABLE = "table:"
+
+
+def canonical_name(name: str) -> str:
+    """The name a profile is known by now, given one it may have had before."""
+    return DEFAULTS_NAME if name in LEGACY_DEFAULTS_NAMES else name
 
 
 @dataclass

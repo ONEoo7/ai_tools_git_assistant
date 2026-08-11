@@ -39,6 +39,14 @@ from git_assistant.review import builtin, languages, rule_files
 from git_assistant.review import profiles as profiles_mod
 from git_assistant.review.profiles import LanguageRules, Profile, Selection
 
+def ref_label(ref: str) -> str:
+    """A rule set's ref, written the way the Rule Sets tab writes it."""
+    if ref.startswith(profiles_mod.BUILTIN):
+        return f"{languages.label_of(ref[len(profiles_mod.BUILTIN) :])} (built in)"
+    if ref.startswith(profiles_mod.TABLE):
+        return f"{ref[len(profiles_mod.TABLE) :]} (mine)"
+    return ref
+
 MUTED = "color: #888;"
 _MUTED = QColor("#888888")
 _DETECTED = QColor("#8ab0cc")
@@ -124,6 +132,13 @@ class ProfileTab(QWidget):
             "Cover a language this profile says nothing about yet."
         )
         self.remove_language_btn = QPushButton("Remove language")
+        self.add_rule_set_btn = QPushButton("Add rule set...")
+        self.add_rule_set_btn.setToolTip(
+            "Check the selected language against another set as well. A language "
+            "can draw on several -- the shipped rules for it, another language's, "
+            "and any table of your own."
+        )
+        self.remove_rule_set_btn = QPushButton("Remove rule set")
         self.share_btn = QPushButton("Share with the repository")
         self.share_btn.setToolTip(
             "Write this profile into the repository, so anyone who clones it is "
@@ -134,15 +149,24 @@ class ProfileTab(QWidget):
             "Add the tables this repository shipped to your own library."
         )
         self.copy_btn.setVisible(False)
+        # Two rows, because six buttons on one set a minimum width that pushed
+        # the profile list beside this pane down to a truncated column. Split by
+        # what they act on: the profile's languages, then the profile itself.
         for button in (
             self.add_language_btn,
             self.remove_language_btn,
-            self.share_btn,
-            self.copy_btn,
+            self.add_rule_set_btn,
+            self.remove_rule_set_btn,
         ):
             row.addWidget(button)
         row.addStretch(1)
         box.addLayout(row)
+
+        shared_row = QHBoxLayout()
+        shared_row.addWidget(self.share_btn)
+        shared_row.addWidget(self.copy_btn)
+        shared_row.addStretch(1)
+        box.addLayout(shared_row)
         return pane
 
     # ---- the list of profiles ---------------------------------------------------
@@ -194,7 +218,13 @@ class ProfileTab(QWidget):
         self.tree.clear()
         profile = self._profile
         editable = profile is not None and not profile.from_repository()
-        for button in (self.add_language_btn, self.remove_language_btn, self.share_btn):
+        for button in (
+            self.add_language_btn,
+            self.remove_language_btn,
+            self.add_rule_set_btn,
+            self.remove_rule_set_btn,
+            self.share_btn,
+        ):
             button.setEnabled(editable)
         self.copy_btn.setVisible(bool(profile and profile.from_repository()))
 
@@ -224,9 +254,14 @@ class ProfileTab(QWidget):
                 continue
             head = QTreeWidgetItem([table.name, "", f"{len(table.rules)}"])
             head.setData(0, Qt.ItemDataRole.UserRole, selection)
+            # Tickable itself, so a whole set can be turned on or off without
+            # visiting every rule in it -- and tri-state, so a set with some of
+            # its rules off does not read as one that is entirely off.
+            head.setFlags(head.flags() | Qt.ItemFlag.ItemIsUserCheckable)
             item.addChild(head)
             for rule in table.rules:
                 head.addChild(_rule_row(rule, selection))
+            _refresh_head_state(head)
         return item
 
     def _table_of(self, selection: Selection, entry: LanguageRules):
@@ -282,19 +317,50 @@ class ProfileTab(QWidget):
         self.changed.emit()
 
     def _on_item_changed(self, item: QTreeWidgetItem, column: int) -> None:
-        """A rule was ticked or unticked."""
+        """A rule, or a whole rule set, was ticked or unticked."""
         if column != 0:
             return
         payload = item.data(0, Qt.ItemDataRole.UserRole)
+        checked = item.checkState(0) == Qt.CheckState.Checked
+
+        if isinstance(payload, Selection):
+            self._set_whole(item, payload, checked)
+            self.changed.emit()
+            return
+
         if not isinstance(payload, tuple):
             return
         selection, rule_id = payload
-        checked = item.checkState(0) == Qt.CheckState.Checked
         excluded = [x for x in selection.exclude if x != rule_id]
         if not checked:
             excluded.append(rule_id)
         selection.exclude = excluded
+        # The set above it is now on, off, or somewhere between, and saying so
+        # is the whole reason it is tri-state.
+        parent = item.parent()
+        if parent is not None:
+            self.tree.blockSignals(True)
+            _refresh_head_state(parent)
+            self.tree.blockSignals(False)
         self.changed.emit()
+
+    def _set_whole(self, head: QTreeWidgetItem, selection: Selection, checked: bool) -> None:
+        """Turn every rule in one set on or off.
+
+        Excluding by id rather than dropping the selection: a set that is off is
+        still a set this language is pointed at, and the difference matters the
+        next time somebody wants one rule of it back.
+        """
+        rules = [head.child(i) for i in range(head.childCount())]
+        selection.exclude = (
+            [] if checked else [row.data(0, Qt.ItemDataRole.UserRole)[1] for row in rules]
+        )
+        state = Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked
+        self.tree.blockSignals(True)
+        for row in rules:
+            row.setCheckState(0, state)
+        head.setCheckState(0, state)
+        self.tree.blockSignals(False)
 
     def add_language(self, language: str) -> None:
         """Cover a language, with whatever ships for it."""
@@ -332,6 +398,75 @@ class ProfileTab(QWidget):
             return []
         covered = {e.language for e in self._profile.languages}
         return [l for l in languages.ids() if l not in covered]
+
+    # ---- rule sets within a language ------------------------------------------
+    def current_entry(self) -> LanguageRules | None:
+        """The language row the selection is in, whichever depth it is at."""
+        item = self.tree.currentItem()
+        while item is not None and item.parent() is not None:
+            item = item.parent()
+        return item.data(0, Qt.ItemDataRole.UserRole) if item is not None else None
+
+    def current_selection(self) -> Selection | None:
+        """The rule set the selection is in, or None if it is a language row."""
+        item = self.tree.currentItem()
+        while item is not None:
+            payload = item.data(0, Qt.ItemDataRole.UserRole)
+            if isinstance(payload, Selection):
+                return payload
+            item = item.parent()
+        return None
+
+    def unused_refs(self) -> list[str]:
+        """Rule sets the selected language is not already checked against.
+
+        Every language's shipped set is offered, not just this one's: a C++
+        project that wants the C rules too is an ordinary thing to want, and the
+        model has always allowed it.
+        """
+        entry = self.current_entry()
+        if entry is None or self._profile is None or self._profile.from_repository():
+            return []
+        taken = {s.ref for s in entry.selections}
+        offered = [builtin.ref_of(one) for one in rule_files.languages_covered()]
+        offered += [f"{profiles_mod.TABLE}{name}" for name in self._store.names()] if self._store else []
+        return [ref for ref in offered if ref not in taken]
+
+    def add_rule_set(self, ref: str) -> None:
+        """Check the selected language against one more set."""
+        entry = self.current_entry()
+        if not ref or entry is None or any(s.ref == ref for s in entry.selections):
+            return
+        entry.selections.append(Selection(ref))
+        self.changed.emit()
+        self._fill()
+        self.attach_version_pickers()
+
+    def remove_rule_set(self) -> None:
+        """Stop checking the selected language against the selected set."""
+        entry, selection = self.current_entry(), self.current_selection()
+        if entry is None or selection is None:
+            return
+        entry.selections = [s for s in entry.selections if s is not selection]
+        self.changed.emit()
+        self._fill()
+        self.attach_version_pickers()
+
+
+def _refresh_head_state(head: QTreeWidgetItem) -> None:
+    """Set a rule set's tick from how many of its rules are still on."""
+    total = head.childCount()
+    on = sum(
+        1
+        for i in range(total)
+        if head.child(i).checkState(0) == Qt.CheckState.Checked
+    )
+    if not total or on == total:
+        head.setCheckState(0, Qt.CheckState.Checked)
+    elif on == 0:
+        head.setCheckState(0, Qt.CheckState.Unchecked)
+    else:
+        head.setCheckState(0, Qt.CheckState.PartiallyChecked)
 
 
 def _rule_row(rule, selection: Selection) -> QTreeWidgetItem:

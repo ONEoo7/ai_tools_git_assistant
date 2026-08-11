@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import httpx
 
-from git_assistant import usage
+from git_assistant import net, usage
 from git_assistant.config import DEFAULT_TEMPERATURE
 from git_assistant.llm import LLMError, ModelInfo
 
@@ -71,7 +71,7 @@ class OpenAICompatibleClient:
     def _request(self, method: str, path: str, timeout: float, **kwargs):
         url = f"{self.base_url}{path}"
         try:
-            with httpx.Client(
+            with net.http_client(
                 timeout=httpx.Timeout(timeout, connect=CONNECT_TIMEOUT),
                 headers=self._headers(),
                 params=self._extra_query or None,
@@ -97,6 +97,11 @@ class OpenAICompatibleClient:
                 f"within {timeout:.0f}s. Usually a stalled connection - try again."
             ) from exc
         except httpx.HTTPError as exc:
+            # A certificate that did not verify is worth telling apart: the raw
+            # message names a line of C and no action, and on a corporate
+            # network the cause is nearly always TLS inspection.
+            if net.is_certificate_error(exc):
+                raise LLMError(net.certificate_help(self.base_url)) from exc
             raise LLMError(f"Could not reach {self.base_url}: {exc}") from exc
 
     # ---- models ------------------------------------------------------------

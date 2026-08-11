@@ -56,13 +56,18 @@ from git_assistant.review.reviewer import Candidate, staged_files
 from git_assistant.review.rules import RuleStore, RuleTable
 from git_assistant.ui.review_plan_dialog import confirm as confirm_plan
 from git_assistant.ui.preview_dialog import SECTION_GAP
+from git_assistant.ui.languages_tab import LanguagesTab
+from git_assistant.ui import profile_tab as profile_tab_mod
 from git_assistant.ui.profile_tab import ProfileTab
+from git_assistant.ui.rule_sets_tab import RuleSetsTab
 from git_assistant.ui.repo_picker import RepoPicker
 from git_assistant.ui.side_panel import SidePanel
 from git_assistant.ui.workers import ReviewWorker, run_worker
 
 NO_REPOS_MESSAGE = "No repositories configured - add one in Repositories."
-NO_RULES_MESSAGE = "No rule table yet - import a spreadsheet under Rules."
+#: Said when the user has no tables of their own. Deliberately not "no rules":
+#: every install has the built-in sets, and a review runs against them.
+NO_RULES_MESSAGE = "No rule tables of your own - the built-in sets are in use."
 INFO_COLOUR = "color: #8ab;"
 MUTED_COLOUR = "color: #888;"
 WARN_COLOUR = "color: #b36b00;"
@@ -224,7 +229,8 @@ class ReviewPanel(QWidget):
         self.tabs = QTabWidget()
         self.tabs.addTab(self._build_findings_tab(), "Findings")
         self.tabs.addTab(self._build_profile_tab(), "Profiles")
-        self.tabs.addTab(self._build_rules_tab(), "Rules")
+        self.tabs.addTab(self._build_rule_sets_tab(), "Rule Sets")
+        self.tabs.addTab(LanguagesTab(), "Languages")
         box.addWidget(self.tabs, 1)
         return pane
 
@@ -263,6 +269,10 @@ class ReviewPanel(QWidget):
         self.profile_tab.add_language_btn.clicked.connect(self._on_add_language)
         self.profile_tab.remove_language_btn.clicked.connect(
             self.profile_tab.remove_language
+        )
+        self.profile_tab.add_rule_set_btn.clicked.connect(self._on_add_rule_set)
+        self.profile_tab.remove_rule_set_btn.clicked.connect(
+            self.profile_tab.remove_rule_set
         )
         self.profile_tab.share_btn.clicked.connect(self._on_share_profile)
         self.profile_tab.copy_btn.clicked.connect(self._on_copy_repo_tables)
@@ -323,6 +333,30 @@ class ReviewPanel(QWidget):
         if ok and chosen in labels:
             self.profile_tab.add_language(missing[labels.index(chosen)])
 
+    def _on_add_rule_set(self) -> None:
+        """Point the selected language at one more rule set."""
+        if self.profile_tab.current_entry() is None:
+            QMessageBox.information(
+                self,
+                "Pick a language",
+                "Select the language to add a rule set to first.",
+            )
+            return
+        refs = self.profile_tab.unused_refs()
+        if not refs:
+            QMessageBox.information(
+                self,
+                "Every rule set",
+                "This language is already checked against all of them.",
+            )
+            return
+        labels = [profile_tab_mod.ref_label(ref) for ref in refs]
+        chosen, ok = QInputDialog.getItem(
+            self, "Add a rule set", "Rule set:", labels, 0, False
+        )
+        if ok and chosen in labels:
+            self.profile_tab.add_rule_set(refs[labels.index(chosen)])
+
     def _on_share_profile(self) -> None:
         repo = self._repo_path()
         profile = self.profile_tab.profile()  # the one open, not the one under review
@@ -361,88 +395,60 @@ class ReviewPanel(QWidget):
         self._refresh_tables()
         self.status.setText(f"Copied {', '.join(added)} into your rule tables.")
 
-    def _refresh_shipped_rules_note(self) -> None:
-        broken = [
-            language
-            for language in rule_files.languages_covered()
-            if rule_files.problem_with(language)
-        ]
-        covered = len(rule_files.languages_covered())
-        self.shipped_rules_note.setText(
-            f"Per-language rules: {covered} file(s) in {rule_files.rules_dir()}."
-            + (
-                f"  {len(broken)} could not be read and the shipped rules are "
-                f"being used instead: {', '.join(broken)}."
-                if broken
-                else ""
-            )
-        )
-        self.shipped_rules_note.setStyleSheet(WARN_COLOUR if broken else MUTED_COLOUR)
-
     def _on_open_rules_folder(self) -> None:
         rule_files.ensure_files()  # nothing to open until they exist
-        self._refresh_shipped_rules_note()
+        self.rule_sets_tab.show_sets(self._store)
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(rule_files.rules_dir())))
 
-    def _build_rules_tab(self) -> QWidget:
-        tab = QWidget()
-        box = QVBoxLayout(tab)
+    def _build_rule_sets_tab(self) -> QWidget:
+        """Every rule set a profile can draw on: the shipped ones and my own."""
+        self.rule_sets_tab = RuleSetsTab()
+        self.rule_sets_tab.selected.connect(lambda _ref: self._show_table())
+        self.rule_sets_tab.open_folder_btn.clicked.connect(self._on_open_rules_folder)
+        self.rule_sets_tab.open_file_btn.clicked.connect(self._on_open_rule_file)
+        self.rule_sets_tab.restore_btn.clicked.connect(self._on_restore_rule_file)
+        self.rule_sets_tab.import_xlsx_btn.clicked.connect(self._on_import_xlsx)
+        self.rule_sets_tab.export_xlsx_btn.clicked.connect(self._on_export_xlsx)
+        self.rule_sets_tab.import_json_btn.clicked.connect(self._on_import_json)
+        self.rule_sets_tab.export_json_btn.clicked.connect(self._on_export_json)
+        self.rule_sets_tab.rename_table_btn.clicked.connect(self._on_rename_table)
+        self.rule_sets_tab.delete_table_btn.clicked.connect(self._on_delete_table)
+        return self.rule_sets_tab
 
-        # The shipped rules are files now, and files are the thing to say so
-        # about: a rule set nobody can find is one nobody can correct.
-        shipped_row = QHBoxLayout()
-        self.shipped_rules_note = QLabel("")
-        self.shipped_rules_note.setWordWrap(True)
-        self.shipped_rules_note.setStyleSheet(MUTED_COLOUR)
-        self.open_rules_btn = QPushButton("Open rules folder")
-        self.open_rules_btn.setToolTip(
-            "One file per language, with the versions each rule applies to. "
-            "Editing one changes what the next review checks."
-        )
-        self.open_rules_btn.clicked.connect(self._on_open_rules_folder)
-        shipped_row.addWidget(self.shipped_rules_note, 1)
-        shipped_row.addWidget(self.open_rules_btn)
-        box.addLayout(shipped_row)
-        self._refresh_shipped_rules_note()
+    def _on_open_rule_file(self) -> None:
+        language = self.rule_sets_tab.current_language()
+        if not language:
+            return
+        rule_files.ensure_files()
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(rule_files.path_for(language))))
 
-        self.rules_table = QTableWidget(0, 2)
-        self.rules_table.setHorizontalHeaderLabels(["ruleID", "ruleDetails"])
-        self.rules_table.verticalHeader().setVisible(False)
-        self.rules_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        header = self.rules_table.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        box.addWidget(self.rules_table, 1)
+    def _on_restore_rule_file(self) -> None:
+        """Write the shipped rules back over one language's file.
 
-        row = QHBoxLayout()
-        self.import_xlsx_btn = QPushButton("Import spreadsheet...")
-        self.import_xlsx_btn.setToolTip(
-            "Read a .xlsx with a ruleID column and a ruleDetails column."
-        )
-        self.import_xlsx_btn.clicked.connect(self._on_import_xlsx)
-        self.export_xlsx_btn = QPushButton("Export spreadsheet...")
-        self.export_xlsx_btn.clicked.connect(self._on_export_xlsx)
-        self.import_json_btn = QPushButton("Import JSON...")
-        self.import_json_btn.setToolTip("Merge tables exported from another machine.")
-        self.import_json_btn.clicked.connect(self._on_import_json)
-        self.export_json_btn = QPushButton("Export JSON...")
-        self.export_json_btn.clicked.connect(self._on_export_json)
-        for button in (
-            self.import_xlsx_btn,
-            self.export_xlsx_btn,
-            self.import_json_btn,
-            self.export_json_btn,
+        Confirmed, because the file may be somebody's own rules by now and this
+        is the one button here that destroys work rather than adding to it.
+        """
+        language = self.rule_sets_tab.current_language()
+        if not language:
+            return
+        label = languages.label_of(language)
+        if (
+            QMessageBox.question(
+                self,
+                "Reset to shipped",
+                f"Replace {rule_files.path_for(language)} with the {label} rules "
+                "this build shipped with?\n\nAny edits you made to it are lost.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel,
+            )
+            != QMessageBox.StandardButton.Yes
         ):
-            row.addWidget(button)
-        row.addStretch(1)
-        self.rename_table_btn = QPushButton("Rename...")
-        self.rename_table_btn.clicked.connect(self._on_rename_table)
-        self.delete_table_btn = QPushButton("Delete")
-        self.delete_table_btn.clicked.connect(self._on_delete_table)
-        row.addWidget(self.rename_table_btn)
-        row.addWidget(self.delete_table_btn)
-        box.addLayout(row)
-        return tab
+            return
+        problem = rule_files.restore(language)
+        self.rule_sets_tab.show_sets(self._store)
+        self.status.setText(
+            problem or f"{label} rules reset to the ones this build shipped with."
+        )
 
     def _build_history_pane(self) -> QWidget:
         """Every review recorded for this repository."""
@@ -633,6 +639,9 @@ class ReviewPanel(QWidget):
             self.settings.set_repo_review_profile(repo, chosen)
             self.settings.save()
         self._refresh_versions()
+        # The store may have gained or lost a table since this last ran, and the
+        # tab is where Rename and Delete read their target from.
+        self.rule_sets_tab.show_sets(self._store)
         self._show_table()
 
     def _migrate(self, repo: str) -> None:
@@ -643,7 +652,17 @@ class ReviewPanel(QWidget):
         review that suddenly reports thirty new findings is indistinguishable
         from a regression in the code.
         """
-        if not repo or self.settings.review_profile_for_repo(repo):
+        if not repo:
+            return
+        assigned = self.settings.review_profile_for_repo(repo)
+        if assigned:
+            # The shipped profile was renamed. It is generated rather than
+            # stored, so a pointer at the old name matches nothing and the
+            # repository would quietly review against no profile at all.
+            renamed = profiles_mod.canonical_name(assigned)
+            if renamed != assigned:
+                self.settings.set_repo_review_profile(repo, renamed)
+                self.settings.save()
             return
         table = self.settings.review_table_for_repo(repo)
         if not table or self._store.find(table) is None:
@@ -690,36 +709,24 @@ class ReviewPanel(QWidget):
             self._versions.update(profiles_mod.versions_of(profile))
 
     def _current_table(self) -> RuleTable | None:
-        """The table the Rules tab shows: the first of the user's own in use."""
-        profile = self._current_profile()
-        if profile is not None:
-            for entry in profile.languages:
-                for selection in entry.selections:
-                    if not selection.is_builtin:
-                        found = self._store.find(selection.target)
-                        if found is not None:
-                            return found
-        names = self._store.names()
-        return self._store.find(names[0]) if names else None
+        """The table Rename, Delete and Export act on: the one selected there.
+
+        Selected rather than inferred. This used to be "the first of the user's
+        own that the current profile reaches", which meant Delete removed a
+        table nobody had pointed at -- the tab showed one table at a time and
+        chose it itself.
+        """
+        name = self.rule_sets_tab.current_table_name()
+        return self._store.find(name) if name else None
 
     def _show_table(self) -> None:
-        # The profile is drawn whatever the Rules tab has to show: a user with
-        # no tables of their own still has the shipped rules, and an empty
+        # The profile is drawn whatever the Rule Sets tab has to show: a user
+        # with no tables of their own still has the shipped rules, and an empty
         # Profile tab would say the opposite.
         self._show_profile()
-        table = self._current_table()
-        self.rules_table.setRowCount(0)
-        for name in ("rename_table_btn", "delete_table_btn", "export_xlsx_btn"):
-            getattr(self, name).setEnabled(table is not None)
-        if table is None:
-            self.rules_note.setText(NO_RULES_MESSAGE)
-            return
-        self.rules_table.setRowCount(len(table.rules))
-        for row, rule in enumerate(table.rules):
-            self.rules_table.setItem(row, 0, QTableWidgetItem(rule.rule_id))
-            self.rules_table.setItem(row, 1, QTableWidgetItem(rule.details))
-        source = f" from {Path(table.source).name}" if table.source else ""
-        self.rules_note.setText(f"{len(table.rules)} rule(s){source}")
+        self.rules_note.setText(
+            "" if self._store.names() else NO_RULES_MESSAGE
+        )
 
     def _show_profile(self) -> None:
         """Draw the profile on screen, with what the repository declares filled in."""

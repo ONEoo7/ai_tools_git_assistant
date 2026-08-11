@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import httpx
 
-from git_assistant import usage
+from git_assistant import net, usage
 from git_assistant.config import DEFAULT_TEMPERATURE
 from git_assistant.llm import LLMError, ModelInfo
 
@@ -51,7 +51,7 @@ class LMStudioClient:
         self.connect_timeout = connect_timeout
 
     def _list_client(self) -> httpx.Client:
-        return httpx.Client(
+        return net.http_client(
             timeout=httpx.Timeout(self.list_timeout, connect=self.connect_timeout)
         )
 
@@ -153,7 +153,7 @@ class LMStudioClient:
             "stream": False,
         }
         try:
-            with httpx.Client(
+            with net.http_client(
                 timeout=httpx.Timeout(self.chat_timeout, connect=self.connect_timeout)
             ) as client:
                 resp = client.post(f"{self.base_url}/v1/chat/completions", json=body)

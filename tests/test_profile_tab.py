@@ -277,3 +277,124 @@ def test_no_profile_selected_says_so(qapp, store):
     tab = ProfileTab()
     tab.show_profile(None, store, {})
     assert "No profile" in tab.header.text()
+
+
+# ---- whole rule sets, and rules within them ---------------------------------------------
+def _set_head(tab, language_label, index=0):
+    """The nth rule-set row under a language."""
+    return _row(tab, language_label).child(index)
+
+
+def test_a_rule_set_is_ticked_when_every_rule_in_it_is(qapp, store):
+    tab = _tab(qapp, store=store)
+    assert _set_head(tab, "Python").checkState(0) == Qt.CheckState.Checked
+
+
+def test_unticking_one_rule_leaves_its_set_part_ticked(qapp, store):
+    """Part-ticked, not unticked: the set is still checked, just not entirely."""
+    profile = _profile()
+    tab = _tab(qapp, profile=profile, store=store)
+    head = _set_head(tab, "Python")
+
+    head.child(0).setCheckState(0, Qt.CheckState.Unchecked)
+
+    assert head.checkState(0) == Qt.CheckState.PartiallyChecked
+    assert profile.languages[0].selections[0].exclude == [head.child(0).text(0).split(":")[0]]
+
+
+def test_unticking_a_whole_set_excludes_every_rule_in_it(qapp, store):
+    profile = _profile()
+    tab = _tab(qapp, profile=profile, store=store)
+    head = _set_head(tab, "Python")
+
+    head.setCheckState(0, Qt.CheckState.Unchecked)
+
+    selection = profile.languages[0].selections[0]
+    assert len(selection.exclude) == head.childCount()
+    # Nothing left to check against, which is what makes a Python file skipped
+    # rather than reviewed against an empty rule list.
+    assert resolve(profile, store, "python", "") is None
+
+
+def test_re_ticking_a_set_brings_every_rule_back(qapp, store):
+    profile = _profile()
+    tab = _tab(qapp, profile=profile, store=store)
+    head = _set_head(tab, "Python")
+    head.setCheckState(0, Qt.CheckState.Unchecked)
+
+    head.setCheckState(0, Qt.CheckState.Checked)
+
+    assert profile.languages[0].selections[0].exclude == []
+    assert resolve(profile, store, "python", "").rules
+
+
+def test_a_set_that_is_off_is_still_a_set_the_language_points_at(qapp, store):
+    """Excluding every rule is not the same as removing the set.
+
+    Removing it would lose the place to go and turn one rule back on, which is
+    what somebody who unticked the lot usually wants next.
+    """
+    profile = _profile()
+    tab = _tab(qapp, profile=profile, store=store)
+    _set_head(tab, "Python").setCheckState(0, Qt.CheckState.Unchecked)
+
+    assert [s.ref for s in profile.languages[0].selections] == ["builtin:python"]
+
+
+def test_a_language_can_be_checked_against_a_second_rule_set(qapp, store):
+    profile = _profile()
+    tab = _tab(qapp, profile=profile, store=store)
+    tab.tree.setCurrentItem(_row(tab, "Python"))
+
+    tab.add_rule_set("table:House rules")
+
+    assert [s.ref for s in profile.languages[0].selections] == [
+        "builtin:python",
+        "table:House rules",
+    ]
+    # And both sets' rules are what a review of a Python file would be sent.
+    ids = [r.rule_id for r in resolve(profile, store, "python", "").rules]
+    assert "H-1" in ids and any(one.startswith("PY-") for one in ids)
+
+
+def test_the_sets_already_in_use_are_not_offered_again(qapp, store):
+    tab = _tab(qapp, store=store)
+    tab.tree.setCurrentItem(_row(tab, "Python"))
+
+    offered = tab.unused_refs()
+
+    assert "builtin:python" not in offered  # already there
+    assert "table:House rules" in offered
+    assert "builtin:cpp" in offered  # another language's rules are fair game
+
+
+def test_a_rule_set_can_be_removed_from_a_language(qapp, store):
+    profile = _profile()
+    tab = _tab(qapp, profile=profile, store=store)
+    tab.tree.setCurrentItem(_set_head(tab, "Python"))
+
+    tab.remove_rule_set()
+
+    assert profile.languages[0].selections == []
+
+
+def test_removing_a_rule_set_needs_one_selected(qapp, store):
+    """A language row is not a rule set, and must not silently remove the first."""
+    profile = _profile()
+    tab = _tab(qapp, profile=profile, store=store)
+    tab.tree.setCurrentItem(_row(tab, "Python"))
+
+    tab.remove_rule_set()
+
+    assert [s.ref for s in profile.languages[0].selections] == ["builtin:python"]
+
+
+def test_a_repository_s_profile_offers_no_rule_sets_to_add(qapp, store):
+    profile = _profile()
+    profile.source = "repository"
+    tab = _tab(qapp, profile=profile, store=store)
+    tab.tree.setCurrentItem(_row(tab, "Python"))
+
+    assert tab.unused_refs() == []
+    assert not tab.add_rule_set_btn.isEnabled()
+    assert not tab.remove_rule_set_btn.isEnabled()

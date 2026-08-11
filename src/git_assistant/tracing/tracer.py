@@ -119,6 +119,8 @@ def client(config: TraceSettings):
         _quieten()
         _name_the_service()
         try:
+            from git_assistant import net
+
             _CLIENT = langfuse.Langfuse(
                 public_key=config.public_key,
                 secret_key=config.secret_key,
@@ -126,6 +128,10 @@ def client(config: TraceSettings):
                 environment=config.environment,
                 release=config.release or _version(),
                 tracing_enabled=True,
+                # A self-hosted Langfuse behind the same corporate proxy fails
+                # to verify for the same reason everything else does. See
+                # git_assistant.net.
+                httpx_client=net.http_client(),
             )
         except Exception as exc:
             _CLIENT = None

@@ -11,6 +11,11 @@ PowerShell and TypeScript. One review can therefore span a polyglot repository
 with each file judged by the rules that apply to it. A file no language claims
 is listed as **unreviewable** rather than checked against somebody else's rules.
 
+The **Languages** tab states all of it: every language, the extensions and
+shebangs that reach it, and — expanding a row — how many built-in rules apply at
+each of its versions. That last number is the one worth looking at before
+pinning a version, because it is not the same for every version.
+
 `.h` is C or C++ and only your repository knows which. The pre-run window has an
 editable language column, and the answer is remembered so it is asked once.
 
@@ -27,8 +32,18 @@ declares one.
 ## Profiles
 
 A **profile** ties it together: which rules apply to which language, at which
-version. Open one and it has a row per language, a version dropdown and a
-checkbox per rule.
+version. Open one and it has a row per language, a version dropdown, and under
+each language the **rule sets** it is checked against.
+
+A language can draw on more than one set — its own shipped rules, another
+language's, and any table of yours — through **Add rule set…**. Each set has its
+own tick: turn the whole set off, or open it and untick individual rules. A set
+with some of its rules off shows part-ticked rather than off, and a set that is
+entirely off is still a set the language points at, so one rule can be turned
+back on without adding it again.
+
+Every install starts with **Default Rules**: the shipped rules for whatever
+language each file turns out to be.
 
 Which profile a review runs against is the **Rules profile** dropdown beside the
 repository, remembered per repository, and marked in bold in the list — so
@@ -43,12 +58,20 @@ standard it holds itself to. **Share with the repository** writes it to
 ones by name. That is the only file this application ever writes into a working
 tree, and it takes an explicit press.
 
-## Rules
+## Rule sets
 
-The rules themselves are one JSON file per language under the config directory's
-`code_review/`, which **Open rules folder** opens. They are yours to edit; each
-rule carries a `since`/`until` span so one rule can be true across several
-language versions without being written out several times.
+The **Rule Sets** tab lists every set a profile can draw on, of both kinds:
+
+- **Built in** — one per language, and what nearly every review actually runs
+  against. Each rule is shown with the span of language versions it is true for,
+  which is the one thing the file cannot tell you at a glance.
+- **Mine** — the tables imported from a spreadsheet or from another machine.
+
+The built-in sets are one JSON file per language under the config directory's
+`code_review/`, which **Open rules folder** and **Open this file** open. They are
+yours to edit; each rule carries a `since`/`until` span so one rule can be true
+across several language versions without being written out several times.
+**Reset to shipped** puts the rules this build came with back over one of them.
 
 **Import spreadsheet…** reads an `.xlsx` with a rule-ID column and a
 rule-details column. The header is looked for rather than assumed, so a title row
