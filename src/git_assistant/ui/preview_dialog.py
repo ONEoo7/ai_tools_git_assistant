@@ -39,6 +39,7 @@ from git_assistant.diff_strategy import filter_files, split_diff
 from git_assistant.providers import PROVIDERS
 from git_assistant.ui.estimate_dialog import confirm
 from git_assistant.ui.repo_picker import RepoPicker
+from git_assistant.ui import side_panel as side_panel_mod
 from git_assistant.ui.side_panel import SidePanel
 from git_assistant.ui.workers import (
     FunctionWorker,
@@ -296,7 +297,9 @@ class CommitPanel(QWidget):
         splitter.setStretchFactor(1, 3)
         splitter.setStretchFactor(2, 4)
         splitter.setStretchFactor(3, 3)
-        splitter.setSizes([200, 380, 440, 380])
+        side_panel_mod.attach(
+            splitter, self.side_panel, open_sizes=[200, 400, 560, side_panel_mod.OPEN_WIDTH]
+        )
 
         # Default margins, matching the other tabs. PreviewDialog zeroes its own
         # layout instead, so the standalone window keeps a single set of margins.

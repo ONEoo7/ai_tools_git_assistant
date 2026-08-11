@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from git_assistant import git_ops
 from git_assistant.config import Settings
 from git_assistant.review import languages
+from git_assistant.review.judge import JudgeConfig
 from git_assistant.review.reviewer import Candidate, staged_files
 from git_assistant.review.rules import RuleTable
 
@@ -71,6 +72,15 @@ class ReviewPlan:
     repo: str
     profile: str = ""
     files: list[FilePlan] = field(default_factory=list)
+    #: Which model scores this run's answers, or None for no scoring. Carried
+    #: on the plan and not passed around separately, because the window, the
+    #: estimate and the run all have to agree about whether it happens -- and
+    #: threading a flag into each of them independently is how they stop
+    #: agreeing. See the module docstring.
+    judge: JudgeConfig | None = None
+
+    def judged(self) -> bool:
+        return self.judge is not None and self.judge.usable()
 
     def reviewable(self) -> list[FilePlan]:
         return [f for f in self.files if f.reviewable]
@@ -145,6 +155,7 @@ def build(
     overrides: dict[str, str] | None = None,
     profile: str = "",
     candidates: list[Candidate] | None = None,
+    judge: JudgeConfig | None = None,
 ) -> ReviewPlan:
     """Work out what a review of ``paths`` would do.
 
@@ -160,7 +171,7 @@ def build(
     versions = versions or {}
 
     tables: dict[tuple[str, str], RuleTable | None] = {}
-    plan = ReviewPlan(repo=repo, profile=profile)
+    plan = ReviewPlan(repo=repo, profile=profile, judge=judge)
     for candidate in found:
         if candidate.path not in wanted:
             continue

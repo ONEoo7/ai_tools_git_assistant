@@ -677,9 +677,7 @@ def test_previous_runs_is_the_default_half_of_the_right_hand_pane(qapp, with_rep
     assert panel.side_panel.tabs.currentIndex() == 0
 
 
-def test_the_middle_pane_is_findings_profiles_rule_sets_and_languages(
-    qapp, with_repo, staged
-):
+def test_the_middle_pane_carries_every_code_review_screen(qapp, with_repo, staged):
     """The reviews moved out to the right, where the other tabs keep theirs."""
     panel = ReviewPanel(with_repo)
     assert [panel.tabs.tabText(i) for i in range(panel.tabs.count())] == [
@@ -687,6 +685,7 @@ def test_the_middle_pane_is_findings_profiles_rule_sets_and_languages(
         "Profiles",
         "Rule Sets",
         "Languages",
+        "Leaderboard",
     ]
 
 
@@ -783,3 +782,102 @@ def test_open_comes_back_when_one_review_is_selected(qapp, with_repo, staged):
     panel.runs_tree.setCurrentItem(panel.runs_tree.topLevelItem(0))
 
     assert panel.open_run_btn.isEnabled()
+
+
+# ---- the judge ---------------------------------------------------------------------
+def test_the_judge_box_sits_between_the_rules_and_the_provider(qapp, with_repo, staged):
+    """Asked for in that position, and it reads as one: which rules, whether to
+    score the answers, and who answers."""
+    panel = ReviewPanel(with_repo)
+    pane = panel.judge_check.parentWidget().layout()
+    order = [pane.itemAt(i).widget() for i in range(pane.count())]
+
+    judge = order.index(panel.judge_check)
+    assert order.index(panel.profile_combo) < judge
+    assert order.index(panel.provider_combo) > judge
+
+
+def test_the_judge_is_off_until_it_is_asked_for(qapp, with_repo, staged):
+    """It roughly doubles the calls a review makes."""
+    panel = ReviewPanel(with_repo)
+    assert panel.judge_check.isChecked() is False
+
+
+def test_ticking_the_box_is_remembered(qapp, with_repo, staged):
+    from git_assistant.review import judge as judge_mod
+
+    panel = ReviewPanel(with_repo)
+    panel.judge_check.setChecked(True)
+
+    assert judge_mod.rules().enabled is True
+    assert ReviewPanel(with_repo).judge_check.isChecked() is True
+
+
+def test_a_ticked_box_with_no_judge_configured_says_nothing_will_be_scored(
+    qapp, with_repo, staged
+):
+    """Silence here is indistinguishable from a model that scored badly."""
+    panel = ReviewPanel(with_repo)
+    panel.judge_check.setChecked(True)
+
+    assert "nothing will be scored" in panel.judge_note.text()
+
+
+def test_a_configured_judge_is_named_beside_the_box(qapp, with_repo, staged):
+    repo_config.set_user_values(
+        review={"judge": {"enabled": True, "provider": "claude", "model": "sonnet-5"}}
+    )
+    panel = ReviewPanel(with_repo)
+    panel.refresh_judge()
+
+    assert "sonnet-5" in panel.judge_note.text()
+
+
+def test_the_plan_carries_the_judge_so_the_estimate_cannot_disagree(
+    qapp, with_repo, staged
+):
+    repo_config.set_user_values(
+        review={"judge": {"enabled": True, "provider": "claude", "model": "sonnet-5"}}
+    )
+    panel = ReviewPanel(with_repo)
+
+    plan = panel.build_plan()
+
+    assert plan.judged() is True
+    assert plan.judge.model == "sonnet-5"
+
+
+def test_the_box_cannot_be_changed_while_a_review_runs(qapp, with_repo, staged):
+    """What a run costs was settled when its plan was priced."""
+    panel = ReviewPanel(with_repo)
+    panel._set_running(True)
+    assert panel.judge_check.isEnabled() is False
+    panel._set_running(False)
+    assert panel.judge_check.isEnabled() is True
+
+
+def test_a_judged_run_reaches_the_leaderboard(qapp, with_repo, staged):
+    from git_assistant.review import leaderboard
+    from git_assistant.review.reviewer import ReviewRun
+
+    panel = ReviewPanel(with_repo)
+    run = _run()
+    run.provider, run.model = "lmstudio", "qwen-small"
+    run.judge_provider, run.judge_model = "claude", "sonnet-5"
+    run.judge_scores, run.judge_score = [8.0, 7.0], 7.5
+
+    said = panel._record_scores(run)
+
+    rows = leaderboard.load().rows
+    assert [r.model for r in rows] == ["qwen-small"]
+    assert rows[0].mean == 7.5
+    assert any("7.5/10" in one for one in said)
+
+
+def test_an_unjudged_run_says_nothing_about_scores(qapp, with_repo, staged):
+    from git_assistant.review import leaderboard
+
+    panel = ReviewPanel(with_repo)
+
+    assert panel._record_scores(_run()) == []
+    assert leaderboard.load().rows == []

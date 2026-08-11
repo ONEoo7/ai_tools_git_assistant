@@ -79,6 +79,62 @@ above it and columns nobody here cares about are both fine; `Rule ID`, `rule_id`
 and `RULEID` all read the same. Tables export back to `.xlsx`, or to JSON to
 move between machines — and an import never overwrites a table you already have.
 
+## LLM-as-a-Judge, and the leaderboard
+
+Code review is the hardest thing this application asks a model to do, and a
+small local model cannot tell you whether it is any good at it. So a second,
+stronger model can be asked: it is shown **the exact prompt the reviewer was
+given and the exact answer it returned**, and scores that answer out of 10.
+
+Tick **Use LLM-as-a-Judge** beside the repository to turn it on — it is off by
+default, because it roughly doubles the calls a review makes, and the pre-run
+window says so in the call count before you spend anything. Configure who judges
+under **Connection & Model → Code Review Judge**: a provider, and its own model
+and temperature. Its own, deliberately: judge and reviewer are often the same
+provider with different models, and sharing the fields would mean choosing a
+judge silently changed what does the reviewing. Set the temperature to 0 if you
+want two runs to be comparable.
+
+The judge is asked for one line:
+
+```
+SCORE | 7.5 | quoted a rule id that was not on the list
+```
+
+**Nothing about the review changes.** Findings are not filtered, re-ranked or
+hidden — a judge that edited them would make a bad judge indistinguishable from
+a good reviewer, which is the one comparison this exists to make. The only new
+output is the score.
+
+An answer the judge cannot produce a score for is recorded as **unscored, never
+as zero**. Zero is a judgement; "the judge timed out" is not one, and averaging
+it in would file the judge's failures as the reviewer's. Files whose review
+failed outright are not scored either — there is no answer to grade.
+
+### The leaderboard
+
+Scores accumulate in the **Leaderboard** tab, and in
+`<config dir>/code_review/leaderboard.json` beside the rule files. One row per
+**reviewed model and judge model together** — a 7 from Opus and a 7 from a 4B
+local model are not the same measurement, so changing judge starts a fresh row
+rather than quietly moving every average. Each row keeps its runs, the files
+scored across them, the running total and the mean.
+
+**Time / file** is beside the score, because the two together are the decision:
+a 4B model that scores 7.2 in under a second is a different proposition from a
+hosted one that scores 8.3 and takes a minute and a half. It is the time each
+*call* took, added up and divided by the files — not how long the run took,
+which mostly measures how many calls ran at once. It covers exactly the files
+that were scored, so the two columns are about the same set.
+
+Judge tokens are billed separately, as **Code review judge** in the Usage pane.
+That is the point: the whole reason to run a small local reviewer with a strong
+judge is that the two cost wildly different amounts, and one figure covering
+both cannot show it.
+
+The prompt is yours to edit — `default_judge_prompt` in
+`static_user_settings.json`, with `{prompt}` and `{reply}` filled in.
+
 ## Running one
 
 **Mark the files.** Everything staged starts marked; unmark what you do not want

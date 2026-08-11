@@ -64,6 +64,10 @@ CLASSIFIED = {
     "branch_user": "selection",
     "repo_templates": "selection",
     "default_template": "library",
+    # The prompt itself, not which model is asked it: the same kind of thing as
+    # the commit template, and kept for the same reason -- there is always one
+    # to fall back to whatever a repository ships.
+    "default_judge_prompt": "library",
 }
 
 KINDS = {"account", "workspace", "library", "selection"}
@@ -123,6 +127,10 @@ CHANGES = {
     "commit.history_limit": "how many messages are kept",
     "commit.ignore_globs": "which files reach the model",
     "review.history_limit": "how many reviews are kept",
+    "review.judge.enabled": "whether a second model is called to score the review",
+    "review.judge.provider": "which backend does the scoring",
+    "review.judge.model": "which model does the scoring",
+    "review.judge.temperature": "how repeatable the scores are",
     "model.context_window": "how much is sent per call",
     "model.safety_margin": "how much is reserved for the answer",
     "model.parallel_calls": "how many calls run at once",

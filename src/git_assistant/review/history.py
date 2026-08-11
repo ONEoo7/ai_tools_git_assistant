@@ -147,6 +147,18 @@ def run_from_dict(data: dict) -> ReviewRun:
         dirty=bool(data.get("dirty", False)),
         staged_total=int(data.get("staged_total", 0) or 0),
         files=[_file(f) for f in data.get("files", []) if isinstance(f, dict)],
+        # Named here or dropped on load, like every field above: a stored run
+        # that forgot its score reads as one that was never judged.
+        judge_provider=str(data.get("judge_provider", "")),
+        judge_model=str(data.get("judge_model", "")),
+        judge_scores=[
+            float(one)
+            for one in data.get("judge_scores", [])
+            if isinstance(one, (int, float))
+        ],
+        judge_score=float(data.get("judge_score", 0.0) or 0.0),
+        judge_failed=int(data.get("judge_failed", 0) or 0),
+        judged_seconds=float(data.get("judged_seconds", 0.0) or 0.0),
     )
 
 
@@ -253,7 +265,7 @@ _REPLACE_ATTEMPTS = 5
 _REPLACE_BACKOFF = 0.02  # doubling, so ~0.3s of waiting before giving up
 
 
-def _replace_atomically(tmp: Path, destination: Path) -> None:
+def replace_atomically(tmp: Path, destination: Path) -> None:
     """`os.replace`, retried while something else has the destination open.
 
     Raises:
@@ -286,7 +298,7 @@ def _write_index(directory: Path, runs: list[StoredReview]) -> None:
     }
     tmp = directory / f"{INDEX_FILE}.{uuid.uuid4().hex[:8]}.tmp"
     tmp.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
-    _replace_atomically(tmp, directory / INDEX_FILE)
+    replace_atomically(tmp, directory / INDEX_FILE)
 
 
 def record(run: ReviewRun, *, limit: int = DEFAULT_LIMIT) -> tuple[StoredReview | None, str]:

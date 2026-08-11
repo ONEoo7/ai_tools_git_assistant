@@ -85,6 +85,7 @@ from git_assistant.ui.preview_dialog import SECTION_GAP, CommitPanel
 from git_assistant.ui.review_panel import ReviewPanel
 from git_assistant.ui.branches_tags_panel import BranchesTagsPanel
 from git_assistant.ui.usage_pane import UsagePane
+from git_assistant.review import judge as judge_mod
 from git_assistant.ui.update_prompt import UpdateCheckWorker
 from git_assistant.updating import (
     CHECK_MINUTES,
@@ -660,6 +661,8 @@ class SettingsDialog(QDialog):
         self.provider_note.setStyleSheet("color: #8ab;")
         providers_box.addWidget(self.provider_note)
 
+        providers_box.addWidget(self._build_judge_group())
+
         form_container = QWidget()
         form = QFormLayout(form_container)
 
@@ -835,6 +838,143 @@ class SettingsDialog(QDialog):
         }
         self._conn_form = form
         return w
+
+    def _build_judge_group(self) -> QWidget:
+        """Which model scores a code review, as opposed to writing one.
+
+        Under the provider list rather than in the form beside it, because it
+        is a second, independent choice: the reviewer is usually something
+        small and local, and the judge is usually the opposite. Its own model
+        and temperature for the same reason -- they are frequently the same
+        provider, and sharing the fields would mean choosing a judge silently
+        changed what does the reviewing.
+        """
+        group = QGroupBox("Code Review Judge")
+        group.setToolTip(
+            "A second model that scores what the reviewer produced, out of 10. "
+            "Turn it on per repository with Use LLM-as-a-Judge in the Code "
+            "Review tab; the scores build its Leaderboard."
+        )
+        box = QVBoxLayout(group)
+
+        self.judge_provider_combo = QComboBox()
+        for provider in PROVIDERS:
+            self.judge_provider_combo.addItem(provider.display(), provider.key)
+        self.judge_provider_combo.currentIndexChanged.connect(self._on_judge_changed)
+        box.addWidget(QLabel("Provider:"))
+        box.addWidget(self.judge_provider_combo)
+
+        self.judge_model_combo = QComboBox()
+        self.judge_model_combo.setEditable(True)
+        self.judge_model_combo.setToolTip(
+            "The judging model. List them with the button below, or type one."
+        )
+        self.judge_model_combo.currentTextChanged.connect(self._on_judge_changed)
+        box.addWidget(QLabel("Model:"))
+        box.addWidget(self.judge_model_combo)
+
+        self.judge_models_btn = QPushButton("List judge models")
+        self.judge_models_btn.clicked.connect(self._on_list_judge_models)
+        box.addWidget(self.judge_models_btn)
+
+        self.judge_temperature_spin = QDoubleSpinBox()
+        self.judge_temperature_spin.setRange(MIN_TEMPERATURE, MAX_TEMPERATURE)
+        self.judge_temperature_spin.setSingleStep(0.05)
+        self.judge_temperature_spin.setDecimals(2)
+        self.judge_temperature_spin.setToolTip(
+            "0 for repeatable scores, which is what makes two runs comparable."
+        )
+        self.judge_temperature_spin.valueChanged.connect(self._on_judge_changed)
+        box.addWidget(QLabel("Temperature:"))
+        box.addWidget(self.judge_temperature_spin)
+
+        self.judge_status = QLabel("")
+        self.judge_status.setWordWrap(True)
+        self.judge_status.setStyleSheet("color: #888;")
+        box.addWidget(self.judge_status)
+        return group
+
+    def _load_judge(self) -> None:
+        """Show what is stored, without writing it back as a fresh choice."""
+        judge = judge_mod.rules()
+        for widget in (
+            self.judge_provider_combo,
+            self.judge_model_combo,
+            self.judge_temperature_spin,
+        ):
+            widget.blockSignals(True)
+        index = self.judge_provider_combo.findData(judge.provider)
+        self.judge_provider_combo.setCurrentIndex(index if index >= 0 else 0)
+        self.judge_model_combo.setCurrentText(judge.model)
+        self.judge_temperature_spin.setValue(judge.temperature)
+        for widget in (
+            self.judge_provider_combo,
+            self.judge_model_combo,
+            self.judge_temperature_spin,
+        ):
+            widget.blockSignals(False)
+        self._say_judge()
+
+    def _on_judge_changed(self, *_args) -> None:
+        if not self._ready:
+            return
+        repo_config.set_user_values(
+            review={
+                "judge": {
+                    "provider": self.judge_provider_combo.currentData() or "",
+                    "model": self.judge_model_combo.currentText().strip(),
+                    "temperature": self.judge_temperature_spin.value(),
+                }
+            }
+        )
+        self._say_judge()
+        # The Code Review tab says who is judging beside its tick box.
+        self.review_panel.refresh_judge()
+
+    def _say_judge(self) -> None:
+        model = self.judge_model_combo.currentText().strip()
+        if not model:
+            self.judge_status.setText(
+                "No model chosen - nothing will be scored, however the tick "
+                "box in Code Review is set."
+            )
+            self.judge_status.setStyleSheet(WARN_COLOUR)
+            return
+        self.judge_status.setText(f"Reviews are scored by {model}.")
+        self.judge_status.setStyleSheet("color: #888;")
+
+    def _on_list_judge_models(self) -> None:
+        """List the judge provider's models, which need not be the active one."""
+        key = self.judge_provider_combo.currentData()
+        self.judge_status.setText("Connecting...")
+        self.judge_status.setStyleSheet("color: #888;")
+        try:
+            client = build_client(
+                repo_config.bind(self.settings, self.settings.active_repo, provider=key)
+            )
+        except LLMError as exc:
+            self.judge_status.setText(str(exc))
+            self.judge_status.setStyleSheet(WARN_COLOUR)
+            return
+        worker = FunctionWorker(client.list_models)
+        worker.finished.connect(self._on_judge_models)
+        worker.error.connect(self._on_judge_models_error)
+        self._judge_worker = worker
+        self._judge_thread = run_worker(worker)
+
+    def _on_judge_models(self, models) -> None:
+        wanted = self.judge_model_combo.currentText().strip()
+        self.judge_model_combo.blockSignals(True)
+        self.judge_model_combo.clear()
+        self.judge_model_combo.addItems([m.id for m in models])
+        self.judge_model_combo.setCurrentText(wanted)
+        self.judge_model_combo.blockSignals(False)
+        self.judge_status.setText(f"{len(models)} model(s) available.")
+        self.judge_status.setStyleSheet("color: #888;")
+
+    def _on_judge_models_error(self, message: str) -> None:
+        self.judge_status.setText(message)
+        self.judge_status.setStyleSheet(WARN_COLOUR)
 
     def _apply_provider_fields(self, provider) -> None:
         """Show only the settings the selected provider actually has.
@@ -2093,6 +2233,7 @@ class SettingsDialog(QDialog):
         s = self.settings
         shipped = repo_config.defaults()
         self.parallel_spin.setValue(shipped.model.parallel_calls)
+        self._load_judge()
 
         # Selecting the stored provider also fills in the note beside the list.
         # `_ready` is still False here, so this does not count as a user choice.

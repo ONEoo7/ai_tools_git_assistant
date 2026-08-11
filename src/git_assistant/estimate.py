@@ -287,6 +287,33 @@ def for_review(settings: Settings, plan) -> Estimate:
         "A file whose answer cannot be read is asked once more, which is one "
         "extra call each."
     )
+
+    if plan.judged():
+        # Roughly a doubling, and it has to be said in the numbers rather than
+        # only in the prose: this dialog is where somebody decides whether to
+        # spend it, and a judge that appeared only on the bill afterwards would
+        # be the one thing this dialog exists to prevent.
+        from git_assistant.review import judge as judge_mod
+
+        judged = len(chosen)
+        # The judge is shown the same prompt again, plus the answer it is
+        # scoring. The answer is not known yet, so it is priced at the room the
+        # reviewer was given for it -- the most it can be.
+        out.calls += judged
+        out.input_tokens += (
+            total_in
+            + judged
+            * (
+                estimate_tokens(review_prompts.JUDGE_SYSTEM)
+                + estimate_tokens(review_prompts.JUDGE_TEMPLATE)
+                + reviewer.REVIEW_OUTPUT_TOKENS
+            )
+        )
+        out.output_tokens += judged * judge_mod.JUDGE_OUTPUT_TOKENS
+        out.lines.append(
+            f"Judging is on: {plan.judge.label()} is shown each of those "
+            f"{judged} exchanges and scores it, which is {judged} more call(s)."
+        )
     return out
 
 

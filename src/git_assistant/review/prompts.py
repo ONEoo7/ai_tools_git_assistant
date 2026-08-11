@@ -52,6 +52,42 @@ If the file breaks none of the rules, answer with exactly: NO FINDINGS
 Do not explain. Do not repeat the rules. Do not add a summary.
 """
 
+#: The judge is not reviewing the code. It is marking the reviewer's homework,
+#: which is a different job and has to say so twice -- a model shown a diff will
+#: review it however it was briefed.
+JUDGE_SYSTEM = (
+    "You grade the work of a code reviewer. You are shown the exact instructions "
+    "another model was given and the exact answer it produced. You judge that "
+    "answer, not the code: whether it followed the format it was asked for, "
+    "whether the rule ids it quoted were on the list it was given, whether its "
+    "findings are supported by the code shown, and whether it missed anything "
+    "obvious. You output nothing except the one line you are asked for."
+)
+
+#: What a judge is shown, and the one line it may answer with. `{prompt}` is the
+#: reviewer's user prompt verbatim -- rules, diff and file included -- and
+#: `{reply}` is what came back.
+JUDGE_TEMPLATE = """\
+Below is the prompt another model was given, and the answer it returned.
+
+=== THE PROMPT IT WAS GIVEN ===
+{prompt}
+
+=== THE ANSWER IT RETURNED ===
+{reply}
+
+Score that answer out of 10, where 10 is a review you would have signed off
+yourself and 0 is unusable. Weigh, in this order:
+
+1. Did it obey the output format exactly?
+2. Are the rule ids real ones from the list it was given?
+3. Is every finding supported by the code shown, with no invented ones?
+4. Did it miss a violation that the rules and the code plainly show?
+
+Answer with exactly one line and nothing else:
+SCORE | <number from 0.0 to 10.0> | <one sentence saying why>
+"""
+
 #: Appended to the user prompt when the first answer could not be read at all.
 #: One retry, in the shape ``agents.narrator`` uses: quote back what came so the
 #: model can see what it did, then restate the contract.

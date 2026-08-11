@@ -164,6 +164,22 @@ class ReviewRun:
     files: list[FileReview] = field(default_factory=list)
     #: Every exchange with the model, when the client was a recording one.
     calls: list = field(default_factory=list)
+    #: What the judge made of this run, when there was one. The scores are per
+    #: file and `judge_score` is their mean, over the files that were actually
+    #: scored -- a file whose judge failed is left out rather than counted as a
+    #: zero. See git_assistant.review.judge.
+    judge_provider: str = ""
+    judge_model: str = ""
+    judge_scores: list = field(default_factory=list)
+    judge_score: float = 0.0
+    judge_failed: int = 0
+    #: How long the reviewer's calls took for the files that were scored, added
+    #: up. Per call rather than wall clock, so it compares models rather than
+    #: how many ran at once.
+    judged_seconds: float = 0.0
+
+    def judged(self) -> bool:
+        return bool(self.judge_model and self.judge_scores)
 
     def findings(self) -> list[Finding]:
         return [f for review in self.files for f in review.findings]
@@ -325,6 +341,7 @@ def review(
     plan,
     progress: ProgressFn = _noop,
     is_cancelled: CancelFn = _never,
+    judge_client=None,
 ) -> ReviewRun:
     """Carry out ``plan``: one call per reviewable file, with its own rules.
 
@@ -380,10 +397,10 @@ def review(
     if hasattr(client, "phase"):
         client.phase = llm_log.REVIEW
 
-    def review_one(file) -> FileReview:
+    def review_one(file):
         return _review_file(settings, client, repo=repo, file=file, budget=budget)
 
-    run.files = run_parallel(
+    reviewed = run_parallel(
         chosen,
         review_one,
         workers=workers,
@@ -392,7 +409,22 @@ def review(
         is_cancelled=is_cancelled,
         label="reviewing",
     )
+    # The prompt travels beside the review rather than on it: `FileReview` is
+    # `asdict`-ed straight into the stored run, and history deliberately keeps
+    # no prompts -- forty of them a run is text nobody reads twice.
+    run.files = [one.review for one in reviewed]
     run.rules_sent = sum(r.rules_sent for r in run.files)
+
+    if plan.judged():
+        _judge_run(
+            run,
+            reviewed,
+            judge=plan.judge,
+            client=judge_client if judge_client is not None else client,
+            workers=workers,
+            progress=progress,
+            is_cancelled=is_cancelled,
+        )
     # Files the plan could not review are recorded too: one left out of the
     # results entirely reads as a file with nothing wrong with it.
     run.files += [
@@ -402,6 +434,97 @@ def review(
     return run
 
 
+@dataclass
+class _Reviewed:
+    """One file's review, and the prompt that produced it.
+
+    The prompt is what a judge has to be shown, and it must not end up on
+    `FileReview` -- that is stored, and storing prompts is exactly what
+    `review.history` refuses to do.
+    """
+
+    review: FileReview
+    prompt: str = ""
+
+
+def _judge_run(
+    run: ReviewRun,
+    reviewed: list["_Reviewed"],
+    *,
+    judge,
+    client,
+    workers: int,
+    progress: ProgressFn,
+    is_cancelled: CancelFn,
+) -> None:
+    """Score each answer, and record what the judge thought of the run.
+
+    A second pass rather than a second call inside the first: the reviewer's
+    fan-out is sized to the reviewer's context window, and the judge is usually
+    a different model with a different one. Running it separately also means a
+    judge that falls over costs the run its scores and nothing else -- the
+    findings are already in `run.files` by the time this is reached.
+
+    Files whose review failed outright are not scored. There is no answer to
+    grade, and a zero for them would file the reviewer's crash as its opinion.
+    """
+    from git_assistant.review import judge as judge_mod
+
+    if hasattr(client, "phase"):
+        client.phase = llm_log.JUDGE
+
+    gradeable = [one for one in reviewed if not one.review.error and one.prompt]
+    if not gradeable:
+        return
+
+    def judge_one(item: "_Reviewed"):
+        try:
+            reply = client.chat(
+                model=judge.model,
+                system=prompts.JUDGE_SYSTEM,
+                user=judge_mod.build_prompt(
+                    judge.prompt, prompt=item.prompt, reply=item.review.raw_reply
+                ),
+                max_tokens=judge_mod.JUDGE_OUTPUT_TOKENS,
+                temperature=judge.temperature,
+            )
+        except CancelledError:
+            raise
+        except Exception as exc:
+            return judge_mod.Verdict(error=f"{type(exc).__name__}: {exc}")
+        return judge_mod.parse_verdict(reply)
+
+    verdicts = run_parallel(
+        gradeable,
+        judge_one,
+        workers=workers,
+        # The judge is a different model and may well be cold, but the reviewer
+        # has already paid for one slow first call and the honest place to warm
+        # a second model is its own first call, not a serialised pass.
+        cold_start=False,
+        progress=progress,
+        is_cancelled=is_cancelled,
+        label="scoring",
+        prefix="judging: ",
+    )
+
+    # `run_parallel` keeps input order, so a verdict belongs to the file at the
+    # same index. Pairing them is what lets the time and the score describe the
+    # same set of files: a mean time over files that were never scored would
+    # not be about the number beside it.
+    scored = [(item, one) for item, one in zip(gradeable, verdicts) if one.scored]
+
+    run.judge_provider = judge.provider
+    run.judge_model = judge.model
+    run.judge_scores = [one.score for _, one in scored]
+    run.judge_score = judge_mod.mean_of(verdicts)
+    run.judge_failed = sum(1 for one in verdicts if not one.scored)
+    # Per-call time, summed -- not wall clock. The files are reviewed several
+    # at a time, so the elapsed time of a run says more about how many workers
+    # it had than about the model; the time each call took does not.
+    run.judged_seconds = round(sum(item.review.seconds for item, _ in scored), 3)
+
+
 def _review_file(
     settings: Settings,
     client,
@@ -409,7 +532,7 @@ def _review_file(
     repo: str,
     file,
     budget: int,
-) -> FileReview:
+) -> _Reviewed:
     """One file, one call -- and one retry when the answer is unreadable.
 
     ``file`` is a ``plan.FilePlan``: it already carries the language, the
@@ -475,4 +598,4 @@ def _review_file(
     except Exception as exc:
         outcome.error = f"{type(exc).__name__}: {exc}"
     outcome.seconds = time.monotonic() - started
-    return outcome
+    return _Reviewed(review=outcome, prompt=built.user)

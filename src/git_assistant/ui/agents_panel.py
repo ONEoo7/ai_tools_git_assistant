@@ -58,6 +58,7 @@ from git_assistant.ui.estimate_dialog import confirm
 from git_assistant.ui.settings_diff_dialog import SettingsDiffDialog
 from git_assistant.ui.preview_dialog import SECTION_GAP
 from git_assistant.ui.repo_picker import RepoPicker
+from git_assistant.ui import side_panel as side_panel_mod
 from git_assistant.ui.side_panel import SidePanel
 from git_assistant.ui.workers import AgentWorker, run_worker
 
@@ -290,7 +291,9 @@ class AgentsPanel(QWidget):
         splitter.setStretchFactor(1, 1)
         splitter.setStretchFactor(2, 3)
         splitter.setStretchFactor(3, 2)
-        splitter.setSizes([200, 300, 540, 300])
+        side_panel_mod.attach(
+            splitter, self.side_panel, open_sizes=[200, 320, 620, side_panel_mod.OPEN_WIDTH]
+        )
 
         outer = QVBoxLayout(self)
         outer.addWidget(splitter)

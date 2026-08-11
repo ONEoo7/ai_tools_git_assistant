@@ -42,6 +42,10 @@ SCHEMA_VERSION = 1
 #: review" is exactly the question a bill raises.
 COMMIT = "Commit message"
 REVIEW = "Code review"
+#: Scoring a review is its own line on the bill, and has to be: the point of a
+#: small local reviewer with a strong judge is that the two cost wildly
+#: different amounts, and one figure covering both cannot show that.
+JUDGE = "Code review judge"
 AUDIT = "Repository audit"
 #: Calls recorded before features were attributed, and any path that forgets to
 #: say. Named rather than blank so it reads as a gap, not as a category.

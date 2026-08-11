@@ -191,6 +191,25 @@ FIELD_COMMENTS = {
     ),
     "review": "Code review.",
     "review.history_limit": "Reviews kept per repository. 0 keeps every one.",
+    "review.judge": (
+        "The model that scores a review, which is not the one that wrote it. "
+        "It is shown the exact prompt the reviewer was sent and the exact reply "
+        "it gave, and scores that reply out of ten. The scores accumulate in "
+        "code_review/leaderboard.json."
+    ),
+    "review.judge.enabled": (
+        "Whether a review is scored. Off by default: a judge doubles the calls "
+        "a review makes."
+    ),
+    "review.judge.provider": (
+        "Which backend judges, by provider key. Empty means none is chosen, "
+        "and nothing is scored however the tick box is set."
+    ),
+    "review.judge.model": (
+        "The judging model. Its own, not the provider's active one: the judge "
+        "is often the same provider as the reviewer with a stronger model."
+    ),
+    "review.judge.temperature": "How adventurous the judge is. 0 for repeatable scores.",
     "model": "How much of the model one run of this repository may use.",
     "model.context_window": (
         "Total tokens per request, input and output together. 0 asks the "
@@ -498,6 +517,32 @@ class TracingRules:
 
 
 @dataclass
+class JudgeRules:
+    """The model that scores a review, which is not the one that wrote it.
+
+    A second, stronger model is asked to mark the reviewer's homework: it is
+    shown the exact prompt the reviewer was sent and the exact reply it gave,
+    and scores that reply out of ten. Repeated across runs it answers the
+    question a local model cannot answer about itself -- is it any good at
+    this. See git_assistant.review.judge.
+
+    Its own model and temperature, deliberately, rather than the provider's
+    active ones: judge and reviewer are frequently the *same* provider with
+    different models, and sharing the fields would mean choosing a judge
+    silently changed what does the reviewing.
+    """
+
+    #: Off until asked for. A judge doubles the calls a review makes, so it is
+    #: not something to discover on a bill.
+    enabled: bool = False
+    #: Provider key, from git_assistant.providers. "" means none chosen, which
+    #: reads as "no judge configured" however the tick box is set.
+    provider: str = ""
+    model: str = ""
+    temperature: float = 0.0
+
+
+@dataclass
 class ReviewRules:
     """What is kept from reviewing this repository."""
 
@@ -506,6 +551,7 @@ class ReviewRules:
     #: version. The rules themselves are files under code_review/; see
     #: git_assistant.review.rule_files.
     profiles: list = field(default_factory=list)
+    judge: JudgeRules = field(default_factory=JudgeRules)
 
 
 @dataclass
@@ -590,6 +636,12 @@ class RepoSettings:
             "review": {
                 "history_limit": self.review.history_limit,
                 "profiles": [dict(one) for one in self.review.profiles],
+                "judge": {
+                    "enabled": self.review.judge.enabled,
+                    "provider": self.review.judge.provider,
+                    "model": self.review.judge.model,
+                    "temperature": self.review.judge.temperature,
+                },
             },
             "model": {
                 "context_window": self.model.context_window,
@@ -755,6 +807,7 @@ def _overlay(settings: RepoSettings, data: dict) -> RepoSettings:
     commit = _section(data, "commit")
     prompt = _section(data, "prompt")
     review = _section(data, "review")
+    judge = _section(review, "judge")
     model = _section(data, "model")
     tracing = _section(data, "tracing")
     return RepoSettings(
@@ -818,6 +871,14 @@ def _overlay(settings: RepoSettings, data: dict) -> RepoSettings:
                 review, "history_limit", settings.review.history_limit
             ),
             profiles=_dicts(review, "profiles", settings.review.profiles),
+            judge=JudgeRules(
+                enabled=_bool(judge, "enabled", settings.review.judge.enabled),
+                provider=_str(judge, "provider", settings.review.judge.provider),
+                model=_str(judge, "model", settings.review.judge.model),
+                temperature=_float(
+                    judge, "temperature", settings.review.judge.temperature
+                ),
+            ),
         ),
         model=ModelRules(
             context_window=_int(

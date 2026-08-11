@@ -81,6 +81,8 @@ More: [audits](docs/audits.md)
 | **Add / Remove rule set** | A language can be checked against several sets at once — its own shipped rules, another language's, and any table of yours. |
 | **Rule Sets tab** | Every set there is: the built-in one per language, and your own imported tables. Shows each rule and, for the built-in ones, the language versions it applies to. |
 | **Languages tab** | The languages a review recognises, the file types that reach each, and how many built-in rules apply at each version. |
+| **Use LLM-as-a-Judge** | Off by default. Has a second, stronger model score the reviewer's answers out of 10 — shown the exact prompt each file was reviewed with and the exact answer that came back. Roughly doubles the calls. |
+| **Leaderboard tab** | Which models are actually any good at reviewing, and how long they take — mean score out of 10 and time per file, per reviewed model and judge. Scores from different judges are kept apart, because they are not the same measurement. |
 | **Share with the repository** | Writes the profile into the working tree so whoever clones it is reviewed against the same standard. |
 | **Import / Export spreadsheet** | `.xlsx` in and out — the header is looked for rather than assumed. |
 | **Import / Export JSON** | Move tables between machines. An import never overwrites a table you already have. |
@@ -97,6 +99,7 @@ More: [code review](docs/code-review.md)
 | **API key** | Stored in the Windows Credential Manager, never in a settings file. The field says whether one is stored, never what it is. |
 | **Test connection & list models** | One round trip, and the model list from it. |
 | **Model / Temperature** | Kept per provider and per model. |
+| **Code Review Judge** | Which model scores a code review, with its own model and temperature — the reviewer is usually something small and local, the judge the opposite. |
 | **Context window / Parallel requests** | What a run may use, with the resulting split shown live. |
 | **Set up LM Studio for me…** | Installs LM Studio, turns on its server, downloads a model and configures it. Names every step first and skips what is already done. |
 | **Usage** | Lifetime totals per provider, per model and per feature, and the last few hundred calls behind them. |

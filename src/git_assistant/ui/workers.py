@@ -147,7 +147,12 @@ class ReviewWorker(QObject):
 
     def __init__(self, settings: Settings, plan) -> None:
         super().__init__()
-        self._settings = repo_config.bind(settings, getattr(plan, "repo", ""))
+        self._repo = getattr(plan, "repo", "")
+        #: The unbound settings, kept because the judge is bound again against
+        #: a different provider and re-deriving that from a Bound means
+        #: reaching into its privates.
+        self._raw = settings
+        self._settings = repo_config.bind(settings, self._repo)
         #: A review.plan.ReviewPlan: which files, in which language, against
         #: which rules. Decided before the dialog that asked to run it.
         self._plan = plan
@@ -161,18 +166,34 @@ class ReviewWorker(QObject):
         # must not pay to load the review package to write a commit message.
         from git_assistant.review import reviewer
 
-        client = None
+        client = judge_client = None
         try:
             client = build_client(self._settings, feature=usage.REVIEW)
             recorder = RecordingClient(client, on_call=self.call.emit)
+            judge_recorder = None
+            judge = getattr(self._plan, "judge", None)
+            if self._plan is not None and self._plan.judged():
+                # Its own client, because the feature is fixed when one is
+                # built and cannot be changed per call. Sharing the reviewer's
+                # would file every judge token under "Code review" -- and the
+                # whole point of a small reviewer with a strong judge is that
+                # the two cost wildly different amounts.
+                judge_client = build_client(
+                    repo_config.bind(self._raw, self._repo, provider=judge.provider),
+                    feature=usage.JUDGE,
+                )
+                judge_recorder = RecordingClient(judge_client, on_call=self.call.emit)
             run = reviewer.review(
                 self._settings,
                 recorder,
                 plan=self._plan,
                 progress=self.progress.emit,
                 is_cancelled=lambda: self._cancelled,
+                judge_client=judge_recorder,
             )
             run.calls = list(recorder.calls)
+            if judge_recorder is not None:
+                run.calls += list(judge_recorder.calls)
             self.finished.emit(run)
         except CancelledError:
             self.error.emit("Cancelled.")
@@ -180,6 +201,7 @@ class ReviewWorker(QObject):
             self.error.emit(str(exc))
         finally:
             tracing.close(client)
+            tracing.close(judge_client)
 
 
 class AgentWorker(QObject):

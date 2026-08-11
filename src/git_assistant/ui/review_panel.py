@@ -19,6 +19,7 @@ from pathlib import Path
 from PyQt6.QtCore import Qt, QUrl
 from PyQt6.QtGui import QColor, QDesktopServices, QGuiApplication
 from PyQt6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QFileDialog,
     QHBoxLayout,
@@ -45,7 +46,8 @@ from PyQt6.QtWidgets import (
 from git_assistant import estimate, repo_config
 from git_assistant.config import Settings, norm_path
 from git_assistant.providers import PROVIDERS
-from git_assistant.review import history, languages, rule_files
+from git_assistant.review import history, languages, leaderboard, rule_files
+from git_assistant.review import judge as judge_mod
 from git_assistant.review import report as report_mod
 from git_assistant.review import xlsx
 from git_assistant.review import profiles as profiles_mod
@@ -57,10 +59,12 @@ from git_assistant.review.rules import RuleStore, RuleTable
 from git_assistant.ui.review_plan_dialog import confirm as confirm_plan
 from git_assistant.ui.preview_dialog import SECTION_GAP
 from git_assistant.ui.languages_tab import LanguagesTab
+from git_assistant.ui.leaderboard_tab import LeaderboardTab
 from git_assistant.ui import profile_tab as profile_tab_mod
 from git_assistant.ui.profile_tab import ProfileTab
 from git_assistant.ui.rule_sets_tab import RuleSetsTab
 from git_assistant.ui.repo_picker import RepoPicker
+from git_assistant.ui import side_panel as side_panel_mod
 from git_assistant.ui.side_panel import SidePanel
 from git_assistant.ui.workers import ReviewWorker, run_worker
 
@@ -143,6 +147,24 @@ class ReviewPanel(QWidget):
             QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
         )
 
+        # Whether a second, stronger model scores what the reviewer produced.
+        # Off by default and said so in the tooltip: it roughly doubles the
+        # calls a review makes, which is not something to meet on a bill.
+        self.judge_check = QCheckBox("Use LLM-as-a-Judge")
+        self.judge_check.setToolTip(
+            "After the review, show the judge the exact prompt each file was "
+            "reviewed with and the exact answer that came back, and have it "
+            "score that answer out of 10. The scores build the Leaderboard "
+            "tab. Roughly doubles the calls a review makes."
+        )
+        self.judge_check.toggled.connect(self._on_judge_toggled)
+        self.judge_note = QLabel("")
+        self.judge_note.setWordWrap(True)
+        self.judge_note.setStyleSheet(MUTED_COLOUR)
+        self.judge_note.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
+        )
+
         # Which backend does the reviewing. Application-wide, as everywhere else:
         # it is an account and a connection, not a property of a project.
         self.provider_combo = QComboBox()
@@ -173,7 +195,11 @@ class ReviewPanel(QWidget):
         splitter.setStretchFactor(1, 2)
         splitter.setStretchFactor(2, 4)
         splitter.setStretchFactor(3, 3)
-        splitter.setSizes([210, 280, 500, 340])
+        # The side pane starts folded, so its width goes to the results it sits
+        # beside; `attach` keeps the two in step from here on.
+        side_panel_mod.attach(
+            splitter, self.side_panel, open_sizes=[210, 320, 700, side_panel_mod.OPEN_WIDTH]
+        )
 
         layout = QVBoxLayout(self)
         layout.addWidget(splitter, 1)
@@ -192,6 +218,9 @@ class ReviewPanel(QWidget):
         box.addWidget(QLabel("Rules profile:"))
         box.addWidget(self.profile_combo)
         box.addWidget(self.rules_note)
+        box.addSpacing(SECTION_GAP)
+        box.addWidget(self.judge_check)
+        box.addWidget(self.judge_note)
         box.addSpacing(SECTION_GAP)
         box.addWidget(QLabel("Inference Providers:"))
         box.addWidget(self.provider_combo)
@@ -231,6 +260,8 @@ class ReviewPanel(QWidget):
         self.tabs.addTab(self._build_profile_tab(), "Profiles")
         self.tabs.addTab(self._build_rule_sets_tab(), "Rule Sets")
         self.tabs.addTab(LanguagesTab(), "Languages")
+        self.leaderboard_tab = LeaderboardTab()
+        self.tabs.addTab(self.leaderboard_tab, "Leaderboard")
         box.addWidget(self.tabs, 1)
         return pane
 
@@ -555,6 +586,7 @@ class ReviewPanel(QWidget):
         """Reload repositories, keeping any findings already on screen."""
         self.repo_picker.refresh()
         self.refresh_provider()
+        self.refresh_judge()
         self._refresh_tables()
         self._load_files()
         self._sync_shown_run()
@@ -573,6 +605,45 @@ class ReviewPanel(QWidget):
         self.provider_combo.blockSignals(False)
         model = self.settings.active_model() or "no model selected"
         self.provider_label.setText(f"Model: {model}")
+
+    def refresh_judge(self) -> None:
+        """Show what the settings say, without treating it as a user choice.
+
+        Signals blocked for the same reason `refresh_provider` blocks them:
+        drawing the stored value must not write it back, which would fork the
+        settings to Custom for opening a tab.
+        """
+        judge = judge_mod.rules()
+        self.judge_check.blockSignals(True)
+        self.judge_check.setChecked(bool(judge.enabled))
+        self.judge_check.blockSignals(False)
+        self._refresh_judge_note()
+
+    def _on_judge_toggled(self, checked: bool) -> None:
+        """Remember the choice, in the settings the judge itself lives in."""
+        repo_config.set_user_values(review={"judge": {"enabled": bool(checked)}})
+        self._refresh_judge_note()
+
+    def _refresh_judge_note(self) -> None:
+        """Say who would judge, or why nothing would be scored.
+
+        A ticked box with no judge configured scores nothing, and a run that
+        silently scored nothing is indistinguishable from one that scored
+        badly -- which is the one comparison this feature exists to make.
+        """
+        judge = judge_mod.config_from(self.settings)
+        if judge is None:
+            self.judge_note.setText("")
+            return
+        if not judge.usable():
+            self.judge_note.setText(
+                "No judge model is chosen - nothing will be scored. Pick one "
+                "under Code Review Judge in Connection & Model."
+            )
+            self.judge_note.setStyleSheet(WARN_COLOUR)
+            return
+        self.judge_note.setText(f"Scored by {judge.label()}.")
+        self.judge_note.setStyleSheet(MUTED_COLOUR)
 
     def _on_provider_changed(self, _index: int) -> None:
         key = self.provider_combo.currentData()
@@ -1020,6 +1091,7 @@ class ReviewPanel(QWidget):
             overrides=profile.overrides,
             profile=profile.name,
             candidates=self._candidates,
+            judge=judge_mod.config_from(self.settings),
         )
 
     def _on_review(self) -> None:
@@ -1102,11 +1174,45 @@ class ReviewPanel(QWidget):
         if self.busy is not None:
             self.busy.stop(self)
 
+    def _record_scores(self, run) -> list[str]:
+        """Fold a judged run into the leaderboard. Returns what to say about it.
+
+        Nothing is said when the run was not judged -- most are not -- and a
+        board that could not be written is reported rather than raised: the
+        review happened, and its findings are on screen either way.
+        """
+        if not getattr(run, "judged", lambda: False)():
+            return []
+        problem = leaderboard.record(
+            provider=run.provider,
+            model=run.model,
+            judge_provider=run.judge_provider,
+            judge_model=run.judge_model,
+            scores=run.judge_scores,
+            seconds=getattr(run, "judged_seconds", 0.0),
+            when=run.started_at,
+        )
+        self.leaderboard_tab.refresh()
+        said = [
+            f"Judged {run.judge_score:.1f}/10 by {run.judge_model} "
+            f"over {len(run.judge_scores)} file(s)."
+        ]
+        if run.judge_failed:
+            # Not counted as zeros: that would file the judge's failures as the
+            # reviewer's, which is the one number this must not get wrong.
+            said.append(f"{run.judge_failed} file(s) could not be scored.")
+        if problem:
+            said.append(f"({problem})")
+        return said
+
     def _set_running(self, running: bool) -> None:
         self.cancel_btn.setEnabled(running)
         self.repo_picker.setEnabled(not running)
         self.files_list.setEnabled(not running)
         self.profile_combo.setEnabled(not running)
+        # Whether this run is judged was settled when the plan was priced;
+        # letting it change mid-run would make the estimate a lie.
+        self.judge_check.setEnabled(not running)
         if running:
             self._busy_start("Code review")
         else:
@@ -1132,6 +1238,7 @@ class ReviewPanel(QWidget):
             # that lists it went wrong. Saying "not saved" here would send
             # someone re-running forty calls they already have on disk.
             parts.append(f"({problem})")
+        parts += self._record_scores(run)
         self._refresh_history(select=stored)
         self.status.setText(" ".join(parts))
 

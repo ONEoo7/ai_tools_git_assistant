@@ -43,6 +43,9 @@ from git_assistant import jsonc
 from git_assistant.providers import DEFAULT_PROVIDER, is_known
 from git_assistant.prompts import DEFAULT_TEMPLATE
 
+# Constants only, and no imports of its own, so this cannot become a cycle.
+from git_assistant.review.prompts import JUDGE_TEMPLATE
+
 APP_NAME = "git-assistant"
 
 #: What every model is asked for until someone says otherwise. Low, because a
@@ -165,6 +168,12 @@ FIELD_COMMENTS = {
         "repository ships.\nA project's own templates replace the named ones "
         "in user_settings.json and never this one, so there is always "
         "something to fall back to."
+    ),
+    "default_judge_prompt": (
+        "What the code-review judge is asked. It is shown the exact prompt the "
+        "reviewer was given and the exact answer it returned, and scores that "
+        "answer out of ten.\n{prompt} and {reply} are filled in with the "
+        "exchange being scored; anything else is left as typed."
     ),
     "repo_templates": (
         "Which template each repository uses, by repository key. A selection: "
@@ -385,6 +394,12 @@ class Settings:
     #: Which template each repository uses, by repo key. A selection: it names
     #: one of the templates on offer and decides nothing about what they say.
     repo_templates: dict[str, str] = field(default_factory=dict)
+    #: What the code-review judge is asked. Here for the same reason
+    #: `default_template` is: it is the one prompt that is always there, so a
+    #: repository's own settings can never leave a judge with nothing to say.
+    #: `{prompt}` and `{reply}` are filled in with the exchange being scored;
+    #: see git_assistant.review.judge.
+    default_judge_prompt: str = JUDGE_TEMPLATE
     theme: str = "system"
 
     # ---- per-provider settings ---------------------------------------------

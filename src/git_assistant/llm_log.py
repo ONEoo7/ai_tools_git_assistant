@@ -27,6 +27,7 @@ MAP = "summarizing a chunk"
 REDUCE = "condensing notes"
 FINAL = "writing the message"
 REVIEW = "reviewing a file"
+JUDGE = "scoring a review"
 NARRATE = "writing a section"
 
 
