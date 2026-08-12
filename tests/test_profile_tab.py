@@ -398,3 +398,80 @@ def test_a_repository_s_profile_offers_no_rule_sets_to_add(qapp, store):
     assert tab.unused_refs() == []
     assert not tab.add_rule_set_btn.isEnabled()
     assert not tab.remove_rule_set_btn.isEnabled()
+
+
+# ---- what may be changed, and what may not -------------------------------------------
+def _defaults_tab(qapp, store):
+    from git_assistant.review import profiles as profiles_mod
+
+    return _tab(qapp, profile=profiles_mod.defaults(), store=store)
+
+
+def test_the_shipped_profile_is_read_only(qapp, store):
+    from git_assistant.review import profiles as profiles_mod
+
+    assert profiles_mod.defaults().read_only() is True
+    assert profiles_mod.defaults().is_default() is True
+
+
+def test_one_of_your_own_is_not(qapp, store):
+    assert _profile().read_only() is False
+
+
+def test_a_repository_s_profile_is_read_only_too(qapp, store):
+    profile = _profile()
+    profile.source = "repository"
+    assert profile.read_only() is True
+    assert profile.is_default() is False
+
+
+def test_a_stored_profile_that_happens_to_share_the_name_is_still_editable(qapp, store):
+    """`is_default` is about the generated one, not about the word."""
+    from git_assistant.review import profiles as profiles_mod
+
+    mine = Profile(name=profiles_mod.DEFAULTS_NAME, source="repository")
+    assert mine.is_default() is False
+
+
+def test_nothing_in_the_shipped_profile_can_be_ticked(qapp, store):
+    tab = _defaults_tab(qapp, store)
+    language = tab.tree.topLevelItem(0)
+    rule_set = language.child(0)
+
+    assert not rule_set.flags() & Qt.ItemFlag.ItemIsUserCheckable
+    assert not rule_set.child(0).flags() & Qt.ItemFlag.ItemIsUserCheckable
+    # Still shown ticked: it says what it checks, it just cannot be told otherwise.
+    assert rule_set.child(0).checkState(0) == Qt.CheckState.Checked
+
+
+def test_its_version_cannot_be_changed_either(qapp, store):
+    tab = _defaults_tab(qapp, store)
+    combo = tab.tree.itemWidget(tab.tree.topLevelItem(0), 1)
+    assert combo is not None and not combo.isEnabled()
+
+
+def test_it_says_why_it_is_read_only_and_what_to_do(qapp, store):
+    tab = _defaults_tab(qapp, store)
+    assert "Read-only" in tab.header.text()
+    assert "New" in tab.header.text()
+
+
+def test_it_cannot_be_deleted_but_can_be_copied(qapp, store):
+    tab = _defaults_tab(qapp, store)
+    assert not tab.delete_profile_btn.isEnabled()
+    assert tab.new_profile_btn.isEnabled()
+
+
+def test_one_of_your_own_can_be_deleted(qapp, store):
+    tab = _tab(qapp, store=store)
+    assert tab.delete_profile_btn.isEnabled()
+
+
+def test_the_list_marks_the_shipped_one_as_read_only(qapp, store):
+    from git_assistant.review import profiles as profiles_mod
+
+    tab = _tab(qapp, store=store)
+    tab.show_profiles([_profile(), profiles_mod.defaults()], "Mine")
+
+    labels = [tab.profiles_list.item(i).text() for i in range(tab.profiles_list.count())]
+    assert labels == ["Mine", f"{profiles_mod.DEFAULTS_NAME} (read-only)"]

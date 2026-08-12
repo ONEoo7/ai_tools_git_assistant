@@ -16,9 +16,8 @@ from PyQt6.QtWidgets import (
     QComboBox,
     QDialog,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
-    QListWidget,
-    QListWidgetItem,
     QMenu,
     QMessageBox,
     QPlainTextEdit,
@@ -33,9 +32,20 @@ from PyQt6.QtWidgets import (
 )
 
 from git_assistant import commit_history, commit_style, estimate, git_ops, repo_config
-from git_assistant.commit_generator import FileCoverage, GenerationResult
+from git_assistant.commit_generator import (
+    FileCoverage,
+    GenerationResult,
+    excerpt_coverage,
+)
 from git_assistant.config import DEFAULT_TEMPLATE_NAME, Settings
-from git_assistant.diff_strategy import filter_files, split_diff
+from git_assistant.diff_strategy import (
+    BINARY,
+    drop_reason,
+    excerpt_included,
+    filter_files,
+    is_binary_diff,
+    split_diff,
+)
 from git_assistant.providers import PROVIDERS
 from git_assistant.ui.estimate_dialog import confirm
 from git_assistant.ui.repo_picker import RepoPicker
@@ -77,21 +87,62 @@ def _history_note(repo: str, runs: list, limit: int) -> str:
     return f"Keeping the newest {limit} message(s)."
 
 
-def _read_staged(repo: str, mode: str, ignore_globs: list[str]) -> list[FileCoverage]:
+def _why(cov: FileCoverage) -> str:
+    """One phrase saying what happened to this file, and on whose account.
+
+    The rule it names is the point. "Omitted" is not something anyone can act
+    on; "ignored: *.pdf" says which line of the ignore list to look at, and
+    "binary" says no list is involved and there is nothing to be done.
+    """
+    total = len(cov.lines)
+    sent = total - cov.omitted_count
+    if cov.reason == "staged":
+        return "to be sent"
+    if cov.reason == "filtered":
+        if cov.detail == BINARY:
+            return "binary - git produced no diff text"
+        return f"ignored: {cov.detail}" if cov.detail else "ignored"
+    if cov.reason == "excerpt":
+        if sent < total:
+            return f"un-ignored - first {sent} of {total} lines"
+        return "un-ignored - fully sent"
+    if cov.omitted_count:
+        return f"too large - {cov.omitted_count} of {total} lines cut to fit"
+    if cov.reason == "summarized":
+        return "fully sent, as a summary"
+    return "fully sent"
+
+
+def _read_staged(
+    repo: str,
+    mode: str,
+    ignore_globs: list[str],
+    included: list[str] | None = None,
+    include_lines: int = 0,
+) -> list[FileCoverage]:
     """Current diff as coverage entries, before anything has been sent.
 
     ``omitted`` is empty and the reason is "staged": nothing has reached the
     model yet, so nothing is marked red. Noise-filtered files are still shown as
-    filtered, since that decision is already made.
+    filtered, and un-ignored ones as excerpts, since both decisions are already
+    made -- what the pane shows before a run has to match what the run will do,
+    or it is worse than showing nothing.
     """
     raw = git_ops.get_diff(repo, mode)
     if not raw.strip():
         return []
     all_files = split_diff(raw)
-    kept, dropped = filter_files(all_files, ignore_globs)
+    _kept, dropped = filter_files(all_files, ignore_globs)
+    excerpts = excerpt_included(
+        all_files, dropped, list(included or []), include_lines
+    )
+    by_path = {e.file.path: e for e in excerpts}
     dropped_set = set(dropped)
     coverage: list[FileCoverage] = []
     for f in all_files:
+        if f.path in by_path:
+            coverage.append(excerpt_coverage(by_path[f.path]))
+            continue
         lines = f.text.splitlines(keepends=True)
         is_dropped = f.path in dropped_set
         coverage.append(
@@ -100,6 +151,7 @@ def _read_staged(repo: str, mode: str, ignore_globs: list[str]) -> list[FileCove
                 lines=lines,
                 omitted=set(range(len(lines))) if is_dropped else set(),
                 reason="filtered" if is_dropped else "staged",
+                detail=drop_reason(f, ignore_globs) if is_dropped else "",
             )
         )
     return coverage
@@ -263,9 +315,20 @@ class CommitPanel(QWidget):
         self.files_label = QLabel("Staged files")
         right_box.addWidget(self.files_label)
 
-        self.file_list = QListWidget()
+        self.file_list = QTreeWidget()
         self.file_list.setMaximumHeight(150)
-        self.file_list.currentRowChanged.connect(self._on_file_selected)
+        self.file_list.setRootIsDecorated(False)
+        self.file_list.setHeaderLabels(["File", "Why"])
+        self.file_list.header().setStretchLastSection(False)
+        self.file_list.header().setSectionResizeMode(
+            0, QHeaderView.ResizeMode.Stretch
+        )
+        self.file_list.header().setSectionResizeMode(
+            1, QHeaderView.ResizeMode.ResizeToContents
+        )
+        self.file_list.currentItemChanged.connect(self._on_file_selected)
+        self.file_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.file_list.customContextMenuRequested.connect(self._on_files_menu)
         right_box.addWidget(self.file_list)
 
         # The file list and the diff below it are two separate things; without a
@@ -435,7 +498,13 @@ class CommitPanel(QWidget):
             return
         bound = self.bound()
         try:
-            coverage = _read_staged(repo, bound.diff_mode, bound.ignore_globs)
+            coverage = _read_staged(
+                repo,
+                bound.diff_mode,
+                bound.ignore_globs,
+                self.settings.included_paths(repo),
+                bound.include_lines,
+            )
         except Exception:
             # A repo git cannot read (e.g. blocked by safe.directory) simply
             # shows nothing here; generating surfaces the real error.
@@ -443,7 +512,7 @@ class CommitPanel(QWidget):
         self._show_staged(coverage)
 
     def _show_staged(self, coverage: list[FileCoverage]) -> None:
-        self._populate_files(coverage)
+        self._populate_files(coverage, staged=True)
         if not coverage:
             self.files_label.setText("Staged files - nothing staged")
 
@@ -896,7 +965,9 @@ class CommitPanel(QWidget):
             self._refresh_history()
 
     # ---- omitted-content view ---------------------------------------------
-    def _populate_files(self, coverage: list[FileCoverage]) -> None:
+    def _populate_files(
+        self, coverage: list[FileCoverage], *, staged: bool = False
+    ) -> None:
         # Files with omissions first, so problems are immediately visible.
         self._coverage = sorted(coverage, key=lambda c: -c.omitted_count)
         self.file_list.clear()
@@ -904,11 +975,17 @@ class CommitPanel(QWidget):
         total_omitted = sum(c.omitted_count for c in self._coverage)
         incomplete = sum(1 for c in self._coverage if not c.fully_sent)
         summarized = sum(1 for c in self._coverage if c.reason == "summarized")
+        excerpted = sum(1 for c in self._coverage if c.reason == "excerpt")
         # Before a run there is nothing to report about what reached the model.
-        if any(c.reason == "staged" for c in self._coverage):
+        if staged:
             kept = sum(1 for c in self._coverage if c.reason == "staged")
-            filtered = len(self._coverage) - kept
-            note = f", {filtered} filtered as noise" if filtered else ""
+            filtered = len(self._coverage) - kept - excerpted
+            notes = []
+            if filtered:
+                notes.append(f"{filtered} filtered as noise")
+            if excerpted:
+                notes.append(f"{excerpted} kept by hand")
+            note = f", {', '.join(notes)}" if notes else ""
             self.files_label.setText(f"Staged files ({kept}){note}")
         elif total_omitted:
             self.files_label.setText(
@@ -926,30 +1003,81 @@ class CommitPanel(QWidget):
             )
 
         for cov in self._coverage:
-            if cov.reason == "staged":
-                suffix = ""  # nothing sent yet, so nothing to report
-            elif cov.reason == "filtered":
-                suffix = "  [filtered as noise - fully omitted]"
+            item = QTreeWidgetItem([cov.path, _why(cov)])
+            # The menu is the only way to find the un-ignore, so the rows it
+            # applies to are the ones that say it is there.
+            hints = {
+                "filtered": "\nRight-click to send this file anyway.",
+                "excerpt": "\nRight-click to go back to ignoring it.",
+            }
+            item.setToolTip(0, cov.path + hints.get(cov.reason, ""))
+            item.setToolTip(1, item.text(1))
+            # An excerpt is not a warning: red is for content that went missing,
+            # and this is content that arrived where none did before.
+            colour = None
+            if cov.reason in ("excerpt", "summarized"):
+                colour = Qt.GlobalColor.darkYellow
             elif cov.omitted_count:
-                suffix = f"  [{cov.omitted_count}/{len(cov.lines)} lines omitted]"
-            elif cov.reason == "summarized":
-                suffix = "  [fully sent - as summary]"
-            else:
-                suffix = "  [fully sent]"
-            item = QListWidgetItem(f"{cov.path}{suffix}")
-            item.setToolTip(cov.path)
-            if cov.omitted_count:
-                item.setForeground(Qt.GlobalColor.red)
-            elif cov.reason == "summarized":
-                item.setForeground(Qt.GlobalColor.darkYellow)
-            self.file_list.addItem(item)
+                colour = Qt.GlobalColor.red
+            if colour is not None:
+                for column in (0, 1):
+                    item.setForeground(column, colour)
+            self.file_list.addTopLevelItem(item)
 
         if self._coverage:
-            self.file_list.setCurrentRow(0)
+            self.file_list.setCurrentItem(self.file_list.topLevelItem(0))
         else:
             self.diff_view.clear()
 
-    def _on_file_selected(self, row: int) -> None:
+    # ---- un-ignoring one file ----------------------------------------------
+    # The ignore globs are a rule and are always obeyed. This is the exception
+    # somebody makes by hand, file by file, because only the person committing
+    # knows whether a given ignored file is noise or the point of the change.
+    def _on_files_menu(self, point) -> None:
+        row = self.file_list.indexAt(point).row()
+        if row < 0 or row >= len(self._coverage):
+            return
+        cov = self._coverage[row]
+        if cov.reason not in ("filtered", "excerpt"):
+            return  # a file that is not ignored has nothing to decide
+
+        menu = QMenu(self)
+        if cov.reason == "excerpt":
+            menu.addAction("Ignore this file again", lambda: self._set_ignored(cov, True))
+        elif is_binary_diff("".join(cov.lines)):
+            # Git produced no text for it, so un-ignoring it would send the
+            # two-line "differ" stub and nothing else. Say so rather than
+            # offering a choice that does nothing.
+            blocked = menu.addAction("Git produced no text for this file")
+            blocked.setEnabled(False)
+        else:
+            limit = self.bound().include_lines
+            how = f"first {limit} lines" if limit > 0 else "all of it"
+            menu.addAction(
+                f"Do not ignore this file ({how})",
+                lambda: self._set_ignored(cov, False),
+            )
+        menu.exec(self.file_list.viewport().mapToGlobal(point))
+
+    def _set_ignored(self, cov: FileCoverage, ignored: bool) -> None:
+        repo = self._current_repo_path()
+        if not repo:
+            return
+        if ignored:
+            self.settings.ignore_file(repo, cov.path)
+        else:
+            self.settings.include_file(repo, cov.path)
+        self.settings.save()
+        # The pane, and the estimate behind the Generate button, both read the
+        # decision -- so re-read rather than patching the row in place.
+        self._load_staged_files()
+
+    def _on_file_selected(self, current=None, _previous=None) -> None:
+        row = (
+            self.file_list.indexOfTopLevelItem(current)
+            if current is not None
+            else -1
+        )
         if row < 0 or row >= len(self._coverage):
             self.diff_view.clear()
             return

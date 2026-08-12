@@ -25,7 +25,13 @@ from git_assistant.commit_generator import (
     render_template,
 )
 from git_assistant.config import Settings
-from git_assistant.diff_strategy import build_units_with_coverage, filter_files, pack_units, split_diff
+from git_assistant.diff_strategy import (
+    build_units_with_coverage,
+    excerpt_included,
+    filter_files,
+    pack_units,
+    split_diff,
+)
 from git_assistant.parallel import effective_parallel
 from git_assistant.tokenizer import estimate_tokens, input_budget, reserved_output
 
@@ -104,10 +110,22 @@ def for_commit(settings: Settings) -> Estimate:
         out.problem = f"No {mode} changes to describe in this repository."
         return out
 
-    files, _dropped = filter_files(split_diff(raw), settings.ignore_globs)
+    all_files = split_diff(raw)
+    files, dropped = filter_files(all_files, settings.ignore_globs)
+    # The generator sends the head of an un-ignored file; so this must price it.
+    excerpts = excerpt_included(
+        all_files, dropped, settings.included_paths(repo), settings.include_lines
+    )
+    files = files + [e.file for e in excerpts]
     if not files:
         out.problem = "Every changed file was filtered out as noise."
         return out
+    sent = sum(e.kept for e in excerpts)
+    excerpted = (
+        [f"{len(excerpts)} un-ignored file(s): {sent:,} line(s) of them."]
+        if excerpts
+        else []
+    )
 
     context = _context(settings)
     answer = reserved_output(context, settings.safety_margin)
@@ -125,7 +143,7 @@ def for_commit(settings: Settings) -> Estimate:
         out.lines = [
             f"The whole diff fits: one call carrying {full_tokens:,} tokens.",
             f"Room reserved for the message: {answer:,} tokens.",
-        ]
+        ] + excerpted
         return out
 
     # Too large: the same map-reduce the generator will run.
@@ -156,7 +174,7 @@ def for_commit(settings: Settings) -> Estimate:
         f"up to {len(chunks) * MAP_OUTPUT_TOKENS:,} out.",
         f"One final call to write the message: about {final_in:,} in, "
         f"up to {answer:,} out.",
-    ]
+    ] + excerpted
     return out
 
 

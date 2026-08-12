@@ -15,6 +15,12 @@ uv run git-assistant
 The tray icon opens the window. Its right-click menu is three items — **Git
 Assistant**, **About**, **Exit** — because everything else belongs in the window.
 
+Every tab that acts on a repository picks one from the same list: **Recently
+Used** at the top, five at most, and **All** below it in alphabetical order with
+each repository's submodules folded away until you open them. A repository you
+have just used appears in both — All means all, so nothing ever moves out of the
+place you expect to find it.
+
 Above the tabs, on every one of them, sits the bar that says what the *active
 repository* is configured with: **Commit as** (the identity the next commit will
 carry) and **Active Settings** (which of the three settings files is in force).
@@ -32,7 +38,7 @@ Top right is the theme picker: follow the system, light, dark, or pink.
 | **Copy** / **Commit** / **Push** | Take the message, commit with it, publish it. The message is editable first. |
 | **Prompt template** | Which of your named templates this repository is described with. |
 | **AI Provider** | Which backend answers, switchable without leaving the tab. |
-| **Staged files** | Every file in the prompt. Select one to see its diff, with anything the model *did not* see marked in red. |
+| **Staged files** | Every file in the prompt, and a **Why** column saying what happened to each — `ignored: *.pdf`, `binary`, `too large`, `fully sent`. Select one to see its diff, with anything the model *did not* see marked in red. Right-click a file the noise filter dropped to send it anyway — its first 200 lines, remembered for this repository. |
 | **View LLM calls** | The exact prompt sent and the exact reply, per call — including every call of a map-reduce run. |
 | **Previous runs** | Messages already generated for this repository, newest first, pinnable, reopenable. |
 
@@ -78,6 +84,7 @@ More: [audits](docs/audits.md)
 | **Mark all / Mark none** | Everything staged starts marked; unmark what you do not want checked. |
 | **A window before it runs** | Every marked file with its language, its version and the rules that will be checked, beside the token estimate. |
 | **Profiles tab** | Edit a profile: a row per language, a version dropdown, and the rule sets it draws on. Tick a whole set, or individual rules within it. |
+| **New… / Delete** | Start a profile of your own, copied from the one open, or remove one. **Default Rules is read-only and cannot be deleted** — it is generated from the shipped rules, so copy it and edit the copy. |
 | **Add / Remove rule set** | A language can be checked against several sets at once — its own shipped rules, another language's, and any table of yours. |
 | **Rule Sets tab** | Every set there is: the built-in one per language, and your own imported tables. Shows each rule and, for the built-in ones, the language versions it applies to. |
 | **Languages tab** | The languages a review recognises, the file types that reach each, and how many built-in rules apply at each version. |
@@ -163,7 +170,8 @@ More: [commit messages](docs/commit-messages.md#templates)
 | **Diff source** | Staged changes, or everything uncommitted. |
 | **Output reserve** | How much of the context window is kept for the answer. |
 | **Subject / body limits** | Reported, not enforced. |
-| **Ignore globs** | Files that never reach the model. |
+| **Ignore globs** | Files that never reach the model. Always obeyed; the exceptions are made one file at a time, by right-clicking it in **Staged files**. |
+| **Lines per un-ignored file** | How much of such a file is sent once you have asked for it. 200, which for a document is the title and the table of contents. `0` for all of it. |
 | **Langfuse** | Send every call to your own instance, prompt and reply included. Off by default. |
 | **Shipped settings** | Check the factory copy against its checksum, and restore from it. |
 | **Update source** | A readout: where updates come from and why they are or are not available. |

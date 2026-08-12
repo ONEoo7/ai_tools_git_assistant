@@ -97,6 +97,21 @@ class ProfileTab(QWidget):
         self.profiles_list.currentItemChanged.connect(self._on_picked)
         box.addWidget(self.profiles_list, 1)
 
+        # Under the list, because they act on the list rather than on the
+        # profile open beside it.
+        buttons = QHBoxLayout()
+        self.new_profile_btn = QPushButton("New...")
+        self.new_profile_btn.setToolTip(
+            "Start a profile of your own, copied from the one open. This is how "
+            "you change the shipped rules: copy them, then edit the copy."
+        )
+        self.delete_profile_btn = QPushButton("Delete")
+        self.delete_profile_btn.setToolTip("Remove the selected profile.")
+        buttons.addWidget(self.new_profile_btn)
+        buttons.addWidget(self.delete_profile_btn)
+        buttons.addStretch(1)
+        box.addLayout(buttons)
+
         self.in_use = QLabel("")
         self.in_use.setWordWrap(True)
         self.in_use.setStyleSheet(MUTED)
@@ -184,6 +199,11 @@ class ProfileTab(QWidget):
                 item.setToolTip("A review of this repository runs against this one.")
             elif profile.from_repository():
                 item.setToolTip("Shipped by this repository. Read-only here.")
+            elif profile.is_default():
+                item.setToolTip(
+                    "The rules this build ships with. Read-only; press New to "
+                    "make a copy you can change."
+                )
             self.profiles_list.addItem(item)
             if profile.name == current:
                 self.profiles_list.setCurrentItem(item)
@@ -217,7 +237,7 @@ class ProfileTab(QWidget):
         self.tree.blockSignals(True)
         self.tree.clear()
         profile = self._profile
-        editable = profile is not None and not profile.from_repository()
+        editable = profile is not None and not profile.read_only()
         for button in (
             self.add_language_btn,
             self.remove_language_btn,
@@ -227,6 +247,12 @@ class ProfileTab(QWidget):
         ):
             button.setEnabled(editable)
         self.copy_btn.setVisible(bool(profile and profile.from_repository()))
+        # New works on anything -- copying the shipped rules is the point of it.
+        # Delete does not: the shipped profile is generated rather than stored,
+        # so there is nothing to delete, and a repository's own belongs to the
+        # repository.
+        self.new_profile_btn.setEnabled(profile is not None)
+        self.delete_profile_btn.setEnabled(editable)
 
         if profile is None:
             self.header.setText("No profile is selected.")
@@ -235,11 +261,11 @@ class ProfileTab(QWidget):
 
         self.header.setText(_header(profile))
         for entry in profile.languages:
-            self.tree.addTopLevelItem(self._language_row(entry))
+            self.tree.addTopLevelItem(self._language_row(entry, editable))
         self.tree.blockSignals(False)
         self.note.setText(_note(profile, self._sources))
 
-    def _language_row(self, entry: LanguageRules) -> QTreeWidgetItem:
+    def _language_row(self, entry: LanguageRules, editable: bool = True) -> QTreeWidgetItem:
         item = QTreeWidgetItem([entry.label(), "", ""])
         item.setData(0, Qt.ItemDataRole.UserRole, entry)
         font = item.font(0)
@@ -257,10 +283,10 @@ class ProfileTab(QWidget):
             # Tickable itself, so a whole set can be turned on or off without
             # visiting every rule in it -- and tri-state, so a set with some of
             # its rules off does not read as one that is entirely off.
-            head.setFlags(head.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            head.setFlags(_checkable(head.flags(), editable))
             item.addChild(head)
             for rule in table.rules:
-                head.addChild(_rule_row(rule, selection))
+                head.addChild(_rule_row(rule, selection, editable))
             _refresh_head_state(head)
         return item
 
@@ -304,7 +330,7 @@ class ProfileTab(QWidget):
         if not entry.version and detected:
             combo.setStyleSheet("color: #8ab;")
             combo.setToolTip(self._sources.get(entry.language, "detected"))
-        combo.setEnabled(self._profile is not None and not self._profile.from_repository())
+        combo.setEnabled(self._profile is not None and not self._profile.read_only())
         combo.currentIndexChanged.connect(
             lambda _i, e=entry, c=combo: self._on_version_changed(e, c.currentData())
         )
@@ -425,7 +451,7 @@ class ProfileTab(QWidget):
         model has always allowed it.
         """
         entry = self.current_entry()
-        if entry is None or self._profile is None or self._profile.from_repository():
+        if entry is None or self._profile is None or self._profile.read_only():
             return []
         taken = {s.ref for s in entry.selections}
         offered = [builtin.ref_of(one) for one in rule_files.languages_covered()]
@@ -469,10 +495,24 @@ def _refresh_head_state(head: QTreeWidgetItem) -> None:
         head.setCheckState(0, Qt.CheckState.PartiallyChecked)
 
 
-def _rule_row(rule, selection: Selection) -> QTreeWidgetItem:
+def _checkable(flags, editable: bool):
+    """Add or *remove* the checkable flag.
+
+    Removing matters: Qt's default flags already include it, so leaving it
+    alone on a read-only profile leaves every box tickable -- which is how
+    "read-only" came to mean "your edit goes somewhere else".
+    """
+    if editable:
+        return flags | Qt.ItemFlag.ItemIsUserCheckable
+    return flags & ~Qt.ItemFlag.ItemIsUserCheckable
+
+
+def _rule_row(rule, selection: Selection, editable: bool = True) -> QTreeWidgetItem:
     item = QTreeWidgetItem([f"{rule.rule_id}: {rule.details}", "", ""])
     item.setData(0, Qt.ItemDataRole.UserRole, (selection, rule.rule_id))
-    item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+    # Shown ticked either way, so a read-only profile still says what it
+    # checks; it simply cannot be told otherwise.
+    item.setFlags(_checkable(item.flags(), editable))
     item.setCheckState(
         0, Qt.CheckState.Checked if selection.keeps(rule.rule_id) else Qt.CheckState.Unchecked
     )
@@ -503,6 +543,13 @@ def _header(profile: Profile) -> str:
         return (
             f"{profile.name} - shipped by this repository. It is read-only here; "
             "copy its tables to make them yours."
+        )
+    if profile.is_default():
+        return (
+            f"{profile.name} - the rules this build ships with, "
+            f"{len(profile.languages)} language(s). Read-only: it is generated "
+            "from the shipped rules, so an edit would have nowhere to live. "
+            "Press New to make a copy you can change."
         )
     return f"{profile.name} - {len(profile.languages)} language(s)."
 

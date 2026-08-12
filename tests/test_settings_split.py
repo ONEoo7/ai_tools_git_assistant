@@ -63,6 +63,11 @@ CLASSIFIED = {
     "branch_pattern": "selection",
     "branch_user": "selection",
     "repo_templates": "selection",
+    # Which ignored files were kept anyway, per repository. A selection for
+    # the same reason `audit_selected` is one: it names things rather than
+    # stating a rule. The rule is `commit.ignore_globs`, it is a repository's
+    # to share, and un-ignoring a file never changes it.
+    "commit_includes": "selection",
     "default_template": "library",
     # The prompt itself, not which model is asked it: the same kind of thing as
     # the commit template, and kept for the same reason -- there is always one
@@ -126,6 +131,7 @@ CHANGES = {
     "commit.body_limit": "what the model is asked for",
     "commit.history_limit": "how many messages are kept",
     "commit.ignore_globs": "which files reach the model",
+    "commit.include_lines": "how much of an un-ignored file reaches the model",
     "review.history_limit": "how many reviews are kept",
     "review.judge.enabled": "whether a second model is called to score the review",
     "review.judge.provider": "which backend does the scoring",

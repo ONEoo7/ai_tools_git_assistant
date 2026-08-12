@@ -592,8 +592,10 @@ def test_switching_repository_clears_the_previous_report(qapp, with_repo):
         _runs(_report_for(repo=panel._repo_path(), agent_id=panel._agent_id()))
     )
 
+    # Top level is now the "All" group; its children are the repositories.
     tree = panel.repo_picker.repo_list
-    tree.setCurrentItem(tree.topLevelItem(1))
+    everything = tree.topLevelItem(tree.topLevelItemCount() - 1)
+    tree.setCurrentItem(everything.child(1))
 
     assert panel._report is None
 

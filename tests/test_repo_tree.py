@@ -46,6 +46,15 @@ def test_folder_group_nests_submodules(qapp, settings):
     assert _rows(root) == [("alpha", 0), ("inner", 1), ("beta", 0)]
 
 
+def test_the_folder_is_open_and_its_repositories_are_folded(qapp, settings):
+    """One repository with forty submodules must not bury the next one."""
+    dlg = SettingsDialog(settings)
+    root = dlg.repo_tree.topLevelItem(0)
+
+    assert root.isExpanded()
+    assert not root.child(0).isExpanded()  # alpha, holding inner
+
+
 def test_folder_count_includes_nested_repos(qapp, settings):
     dlg = SettingsDialog(settings)
     assert dlg.repo_tree.topLevelItem(0).text(0) == "/x   (3)"
@@ -94,3 +103,72 @@ def test_a_submodule_row_rescans_its_folder_group(qapp, settings):
     inner.setSelected(True)
 
     assert dlg._selected_root_folder() == "/x"
+
+
+# ---- the order submodules appear in ---------------------------------------------------
+def _tree(*paths):
+    from git_assistant.config import build_repo_tree
+
+    return build_repo_tree([RepoEntry(p) for p in paths])
+
+
+def _kids(node):
+    return [child.entry.display() for child in node.children]
+
+
+def test_submodules_are_listed_by_name(qapp):
+    """`.gitmodules` lists them in whatever order they were added, which is
+    arbitrary; forty of those is a list nobody can scan."""
+    tree = _tree(
+        "/x/super",
+        "/x/super/libs/zeta",
+        "/x/super/libs/alpha",
+        "/x/super/libs/middleware",
+        "/x/super/libs/beta",
+    )
+
+    assert _kids(tree[0]) == ["alpha", "beta", "middleware", "zeta"]
+
+
+def test_an_already_added_repository_is_sorted_without_rescanning(qapp):
+    """The order in settings is whatever the scan produced at the time."""
+    tree = _tree("/x/super", "/x/super/b", "/x/super/a")
+    assert _kids(tree[0]) == ["a", "b"]
+
+
+def test_case_does_not_split_the_list_in_two(qapp):
+    """Sorting by raw bytes puts every capital ahead of every lowercase, which
+    reads as two lists rather than one."""
+    tree = _tree("/x/super", "/x/super/zulu", "/x/super/Alpha", "/x/super/beta")
+    assert _kids(tree[0]) == ["Alpha", "beta", "zulu"]
+
+
+def test_a_submodule_of_a_submodule_still_nests_under_it(qapp):
+    tree = _tree(
+        "/x/super",
+        "/x/super/libs/core",
+        "/x/super/libs/core/inner",
+        "/x/super/libs/api",
+    )
+
+    assert _kids(tree[0]) == ["api", "core"]
+    core = [c for c in tree[0].children if c.entry.display() == "core"][0]
+    assert _kids(core) == ["inner"]
+
+
+def test_the_top_level_keeps_the_order_it_was_given(qapp):
+    """Which repository you are working in is what the top level answers, and
+    `ordered_repos` puts the active one first. Sorting that would bury it."""
+    tree = _tree("/x/zulu", "/x/alpha")
+    assert [node.entry.display() for node in tree] == ["zulu", "alpha"]
+
+
+def test_a_label_is_what_it_sorts_by(qapp):
+    """The tree shows `display()`; sorting by path would look unsorted."""
+    named = RepoEntry("/x/super/zzz")
+    named.label = "aaa"
+    from git_assistant.config import build_repo_tree
+
+    tree = build_repo_tree([RepoEntry("/x/super"), named, RepoEntry("/x/super/bbb")])
+
+    assert _kids(tree[0]) == ["aaa", "bbb"]

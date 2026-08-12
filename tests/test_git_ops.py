@@ -1,6 +1,7 @@
 import os
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -450,3 +451,57 @@ def test_an_untracked_file_counts_as_uncommitted(repo):
     _commit_file(repo)
     (repo / "new.txt").write_text("x\n", encoding="utf-8")
     assert git_ops.has_uncommitted_changes(repo)
+
+
+# ---- the order submodules are found in ------------------------------------------------
+def _super_repo(tmp_path, names, nested=None):
+    """A repository whose .gitmodules lists `names` in that order."""
+    root = tmp_path / "super"
+    (root / ".git").mkdir(parents=True)
+    (root / ".gitmodules").write_text(
+        "".join(f'[submodule "{n}"]\n\tpath = libs/{n}\n' for n in names),
+        encoding="utf-8",
+    )
+    for name in names:
+        (root / "libs" / name / ".git").mkdir(parents=True)
+    if nested:
+        parent = root / "libs" / nested[0]
+        (parent / ".gitmodules").write_text(
+            f'[submodule "{nested[1]}"]\n\tpath = {nested[1]}\n', encoding="utf-8"
+        )
+        (parent / nested[1] / ".git").mkdir(parents=True)
+    return root
+
+
+def test_submodules_come_back_sorted(tmp_path):
+    """Declaration order in .gitmodules is the order they were added, and that
+    is arbitrary."""
+    root = _super_repo(tmp_path, ["zeta", "alpha", "middleware", "beta"])
+
+    found = git_ops.find_submodules(root)
+
+    assert [Path(p).name for p in found] == ["alpha", "beta", "middleware", "zeta"]
+
+
+def test_sorting_is_case_insensitive(tmp_path):
+    root = _super_repo(tmp_path, ["zulu", "Alpha", "beta"])
+    found = git_ops.find_submodules(root)
+    assert [Path(p).name for p in found] == ["Alpha", "beta", "zulu"]
+
+
+def test_a_nested_submodule_still_follows_its_parent(tmp_path):
+    """Sorting per level rather than the finished list is what keeps that true."""
+    root = _super_repo(tmp_path, ["core", "api"], nested=("core", "inner"))
+
+    names = [Path(p).name for p in git_ops.find_submodules(root)]
+
+    assert names.index("core") < names.index("inner")
+    assert names == ["api", "core", "inner"]
+
+
+def test_a_scan_of_the_repository_itself_lists_them_sorted(tmp_path):
+    root = _super_repo(tmp_path, ["zeta", "alpha"])
+
+    found = git_ops.find_git_repos(root)
+
+    assert [Path(p).name for p in found] == ["super", "alpha", "zeta"]

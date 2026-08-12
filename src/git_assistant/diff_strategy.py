@@ -4,6 +4,8 @@ Pure, dependency-light helpers (no Qt, no network) so they can be unit tested:
 
 - ``split_diff``       : parse a raw unified diff into per-file segments
 - ``filter_files``     : drop noise files (lockfiles, binaries, user globs)
+- ``drop_reason``      : which of those rules dropped one file
+- ``excerpt_included`` : keep the head of a dropped file somebody asked for
 - ``split_into_hunks`` : break one file segment into header + individual hunks
 - ``pack_units``       : greedily group text units into chunks under a token budget
 
@@ -72,6 +74,44 @@ def _extract_path(segment: list[str]) -> str:
     return "?"
 
 
+def first_match(path: str, globs: list[str]) -> str:
+    """The first glob a path or its basename matches, or ``""``.
+
+    The glob itself rather than a yes/no, because "dropped" is not an answer
+    anyone can act on and "dropped by ``*.pdf``" is.
+    """
+    basename = path.rsplit("/", 1)[-1]
+    for g in globs:
+        if fnmatch.fnmatch(path, g) or fnmatch.fnmatch(basename, g):
+            return g
+    return ""
+
+
+def matches_any(path: str, globs: list[str]) -> bool:
+    """Whether a path or its basename matches any of ``globs``."""
+    return bool(first_match(path, globs))
+
+
+def is_binary_diff(text: str) -> bool:
+    """Whether a segment is git's stand-in for a diff it could not produce."""
+    return "Binary files " in text and "differ" in text
+
+
+#: What ``drop_reason`` says when git itself would not produce a diff.
+BINARY = "binary"
+
+
+def drop_reason(f: FileDiff, ignore_globs: list[str]) -> str:
+    """Why ``filter_files`` dropped this file: ``BINARY``, a glob, or ``""``.
+
+    The same two tests ``filter_files`` applies, in the same order, so the two
+    can never disagree about a file.
+    """
+    if is_binary_diff(f.text):
+        return BINARY
+    return first_match(f.path, ignore_globs)
+
+
 def filter_files(
     files: list[FileDiff], ignore_globs: list[str]
 ) -> tuple[list[FileDiff], list[str]]:
@@ -83,17 +123,67 @@ def filter_files(
     kept: list[FileDiff] = []
     dropped: list[str] = []
     for f in files:
-        basename = f.path.rsplit("/", 1)[-1]
-        is_binary = "Binary files " in f.text and "differ" in f.text
-        matched = any(
-            fnmatch.fnmatch(f.path, g) or fnmatch.fnmatch(basename, g)
-            for g in ignore_globs
-        )
-        if is_binary or matched:
+        if is_binary_diff(f.text) or matches_any(f.path, ignore_globs):
             dropped.append(f.path)
         else:
             kept.append(f)
     return kept, dropped
+
+
+@dataclass
+class Excerpt:
+    """The head of an ignored file somebody asked to keep anyway."""
+
+    #: The whole segment as git produced it. Kept because what is reported
+    #: about an excerpt has to be measured against the whole, not the head:
+    #: a file that lost 1055 lines must never read as fully sent.
+    source: FileDiff
+    #: That head, and how many of ``source``'s lines it carries.
+    file: FileDiff
+    kept: int
+
+    @property
+    def total(self) -> int:
+        return len(self.source.text.splitlines(keepends=True))
+
+
+def excerpt_included(
+    files: list[FileDiff],
+    dropped: list[str],
+    included: list[str],
+    limit: int,
+) -> list[Excerpt]:
+    """The first ``limit`` lines of each dropped file named in ``included``.
+
+    The ignore globs are always obeyed; this reads the list of exceptions
+    somebody made by hand, file by file, and nothing else. Nothing is inferred
+    from a file's type: a document worth reading and a lock file worth skipping
+    look identical from here, and only the person committing knows which is
+    which.
+
+    ``limit`` of 0 or less sends the whole file. Files git could not diff are
+    skipped whatever was asked for: ``Binary files ... differ`` is three lines
+    the diffstat has already said.
+    """
+    wanted = set(included)
+    dropped_set = set(dropped)
+    out: list[Excerpt] = []
+    for f in files:
+        if f.path not in wanted or f.path not in dropped_set:
+            continue
+        if is_binary_diff(f.text):
+            continue
+        lines = f.text.splitlines(keepends=True)
+        if limit <= 0 or len(lines) <= limit:
+            out.append(Excerpt(source=f, file=f, kept=len(lines)))
+            continue
+        # Without the marker the hunk header promises more lines than arrive,
+        # and the file reads as ending mid-sentence.
+        rest = len(lines) - limit
+        marker = f"\n[... {rest} further lines of this file not sent ...]\n"
+        head = FileDiff(path=f.path, text="".join(lines[:limit]) + marker)
+        out.append(Excerpt(source=f, file=head, kept=limit))
+    return out
 
 
 def split_into_hunks(file_diff: FileDiff) -> list[str]:

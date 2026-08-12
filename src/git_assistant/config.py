@@ -180,6 +180,13 @@ FIELD_COMMENTS = {
         "it names one of the templates on offer and decides nothing about what "
         "any of them say."
     ),
+    "commit_includes": (
+        "Ignored files kept anyway, per repository, by repository key. A "
+        "selection: it names files and changes no rule. commit.ignore_globs "
+        "still says what is ignored; this says which of those you looked at "
+        "and decided the model should see, and commit.include_lines says how "
+        "much of each one it gets."
+    ),
 }
 
 DEFAULT_TEMPLATE_NAME = "Default"
@@ -270,7 +277,15 @@ def build_repo_tree(entries: Iterable[RepoEntry]) -> list[RepoNode]:
     Submodules live inside their parent's working tree, so containment is what
     identifies them -- no extra field to keep in step with the paths, and repos
     recorded before submodules were scanned nest correctly on the next load.
-    Input order is preserved among siblings, and duplicates are dropped.
+    Duplicates are dropped.
+
+    **Top-level order is the caller's; nested repositories are sorted by name.**
+    The two are ordered by different questions. Which repository you are working
+    in is what the top level answers, so `Settings.ordered_repos` puts the
+    active one and then the recent ones first. A repository's submodules are not
+    ranked by anything -- they arrive in `.gitmodules` declaration order, which
+    is arbitrary -- and forty of them in that order is a list you have to read
+    rather than scan.
     """
     nodes: dict[str, RepoNode] = {}
     order: list[str] = []
@@ -288,6 +303,11 @@ def build_repo_tree(entries: Iterable[RepoEntry]) -> list[RepoNode]:
             if key.startswith(other + os.sep) and len(other) > len(parent):
                 parent = other
         (nodes[parent].children if parent else roots).append(nodes[key])
+
+    # By what is on screen rather than by path: the tree shows `display()`, and
+    # sorting by something else produces a list that looks unsorted.
+    for node in nodes.values():
+        node.children.sort(key=lambda one: one.entry.display().casefold())
     return roots
 
 
@@ -394,6 +414,13 @@ class Settings:
     #: Which template each repository uses, by repo key. A selection: it names
     #: one of the templates on offer and decides nothing about what they say.
     repo_templates: dict[str, str] = field(default_factory=dict)
+    #: Ignored files kept anyway, per repo key. A selection for the same reason
+    #: the ticked audits are one: it names files, and states no rule. The rule
+    #: is `commit.ignore_globs`, it is a repository's to share, and it is always
+    #: obeyed -- this is the record of the files somebody looked at and decided
+    #: were worth the tokens. Not carried between repositories: a spec that
+    #: matters in one project is nothing in the next.
+    commit_includes: dict[str, list[str]] = field(default_factory=dict)
     #: What the code-review judge is asked. Here for the same reason
     #: `default_template` is: it is the one prompt that is always there, so a
     #: repository's own settings can never leave a judge with nothing to say.
@@ -562,6 +589,36 @@ class Settings:
             self.repo_templates[key] = name
         else:
             self.repo_templates.pop(key, None)  # back to the default; say nothing
+
+    # An ignored file is ignored. These record the exceptions somebody made by
+    # hand, per repository, and nothing else reads them: the ignore globs are
+    # untouched, and a file not named here never reaches a model.
+    def included_paths(self, repo_path: str) -> list[str]:
+        """Ignored files kept anyway here, as repo-relative diff paths."""
+        if not repo_path:
+            return []
+        return list(self.commit_includes.get(repo_key(repo_path), []))
+
+    def set_included(self, repo_path: str, paths) -> None:
+        """Replace the list. An empty one leaves no entry behind."""
+        if not repo_path:
+            return
+        key = repo_key(repo_path)
+        kept = list(dict.fromkeys(paths))  # ordered, and no path twice
+        if kept:
+            self.commit_includes[key] = kept
+        else:
+            self.commit_includes.pop(key, None)
+
+    def include_file(self, repo_path: str, path: str) -> None:
+        """Stop ignoring one file here."""
+        self.set_included(repo_path, [*self.included_paths(repo_path), path])
+
+    def ignore_file(self, repo_path: str, path: str) -> None:
+        """Go back to ignoring it."""
+        self.set_included(
+            repo_path, [p for p in self.included_paths(repo_path) if p != path]
+        )
 
     def repoint_template(self, old: str, new: str) -> None:
         """Follow a rename, or a removal when ``new`` is ``""``.

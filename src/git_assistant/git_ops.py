@@ -166,6 +166,12 @@ def find_submodules(repo: str | Path, max_depth: int = 4) -> list[str]:
     ``max_depth`` levels. Only checked-out submodules are returned: one that was
     never initialised has no working tree to act on, so listing it would offer
     the user a repository they cannot commit in.
+
+    Each level is sorted by name. ``.gitmodules`` lists submodules in whatever
+    order they were added, which is arbitrary, and a repository with forty of
+    them is then a list nobody can scan. Sorting per level rather than the
+    finished list is what keeps the "parents first" promise above: a
+    submodule's own submodules still follow it.
     """
     found: list[str] = []
     seen: set[str] = set()
@@ -173,7 +179,7 @@ def find_submodules(repo: str | Path, max_depth: int = 4) -> list[str]:
     def walk(base: Path, depth: int) -> None:
         if depth > max_depth:
             return
-        for rel in _gitmodules_paths(base):
+        for rel in sorted(_gitmodules_paths(base), key=str.casefold):
             child = base / rel
             key = os.path.normcase(os.path.normpath(str(child)))
             if key in seen or not has_git_dir(child):

@@ -322,7 +322,7 @@ def test_refresh_picks_up_files_staged_outside_the_window(qapp, settings, tmp_pa
     settings.repos = [RepoEntry(str(repo))]
     settings.active_repo = str(repo)
     panel = CommitPanel(settings, auto_start=False)
-    assert panel.file_list.count() == 0
+    assert panel.file_list.topLevelItemCount() == 0
 
     (repo / "new.py").write_text("print('hi')\n", encoding="utf-8")
     subprocess.run(
@@ -333,7 +333,7 @@ def test_refresh_picks_up_files_staged_outside_the_window(qapp, settings, tmp_pa
 
     panel.refresh_btn.click()
 
-    assert panel.file_list.count() == 1
+    assert panel.file_list.topLevelItemCount() == 1
 
 
 def test_refresh_is_disabled_while_generating(qapp, settings, tmp_path):
@@ -374,9 +374,96 @@ def test_picker_nests_submodules_under_their_repo(qapp, settings):
     settings.active_repo = "/x/alpha"
     panel = CommitPanel(settings, auto_start=False)
 
-    assert _rows(panel.repo_picker) == [("alpha", 0), ("inner", 1), ("beta", 0)]
-    # A submodule is a repository in its own right, so it counts as one.
+    # Under "All", by name, with the submodule folded into its parent.
+    assert _rows(panel.repo_picker) == [
+        ("All", 0),
+        ("alpha", 1),
+        ("inner", 2),
+        ("beta", 1),
+    ]
+    # A submodule is a repository in its own right, so it counts as one. The
+    # group header is not one, and neither is a repeat under Recently Used.
     assert panel.repo_picker.count() == 3
+
+
+def test_picker_folds_submodules_away(qapp, settings):
+    """Forty submodules is forty-one rows before the second repository."""
+    settings.repos = [RepoEntry("/x/alpha"), RepoEntry("/x/alpha/libs/inner")]
+    settings.active_repo = "/x/alpha"
+    panel = CommitPanel(settings, auto_start=False)
+
+    alpha = panel.repo_picker.repo_list.topLevelItem(0).child(0)
+    assert alpha.text(0) == "alpha"
+    assert not alpha.isExpanded()
+
+
+def test_the_recently_used_come_first_and_stop_at_five(qapp, settings):
+    from git_assistant.ui.repo_picker import ALL_GROUP, RECENT_GROUP
+
+    settings.repos = [RepoEntry(f"/x/r{i}") for i in range(8)]
+    settings.recent_repos = [f"/x/r{i}" for i in range(8)]
+    settings.active_repo = "/x/r0"
+    panel = CommitPanel(settings, auto_start=False)
+
+    tree = panel.repo_picker.repo_list
+    assert tree.topLevelItem(0).text(0) == RECENT_GROUP
+    assert tree.topLevelItem(1).text(0) == ALL_GROUP
+    assert tree.topLevelItem(0).childCount() == 5
+    assert [
+        tree.topLevelItem(0).child(i).text(0) for i in range(5)
+    ] == ["r0", "r1", "r2", "r3", "r4"]
+    # All means all: the five are still where you expect to find them.
+    assert tree.topLevelItem(1).childCount() == 8
+    assert panel.repo_picker.count() == 8
+
+
+def test_a_repository_since_removed_is_not_offered_as_recent(qapp, settings):
+    settings.repos = [RepoEntry("/x/alpha")]
+    settings.recent_repos = ["/x/gone", "/x/alpha"]
+    settings.active_repo = "/x/alpha"
+    panel = CommitPanel(settings, auto_start=False)
+
+    recent = panel.repo_picker.repo_list.topLevelItem(0)
+    assert [recent.child(i).text(0) for i in range(recent.childCount())] == ["alpha"]
+
+
+def test_the_recent_group_is_absent_until_something_is_recent(qapp, settings):
+    """A group with nothing in it is noise."""
+    from git_assistant.ui.repo_picker import ALL_GROUP
+
+    settings.repos = [RepoEntry("/x/alpha")]
+    settings.recent_repos = []
+    settings.active_repo = "/x/alpha"
+    panel = CommitPanel(settings, auto_start=False)
+
+    tree = panel.repo_picker.repo_list
+    assert tree.topLevelItemCount() == 1
+    assert tree.topLevelItem(0).text(0) == ALL_GROUP
+
+
+def test_a_group_header_cannot_be_selected(qapp, settings):
+    """It is a label. Selecting it would set the active repository to "".", """
+    from PyQt6.QtCore import Qt
+
+    settings.repos = [RepoEntry("/x/alpha")]
+    settings.active_repo = "/x/alpha"
+    panel = CommitPanel(settings, auto_start=False)
+
+    header = panel.repo_picker.repo_list.topLevelItem(0)
+    assert not (header.flags() & Qt.ItemFlag.ItemIsSelectable)
+    assert header.data(0, Qt.ItemDataRole.UserRole) == ""
+
+
+def test_the_selection_is_the_copy_under_all(qapp, settings):
+    """So it does not move about as recency changes."""
+    settings.repos = [RepoEntry("/x/alpha"), RepoEntry("/x/beta")]
+    settings.recent_repos = ["/x/beta"]
+    settings.active_repo = "/x/beta"
+    panel = CommitPanel(settings, auto_start=False)
+
+    tree = panel.repo_picker.repo_list
+    assert panel.repo_picker.current_path() == "/x/beta"
+    assert tree.currentItem().parent().text(0) == "All"
 
 
 def test_picker_can_select_a_submodule(qapp, settings):
@@ -399,10 +486,41 @@ def test_picker_filter_keeps_the_parent_of_a_matching_submodule(qapp, settings):
 
     panel.repo_picker.filter_edit.setText("inner")
 
-    alpha = tree.topLevelItem(0)
+    everything = tree.topLevelItem(0)
+    alpha = everything.child(0)
     assert not alpha.isHidden()  # a match must not be stranded out of its tree
+    assert alpha.isExpanded()  # and the tree opens far enough to show it
     assert not alpha.child(0).isHidden()
-    assert tree.topLevelItem(1).isHidden()  # beta matches nothing
+    assert everything.child(1).isHidden()  # beta matches nothing
+
+
+def test_clearing_the_filter_folds_the_submodules_back(qapp, settings):
+    settings.repos = [RepoEntry("/x/alpha"), RepoEntry("/x/alpha/libs/inner")]
+    settings.active_repo = "/x/alpha"
+    panel = CommitPanel(settings, auto_start=False)
+    alpha = panel.repo_picker.repo_list.topLevelItem(0).child(0)
+
+    panel.repo_picker.filter_edit.setText("inner")
+    assert alpha.isExpanded()
+    panel.repo_picker.filter_edit.setText("")
+
+    assert not alpha.isExpanded()
+
+
+def test_a_group_title_is_not_something_the_filter_matches(qapp, settings):
+    """Otherwise typing "al" answers with the word "All" and no repositories."""
+    settings.repos = [RepoEntry("/x/beta")]
+    settings.active_repo = "/x/beta"
+    panel = CommitPanel(settings, auto_start=False)
+    tree = panel.repo_picker.repo_list
+
+    panel.repo_picker.filter_edit.setText("zzz")
+
+    # "beta" is the selection, which is always kept visible; the group survives
+    # only because of that child, never because its own title read "All".
+    everything = tree.topLevelItem(0)
+    assert everything.child(0).text(0) == "beta"
+    assert not everything.isHidden()
 
 
 # ---- the branch selector ----------------------------------------------------
@@ -912,3 +1030,243 @@ def test_deleting_several_asks_first_and_says_how_many(qapp, settings, tmp_path,
 
     assert asked and "3" in asked[0]
     assert panel.runs_tree.topLevelItemCount() == 3  # declined, so nothing went
+
+
+# ---- un-ignoring a file from the staged-files pane --------------------------
+#
+# The ignore globs are a rule. The pane is where the exception gets made, so it
+# has to offer it on the rows it applies to, and nowhere else.
+
+DOC = "spec.pdf"
+
+
+def _pdf_diff(path=DOC, lines=1250):
+    return (
+        f"diff --git a/{path} b/{path}\n"
+        "new file mode 100644\n"
+        "--- /dev/null\n"
+        f"+++ b/{path}\n"
+        f"@@ -0,0 +1,{lines} @@\n"
+        + "".join(f"+page line {i}\n" for i in range(lines))
+    )
+
+
+def _staged(monkeypatch, diff, included=(), include_lines=200):
+    from git_assistant import git_ops
+    from git_assistant.ui.preview_dialog import _read_staged
+
+    monkeypatch.setattr(git_ops, "get_diff", lambda r, m: diff)
+    return _read_staged("repo", "cached", ["*.pdf"], list(included), include_lines)
+
+
+def test_an_ignored_file_stays_omitted_until_it_is_asked_for(monkeypatch):
+    [cov] = _staged(monkeypatch, _pdf_diff())
+    assert cov.reason == "filtered"
+    assert cov.omitted == set(range(len(cov.lines)))
+
+
+def test_asking_for_it_shows_it_as_an_excerpt(monkeypatch):
+    [cov] = _staged(monkeypatch, _pdf_diff(), included=(DOC,))
+    assert cov.reason == "excerpt"
+    assert cov.omitted_count == len(cov.lines) - 200
+
+
+def test_a_binary_file_stays_omitted_even_when_asked_for(monkeypatch):
+    diff = (
+        "diff --git a/scan.pdf b/scan.pdf\n"
+        "Binary files a/scan.pdf and b/scan.pdf differ\n"
+    )
+    [cov] = _staged(monkeypatch, diff, included=("scan.pdf",))
+    assert cov.reason == "filtered"
+
+
+def _panel_showing(settings, tmp_path, monkeypatch, coverage):
+    settings.repos = [RepoEntry(str(tmp_path))]
+    settings.active_repo = str(tmp_path)
+    panel = CommitPanel(settings, auto_start=False)
+    panel._populate_files(coverage, staged=True)
+    return panel
+
+
+def _menu_labels(panel, monkeypatch, row=0):
+    """The actions the pane offers for a row, without opening a real menu."""
+    from PyQt6.QtCore import QModelIndex, QPoint
+    from PyQt6.QtWidgets import QMenu
+
+    seen = {}
+
+    def capture(self, *args, **kwargs):
+        seen["labels"] = [
+            (a.text(), a.isEnabled()) for a in self.actions()
+        ]
+        return None
+
+    monkeypatch.setattr(QMenu, "exec", capture)
+    monkeypatch.setattr(
+        type(panel.file_list),
+        "indexAt",
+        lambda self, point: self.model().index(row, 0)
+        if row >= 0
+        else QModelIndex(),
+    )
+    panel._on_files_menu(QPoint(0, 0))
+    return seen.get("labels", [])
+
+
+def _coverage(path, reason, lines, omitted):
+    from git_assistant.commit_generator import FileCoverage
+
+    return FileCoverage(path=path, lines=lines, omitted=omitted, reason=reason)
+
+
+def test_an_ignored_row_offers_to_stop_ignoring_it(qapp, settings, tmp_path, monkeypatch):
+    cov = _coverage(DOC, "filtered", ["x\n"] * 1255, set(range(1255)))
+    panel = _panel_showing(settings, tmp_path, monkeypatch, [cov])
+
+    labels = _menu_labels(panel, monkeypatch)
+
+    assert labels == [("Do not ignore this file (first 200 lines)", True)]
+
+
+def test_an_un_ignored_row_offers_to_go_back(qapp, settings, tmp_path, monkeypatch):
+    cov = _coverage(DOC, "excerpt", ["x\n"] * 1255, set(range(200, 1255)))
+    panel = _panel_showing(settings, tmp_path, monkeypatch, [cov])
+
+    labels = _menu_labels(panel, monkeypatch)
+
+    assert labels == [("Ignore this file again", True)]
+
+
+def test_a_binary_row_says_there_is_nothing_to_send(qapp, settings, tmp_path, monkeypatch):
+    """Offering a choice that changes nothing is worse than explaining why."""
+    lines = [
+        "diff --git a/scan.pdf b/scan.pdf\n",
+        "Binary files a/scan.pdf and b/scan.pdf differ\n",
+    ]
+    cov = _coverage("scan.pdf", "filtered", lines, {0, 1})
+    panel = _panel_showing(settings, tmp_path, monkeypatch, [cov])
+
+    labels = _menu_labels(panel, monkeypatch)
+
+    assert labels == [("Git produced no text for this file", False)]
+
+
+def test_a_file_that_was_never_ignored_has_no_menu(qapp, settings, tmp_path, monkeypatch):
+    cov = _coverage("app.py", "staged", ["x\n"] * 8, set())
+    panel = _panel_showing(settings, tmp_path, monkeypatch, [cov])
+
+    assert _menu_labels(panel, monkeypatch) == []
+
+
+def test_choosing_it_is_remembered_for_this_repository(
+    qapp, settings, tmp_path, monkeypatch
+):
+    from git_assistant import git_ops
+
+    monkeypatch.setattr(git_ops, "get_diff", lambda r, m: _pdf_diff())
+    cov = _coverage(DOC, "filtered", ["x\n"] * 1255, set(range(1255)))
+    panel = _panel_showing(settings, tmp_path, monkeypatch, [cov])
+
+    panel._set_ignored(cov, False)
+
+    assert settings.included_paths(str(tmp_path)) == [DOC]
+    # And the pane re-read the diff rather than patching the row in place.
+    assert panel._coverage[0].reason == "excerpt"
+
+
+def test_going_back_is_remembered_too(qapp, settings, tmp_path, monkeypatch):
+    from git_assistant import git_ops
+
+    monkeypatch.setattr(git_ops, "get_diff", lambda r, m: _pdf_diff())
+    settings.include_file(str(tmp_path), DOC)
+    cov = _coverage(DOC, "excerpt", ["x\n"] * 1255, set(range(200, 1255)))
+    panel = _panel_showing(settings, tmp_path, monkeypatch, [cov])
+
+    panel._set_ignored(cov, True)
+
+    assert settings.included_paths(str(tmp_path)) == []
+    assert panel._coverage[0].reason == "filtered"
+
+
+def test_an_un_ignored_row_says_how_much_of_it_went(qapp, settings, tmp_path, monkeypatch):
+    cov = _coverage(DOC, "excerpt", ["x\n"] * 1255, set(range(200, 1255)))
+    panel = _panel_showing(settings, tmp_path, monkeypatch, [cov])
+
+    row = panel.file_list.topLevelItem(0)
+    assert row.text(0) == DOC  # the path column is the path and nothing else
+    assert row.text(1) == "un-ignored - first 200 of 1255 lines"
+    assert "1 kept by hand" in panel.files_label.text()
+
+
+def test_the_why_column_names_the_glob_that_dropped_a_file(
+    qapp, settings, tmp_path, monkeypatch
+):
+    """"Omitted" is not something anyone can act on; "*.pdf" is."""
+    cov = _coverage(DOC, "filtered", ["x\n"] * 1255, set(range(1255)))
+    cov.detail = "*.pdf"
+    panel = _panel_showing(settings, tmp_path, monkeypatch, [cov])
+
+    assert panel.file_list.topLevelItem(0).text(1) == "ignored: *.pdf"
+
+
+def test_the_why_column_says_when_no_list_is_involved(
+    qapp, settings, tmp_path, monkeypatch
+):
+    from git_assistant.diff_strategy import BINARY
+
+    cov = _coverage("logo.png", "filtered", ["x\n"] * 2, {0, 1})
+    cov.detail = BINARY
+    panel = _panel_showing(settings, tmp_path, monkeypatch, [cov])
+
+    assert (
+        panel.file_list.topLevelItem(0).text(1)
+        == "binary - git produced no diff text"
+    )
+
+
+def test_the_why_column_covers_every_other_state(qapp, settings, tmp_path, monkeypatch):
+    rows = [
+        _coverage("a.py", "staged", ["x\n"] * 4, set()),
+        _coverage("b.py", "sent", ["x\n"] * 4, set()),
+        _coverage("c.py", "summarized", ["x\n"] * 4, set()),
+        _coverage("d.py", "truncated", ["x\n"] * 10, set(range(3, 10))),
+    ]
+    panel = _panel_showing(settings, tmp_path, monkeypatch, rows)
+
+    said = {
+        panel.file_list.topLevelItem(i).text(0): panel.file_list.topLevelItem(i).text(1)
+        for i in range(panel.file_list.topLevelItemCount())
+    }
+    assert said == {
+        "a.py": "to be sent",
+        "b.py": "fully sent",
+        "c.py": "fully sent, as a summary",
+        "d.py": "too large - 7 of 10 lines cut to fit",
+    }
+
+
+def test_the_columns_survive_being_refilled(qapp, settings, tmp_path, monkeypatch):
+    """QTreeWidget.clear() removes rows; it must not take the header with it."""
+    cov = _coverage(DOC, "filtered", ["x\n"] * 4, set(range(4)))
+    panel = _panel_showing(settings, tmp_path, monkeypatch, [cov])
+    panel._populate_files([cov], staged=True)
+
+    head = panel.file_list.headerItem()
+    assert [head.text(0), head.text(1)] == ["File", "Why"]
+
+
+def test_an_un_ignored_row_is_not_painted_as_a_problem(
+    qapp, settings, tmp_path, monkeypatch
+):
+    """Red is for content that went missing; this is content that arrived."""
+    from PyQt6.QtCore import Qt
+    from PyQt6.QtGui import QColor
+
+    cov = _coverage(DOC, "excerpt", ["x\n"] * 1255, set(range(200, 1255)))
+    panel = _panel_showing(settings, tmp_path, monkeypatch, [cov])
+
+    colour = panel.file_list.topLevelItem(0).foreground(0).color()
+    assert colour != QColor(Qt.GlobalColor.red)
+    assert colour == QColor(Qt.GlobalColor.darkYellow)
+    # Both columns, or the row reads as half a warning.
+    assert panel.file_list.topLevelItem(0).foreground(1).color() == colour

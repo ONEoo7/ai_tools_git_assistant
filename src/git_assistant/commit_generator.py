@@ -19,7 +19,10 @@ from dataclasses import dataclass, field
 from git_assistant import commit_style, git_ops, llm_log, prompts
 from git_assistant.config import Settings
 from git_assistant.diff_strategy import (
+    Excerpt,
     build_units_with_coverage,
+    drop_reason,
+    excerpt_included,
     filter_files,
     pack_units,
     split_diff,
@@ -71,7 +74,12 @@ class FileCoverage:
     # "summarized" - fully sent, but only via a map-reduce summary pass
     # "truncated"  - part of the file never reached the model
     # "filtered"   - dropped as noise before the prompt was built
+    # "excerpt"    - ignored, but un-ignored by hand: its head was sent
     reason: str
+    #: For a dropped file, which rule dropped it: the glob that matched, or
+    #: `diff_strategy.BINARY`. "Omitted" is not something anyone can act on;
+    #: "omitted by *.pdf" is.
+    detail: str = ""
 
     @property
     def omitted_count(self) -> int:
@@ -80,6 +88,26 @@ class FileCoverage:
     @property
     def fully_sent(self) -> bool:
         return not self.omitted
+
+
+def excerpt_coverage(
+    excerpt: Excerpt, omitted: set[int] | None = None
+) -> FileCoverage:
+    """What reached the model for one un-ignored file.
+
+    Measured against the whole segment rather than the head that was sent, so
+    a file that lost a thousand lines says so. ``omitted`` is anything the
+    map step additionally dropped, indexed into the excerpt -- which shares its
+    numbering with the original up to the point it was cut.
+    """
+    beyond = set(range(excerpt.kept, excerpt.total))
+    extra = {i for i in (omitted or set()) if i < excerpt.kept}
+    return FileCoverage(
+        path=excerpt.file.path,
+        lines=excerpt.source.text.splitlines(keepends=True),
+        omitted=beyond | extra,
+        reason="excerpt",
+    )
 
 
 @dataclass
@@ -251,22 +279,31 @@ class CommitGenerator:
 
         all_files = split_diff(raw_diff)
         files, dropped = filter_files(all_files, s.ignore_globs)
+        # The globs are obeyed exactly; what comes back is only what somebody
+        # un-ignored by hand in the staged files list, and only its head.
+        excerpts = excerpt_included(
+            all_files, dropped, s.included_paths(repo), s.include_lines
+        )
+        by_path = {e.file.path: e for e in excerpts}
+        files = files + [e.file for e in excerpts]
         if not files:
             raise ValueError(
                 "All changed files were filtered out as noise "
                 "(lockfiles/binaries). Adjust ignore globs in Settings."
             )
         filtered_diff = "\n".join(f.text for f in files)
-        # Files removed by the noise filter never reach the model at all.
+        # Files removed by the noise filter never reach the model at all -- bar
+        # the excerpted ones, whose head did, and which are recorded below.
         filtered_coverage = [
             FileCoverage(
                 path=f.path,
                 lines=f.text.splitlines(keepends=True),
                 omitted=set(range(len(f.text.splitlines(keepends=True)))),
                 reason="filtered",
+                detail=drop_reason(f, s.ignore_globs),
             )
             for f in all_files
-            if f.path in set(dropped)
+            if f.path in set(dropped) and f.path not in by_path
         ]
 
         context = self._context_window()
@@ -296,7 +333,8 @@ class CommitGenerator:
                 user=full_prompt,
                 max_tokens=out_tokens,
             )
-            # Single-shot: every kept file was sent in full.
+            # Single-shot: every kept file was sent in full -- an excerpt in
+            # full too, but "in full" there means the head it was cut down to.
             coverage = [
                 FileCoverage(
                     path=f.path,
@@ -305,7 +343,10 @@ class CommitGenerator:
                     reason="sent",
                 )
                 for f in files
-            ] + filtered_coverage
+                if f.path not in by_path
+            ]
+            coverage += [excerpt_coverage(e) for e in excerpts]
+            coverage += filtered_coverage
             return GenerationResult(
                 message=message,
                 strategy="single-shot",
@@ -362,6 +403,9 @@ class CommitGenerator:
         coverage = []
         for f in files:
             omitted = omitted_by_path.get(f.path, set())
+            if f.path in by_path:
+                coverage.append(excerpt_coverage(by_path[f.path], omitted))
+                continue
             coverage.append(
                 FileCoverage(
                     path=f.path,

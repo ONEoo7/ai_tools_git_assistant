@@ -301,6 +301,8 @@ class ReviewPanel(QWidget):
         self.profile_tab.remove_language_btn.clicked.connect(
             self.profile_tab.remove_language
         )
+        self.profile_tab.new_profile_btn.clicked.connect(self._on_new_profile)
+        self.profile_tab.delete_profile_btn.clicked.connect(self._on_delete_profile)
         self.profile_tab.add_rule_set_btn.clicked.connect(self._on_add_rule_set)
         self.profile_tab.remove_rule_set_btn.clicked.connect(
             self.profile_tab.remove_rule_set
@@ -324,31 +326,103 @@ class ReviewPanel(QWidget):
         lookup, so a second lookup would copy the unedited one.
         """
         profile = self.profile_tab.profile()
-        # By name, not by value. The library is read back from the settings
-        # file on every call, so the object handed to the tab is never the same
-        # object -- and once it has been edited it is not an equal one either,
-        # which would make every edit look like an edit to something read-only.
-        if profile is not None and profile.name not in {
-            one.name for one in self._library()
-        }:
-            # The shipped rules and a repository's own are read-only; editing
-            # one makes a copy, so a change is never silently lost and never
-            # rewrites what ships. The copy is *not* put under review: which
-            # profile a review uses is chosen in the dropdown, and deciding it
-            # here is how a review runs against rules nobody selected.
-            copy = profiles_mod.Profile.from_dict(profile.to_dict())
-            copy.name = _free_profile_name(f"{profile.name} (edited)", self.settings)
-            self._add_profile(copy)
-            self._viewed = copy.name
-            self._refresh_tables()
+        if profile is None:
+            return
+        if profile.read_only():
+            # Nothing in the tab can reach this any more -- a read-only profile
+            # has no tickable box and no enabled button. Kept as a guard rather
+            # than an assertion: saving one would write a stored profile that
+            # shadows the generated one, and the shipped rules would stop
+            # tracking what the build ships.
             self.status.setText(
-                f"'{profile.name}' is read-only, so the change was kept in "
-                f"'{copy.name}'. Choose that under Rules profile to review "
-                "against it."
+                f"'{profile.name}' is read-only. Press New to make a copy you "
+                "can change."
             )
             return
         self._save_edited(profile)
         self._refresh_versions()
+
+    def _on_new_profile(self) -> None:
+        """Start a profile of the user's own, copied from the one open.
+
+        Copied rather than empty: the profile people want to change is almost
+        always the shipped one, and a new profile covering no languages reviews
+        nothing at all. This is also what replaced editing the shipped rules --
+        copy them, then edit the copy.
+        """
+        profile = self.profile_tab.profile()
+        if profile is None:
+            return
+        suggested = _free_profile_name(f"Copy of {profile.name}", self.settings)
+        name, ok = QInputDialog.getText(
+            self, "New profile", "Name:", text=suggested
+        )
+        name = (name or "").strip()
+        if not ok or not name:
+            return
+        if name in {one.name for one in self._library()}:
+            QMessageBox.warning(
+                self, "Already there", f"A profile called '{name}' already exists."
+            )
+            return
+
+        copy = profiles_mod.Profile.from_dict(profile.to_dict())
+        copy.name = name
+        self._add_profile(copy)
+        # Opened, not put under review: which profile a review runs against is
+        # the dropdown's decision, and making it here would review against
+        # rules nobody chose.
+        self._viewed = name
+        self._refresh_tables()
+        self.status.setText(
+            f"'{name}' created from '{profile.name}'. Choose it under Rules "
+            "profile to review against it."
+        )
+
+    def _on_delete_profile(self) -> None:
+        """Remove one of the user's own profiles, and repoint what used it."""
+        profile = self.profile_tab.profile()
+        if profile is None:
+            return
+        if profile.read_only():
+            QMessageBox.information(
+                self,
+                "Cannot delete",
+                f"'{profile.name}' is read-only and cannot be deleted."
+                + (
+                    "\n\nIt is generated from the rules this build ships with, "
+                    "so there is nothing stored to remove."
+                    if profile.is_default()
+                    else "\n\nIt belongs to the repository, not to you."
+                ),
+            )
+            return
+        if (
+            QMessageBox.question(
+                self,
+                "Delete profile",
+                f"Delete '{profile.name}'?\n\nAny repository reviewed against "
+                f"it falls back to '{profiles_mod.DEFAULTS_NAME}'.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel,
+            )
+            != QMessageBox.StandardButton.Yes
+        ):
+            return
+
+        gone = profile.name
+        repo_config.save_user_profiles(
+            [one for one in self._library() if one.name != gone]
+        )
+        # Every repository that named it, or its next review runs against a
+        # profile that is not there -- which reads as no rules at all.
+        for entry in self.settings.repos:
+            if entry.review_profile == gone:
+                entry.review_profile = profiles_mod.DEFAULTS_NAME
+        self.settings.save()
+        self._viewed = ""
+        self._refresh_tables()
+        self.status.setText(f"Deleted '{gone}'.")
 
     def _on_add_language(self) -> None:
         missing = self.profile_tab.missing_languages()

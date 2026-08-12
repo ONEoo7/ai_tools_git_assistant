@@ -116,8 +116,28 @@ class Profile:
     def from_repository(self) -> bool:
         return self.source == "repository"
 
+    def is_default(self) -> bool:
+        """Whether this is the shipped profile, which is not stored anywhere.
+
+        It is generated from whatever rules this build ships with, so an edit
+        to it would have nowhere to live and would vanish at the next lookup.
+        """
+        return self.name == DEFAULTS_NAME and not self.from_repository()
+
+    def read_only(self) -> bool:
+        """Whether this profile may be changed in place.
+
+        Two are not: the shipped one, because it is generated rather than
+        stored, and one a clone brought with it, because it belongs to the
+        project rather than to the person reading it. Make your own from either
+        with **New profile**.
+        """
+        return self.is_default() or self.from_repository()
+
     def display(self) -> str:
-        return f"{self.name} (from the repository)" if self.from_repository() else self.name
+        if self.from_repository():
+            return f"{self.name} (from the repository)"
+        return f"{self.name} (read-only)" if self.is_default() else self.name
 
     # ---- storage ---------------------------------------------------------
     def to_dict(self) -> dict:

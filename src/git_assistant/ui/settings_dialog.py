@@ -1877,6 +1877,16 @@ class SettingsDialog(QDialog):
         self.ignore_edit.setPlaceholderText("One glob per line, e.g. *.lock")
         self.ignore_edit.setMaximumHeight(140)
 
+        self.include_lines_spin = QSpinBox()
+        self.include_lines_spin.setRange(0, 5000)
+        self.include_lines_spin.setSingleStep(50)
+        self.include_lines_spin.setToolTip(
+            "How much of an ignored file is sent once you have un-ignored it, "
+            "by right-clicking it in the staged files list. 0 sends all of it. "
+            "Nothing is un-ignored on its own: the globs above are always "
+            "obeyed."
+        )
+
         # Where updates come from. Nothing to configure any more -- it is
         # winget, and the package identifier is fixed by winget-pkgs -- so this
         # is a readout, and its job is to answer "why is nothing updating"
@@ -1920,6 +1930,7 @@ class SettingsDialog(QDialog):
         form.addRow("Subject line limit:", self.subject_limit_spin)
         form.addRow("Body limit:", self.body_limit_spin)
         form.addRow("Ignore globs:", self.ignore_edit)
+        form.addRow("Lines per un-ignored file:", self.include_lines_spin)
         form.addRow("Update service:", update_row)
 
         # Keep the Connection tab's effective-budget readout in sync.
@@ -2259,6 +2270,7 @@ class SettingsDialog(QDialog):
         self.ctx_size_spin.setValue(shipped.model.context_window)
         self.margin_spin.setValue(shipped.model.safety_margin)
         self.ignore_edit.setPlainText("\n".join(shipped.commit.ignore_globs))
+        self.include_lines_spin.setValue(shipped.commit.include_lines)
         self.subject_target_spin.setValue(shipped.commit.subject_target)
         self.subject_limit_spin.setValue(shipped.commit.subject_limit)
         self.body_limit_spin.setValue(shipped.commit.body_limit)
@@ -2288,6 +2300,7 @@ class SettingsDialog(QDialog):
             self.subject_target_spin,
             self.subject_limit_spin,
             self.body_limit_spin,
+            self.include_lines_spin,
         ):
             spin.valueChanged.connect(self._schedule_save)
         # Both Langfuse keys are deliberately absent: they are stored on
@@ -2381,6 +2394,7 @@ class SettingsDialog(QDialog):
                     for line in self.ignore_edit.toPlainText().splitlines()
                     if line.strip()
                 ],
+                "include_lines": self.include_lines_spin.value(),
             },
             # Stored as typed. A value above the model's real maximum is
             # flagged in the budget label and clamped at generation time - a
@@ -2898,14 +2912,20 @@ class SettingsDialog(QDialog):
     def _add_repo_nodes(
         self, parent: QTreeWidgetItem, nodes: list[RepoNode]
     ) -> None:
-        """Add ``nodes`` under ``parent``, submodules nested in their repo."""
+        """Add ``nodes`` under ``parent``, submodules nested in their repo.
+
+        Repositories visible, their submodules folded: one repository with
+        forty of them is otherwise forty-one rows before the next repository.
+        The folder header above is expanded separately, so what a scan root
+        found is still the thing you see.
+        """
 
         def add(node: RepoNode, target: QTreeWidgetItem) -> None:
             item = self._make_repo_item(node.entry)
             target.addChild(item)
             for child in node.children:
                 add(child, item)
-            item.setExpanded(True)
+            item.setExpanded(False)
 
         for node in nodes:
             add(node, parent)

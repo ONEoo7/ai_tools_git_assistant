@@ -330,7 +330,7 @@ def test_the_tab_lists_every_profile_there_is(qapp, with_repo, staged):
         panel.profile_tab.profiles_list.item(i).text()
         for i in range(panel.profile_tab.profiles_list.count())
     ]
-    assert listed == ["Mine", "Theirs", DEFAULTS]
+    assert listed == ["Mine", "Theirs", f"{DEFAULTS} (read-only)"]
 
 
 def test_the_tab_opens_the_one_under_review_to_begin_with(qapp, with_repo, staged):
@@ -381,49 +381,175 @@ def test_editing_a_profile_that_is_not_under_review_leaves_the_review_alone(
     assert panel.profile_combo.currentData() == "Mine"
 
 
-def test_editing_the_shipped_rules_keeps_the_edit_in_the_copy(qapp, with_repo, staged):
-    """The defaults are rebuilt on every lookup; the edit must not be looked up again."""
+def test_the_shipped_profile_cannot_be_edited_at_all(qapp, with_repo, staged):
+    """Not copy-on-edit: nothing about it can be changed.
+
+    It is generated from the rules this build ships with, so an edit would have
+    nowhere to live -- and a stored profile of the same name would shadow the
+    generated one and stop it tracking the build.
+    """
     panel = ReviewPanel(with_repo)
     assert panel.profile_combo.currentData() == DEFAULTS
+    tab = panel.profile_tab
 
-    entry = [e for e in panel.profile_tab.profile().languages if e.language == "python"][0]
-    panel.profile_tab._on_version_changed(entry, "py38")
+    assert tab.profile().read_only() is True
+    for button in (
+        tab.add_language_btn,
+        tab.remove_language_btn,
+        tab.add_rule_set_btn,
+        tab.remove_rule_set_btn,
+        tab.share_btn,
+        tab.delete_profile_btn,
+    ):
+        assert not button.isEnabled()
+    assert tab.new_profile_btn.isEnabled(), "New is how you make an editable one"
 
-    copies = [p for p in _profiles(with_repo) if p.name == f"{DEFAULTS} (edited)"]
-    assert len(copies) == 1
-    assert copies[0].version_for("python") == "py38"
+
+def test_no_rule_of_the_shipped_profile_can_be_ticked(qapp, with_repo, staged):
+    """Greying the buttons is not enough: the ticks are the edit."""
+    panel = ReviewPanel(with_repo)
+    language = panel.profile_tab.tree.topLevelItem(0)
+    rule_set = language.child(0)
+
+    assert not rule_set.flags() & Qt.ItemFlag.ItemIsUserCheckable
+    assert not rule_set.child(0).flags() & Qt.ItemFlag.ItemIsUserCheckable
 
 
-def test_the_copy_is_not_put_under_review_behind_the_user_s_back(
+def test_a_stray_edit_to_the_shipped_profile_is_refused_not_stored(
     qapp, with_repo, staged
 ):
+    """The guard behind the disabled controls."""
     panel = ReviewPanel(with_repo)
     entry = [e for e in panel.profile_tab.profile().languages if e.language == "python"][0]
 
     panel.profile_tab._on_version_changed(entry, "py38")
 
-    assert panel.profile_combo.currentData() == DEFAULTS
-    assert with_repo.review_profile_for_repo("/x/demo") == DEFAULTS
+    assert _profiles(with_repo) == []
     assert "read-only" in panel.status.text()
-    # ...but it is what the tab now has open, or the next edit would copy again.
-    assert panel.profile_tab.profile().name == f"{DEFAULTS} (edited)"
+    assert panel.profile_combo.currentData() == DEFAULTS
 
 
-def test_editing_the_shipped_rules_twice_does_not_make_two_of_one_name(
-    qapp, with_repo, staged
-):
+# ---- making and removing profiles ---------------------------------------------------
+def _named(monkeypatch, name):
+    monkeypatch.setattr(
+        "git_assistant.ui.review_panel.QInputDialog.getText",
+        lambda *a, **k: (name, True),
+    )
+
+
+def test_new_copies_the_profile_that_is_open(qapp, with_repo, staged, monkeypatch):
+    """Copied, not empty: a profile covering no languages reviews nothing, and
+    the one people want to change is almost always the shipped one."""
     panel = ReviewPanel(with_repo)
+    _named(monkeypatch, "Mine")
 
-    for _ in range(2):
-        index = panel.profile_combo.findData(DEFAULTS)
-        panel.profile_tab.profiles_list.setCurrentRow(index)
-        entry = [
-            e for e in panel.profile_tab.profile().languages if e.language == "python"
-        ][0]
-        panel.profile_tab._on_version_changed(entry, "py38")
+    panel._on_new_profile()
 
-    names = [p.name for p in _profiles(with_repo)]
-    assert names == [f"{DEFAULTS} (edited)", f"{DEFAULTS} (edited) 2"]
+    made = [p for p in _profiles(with_repo) if p.name == "Mine"]
+    assert len(made) == 1
+    assert [e.language for e in made[0].languages] == [
+        e.language for e in profiles_mod.defaults().languages
+    ]
+
+
+def test_a_new_profile_is_editable_where_the_shipped_one_was_not(
+    qapp, with_repo, staged, monkeypatch
+):
+    """The whole point of it."""
+    panel = ReviewPanel(with_repo)
+    _named(monkeypatch, "Mine")
+    panel._on_new_profile()
+
+    assert panel.profile_tab.profile().name == "Mine"
+    assert panel.profile_tab.profile().read_only() is False
+    assert panel.profile_tab.add_language_btn.isEnabled()
+    assert panel.profile_tab.delete_profile_btn.isEnabled()
+
+
+def test_a_new_profile_is_opened_but_not_put_under_review(
+    qapp, with_repo, staged, monkeypatch
+):
+    """Which profile a review uses is the dropdown's decision, not this one's."""
+    panel = ReviewPanel(with_repo)
+    _named(monkeypatch, "Mine")
+
+    panel._on_new_profile()
+
+    assert panel.profile_tab.profile().name == "Mine"
+    assert panel.profile_combo.currentData() == DEFAULTS
+
+
+def test_a_name_already_taken_is_refused(qapp, with_repo, staged, monkeypatch):
+    _two_profiles(with_repo)
+    panel = ReviewPanel(with_repo)
+    _named(monkeypatch, "Mine")
+    warned = []
+    monkeypatch.setattr(
+        "git_assistant.ui.review_panel.QMessageBox.warning",
+        lambda *a, **k: warned.append(a[2]),
+    )
+
+    panel._on_new_profile()
+
+    assert warned and "already exists" in warned[0]
+    assert len([p for p in _profiles(with_repo) if p.name == "Mine"]) == 1
+
+
+def test_deleting_removes_it_from_the_library(qapp, with_repo, staged, monkeypatch):
+    _two_profiles(with_repo)
+    panel = ReviewPanel(with_repo)
+    panel.profile_tab.profiles_list.setCurrentRow(0)
+    _confirm(monkeypatch)
+
+    panel._on_delete_profile()
+
+    assert [p.name for p in _profiles(with_repo)] == ["Theirs"]
+
+
+def test_deleting_repoints_the_repositories_that_used_it(
+    qapp, with_repo, staged, monkeypatch
+):
+    """Or their next review runs against a profile that is not there, which
+    reads as no rules at all."""
+    _two_profiles(with_repo)
+    with_repo.set_repo_review_profile("/x/demo", "Mine")
+    panel = ReviewPanel(with_repo)
+    panel.profile_tab.profiles_list.setCurrentRow(0)
+    _confirm(monkeypatch)
+
+    panel._on_delete_profile()
+
+    assert with_repo.review_profile_for_repo("/x/demo") == DEFAULTS
+
+
+def test_cancelling_the_confirmation_deletes_nothing(
+    qapp, with_repo, staged, monkeypatch
+):
+    _two_profiles(with_repo)
+    panel = ReviewPanel(with_repo)
+    panel.profile_tab.profiles_list.setCurrentRow(0)
+    monkeypatch.setattr(
+        "git_assistant.ui.review_panel.QMessageBox.question",
+        lambda *a, **k: QMessageBox.StandardButton.Cancel,
+    )
+
+    panel._on_delete_profile()
+
+    assert [p.name for p in _profiles(with_repo)] == ["Mine", "Theirs"]
+
+
+def test_the_shipped_profile_cannot_be_deleted(qapp, with_repo, staged, monkeypatch):
+    panel = ReviewPanel(with_repo)
+    told = []
+    monkeypatch.setattr(
+        "git_assistant.ui.review_panel.QMessageBox.information",
+        lambda *a, **k: told.append(a[2]),
+    )
+
+    panel._on_delete_profile()
+
+    assert told and "cannot be deleted" in told[0]
+    assert "nothing stored to remove" in told[0]
 
 
 def test_renaming_a_table_repoints_the_repositories_that_used_it(

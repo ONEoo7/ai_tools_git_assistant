@@ -189,6 +189,11 @@ FIELD_COMMENTS = {
         "Files matching any of these never reach the model. Lock files and "
         "minified bundles are noise that costs tokens."
     ),
+    "commit.include_lines": (
+        "How much of an ignored file is sent once it has been un-ignored by "
+        "hand, in the staged files list. 0 for no cap. Nothing is un-ignored "
+        "on its own -- the globs above are always obeyed."
+    ),
     "review": "Code review.",
     "review.history_limit": "Reviews kept per repository. 0 keeps every one.",
     "review.judge": (
@@ -471,6 +476,11 @@ class CommitRules:
     ignore_globs: list[str] = field(
         default_factory=lambda: list(DEFAULT_IGNORE_GLOBS)
     )
+    #: How much of an ignored file reaches the model once somebody has asked
+    #: for it by hand. 0 for no cap. A document's opening pages say what it is,
+    #: which is what a commit message needs; the other thousand lines are what
+    #: got it ignored in the first place.
+    include_lines: int = 200
 
 
 @dataclass
@@ -629,6 +639,7 @@ class RepoSettings:
                 "body_limit": self.commit.body_limit,
                 "history_limit": self.commit.history_limit,
                 "ignore_globs": list(self.commit.ignore_globs),
+                "include_lines": self.commit.include_lines,
             },
             "prompt": {
                 "templates": [dict(one) for one in self.prompt.templates],
@@ -860,6 +871,9 @@ def _overlay(settings: RepoSettings, data: dict) -> RepoSettings:
             ignore_globs=_list(
                 commit, "ignore_globs", settings.commit.ignore_globs
             ),
+            include_lines=_int(
+                commit, "include_lines", settings.commit.include_lines
+            ),
         ),
         prompt=PromptRules(
             templates=_named(
@@ -965,6 +979,7 @@ def for_repo(settings, repo_path: str | Path = "") -> RepoSettings:
 _BOUND: dict[str, tuple[str, str]] = {
     "diff_mode": ("commit", "diff_mode"),
     "ignore_globs": ("commit", "ignore_globs"),
+    "include_lines": ("commit", "include_lines"),
     "commit_subject_target": ("commit", "subject_target"),
     "commit_subject_limit": ("commit", "subject_limit"),
     "commit_body_limit": ("commit", "body_limit"),

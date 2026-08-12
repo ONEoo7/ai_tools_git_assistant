@@ -6,11 +6,29 @@ it before committing.
 
 ## Transparency
 
-The preview shows the message side by side with the staged files. Select a file
-and its diff appears with **anything omitted from the prompt marked in red** — a
-truncated hunk, or a file dropped by the noise filter. It is therefore obvious
-what the model did *not* see, which matters most when a diff overflows the
-budget. See [large diffs](large-diffs.md).
+The preview shows the message side by side with the staged files. Each row has a
+**Why** column saying what happened to that file and on whose account:
+
+| | |
+|---|---|
+| `to be sent` | nothing has run yet |
+| `fully sent` | the raw diff went to the model verbatim |
+| `fully sent, as a summary` | reached it, but through a map-reduce pass |
+| `ignored: *.pdf` | which line of the ignore list dropped it |
+| `binary - git produced no diff text` | no list is involved; there was nothing to send |
+| `too large - 1055 of 1256 lines cut to fit` | it did not fit the budget |
+| `un-ignored - first 200 of 1256 lines` | you asked for it by hand |
+
+Naming the glob is the point: *omitted* is not something anyone can act on, and
+*omitted by `*.pdf`* says which line to go and look at.
+
+Select a file and its diff appears with **anything omitted from the prompt
+marked in red** — a truncated hunk, or a file dropped by the noise filter. It is
+therefore obvious what the model did *not* see, which matters most when a diff
+overflows the budget. **Right-click a file dropped by the filter to send it anyway** — it then
+contributes its opening lines, says which of them went, and is marked in amber
+rather than red: that is content that arrived where none used to. See
+[large diffs](large-diffs.md).
 
 **View LLM calls** shows the exact prompt sent and the exact reply, per call.
 For a map-reduce run that is every chunk summary as well as the synthesis.

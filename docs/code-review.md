@@ -49,8 +49,21 @@ Which profile a review runs against is the **Rules profile** dropdown beside the
 repository, remembered per repository, and marked in bold in the list — so
 reading a profile is never mistaken for selecting it.
 
-The shipped defaults are read-only. Editing one keeps the change in a copy of
-your own rather than silently rewriting what ships or losing the edit.
+**Default Rules is read-only** — genuinely, not copy-on-edit: nothing in it can
+be ticked, no version changed, and it cannot be deleted. It is *generated* from
+the rules this build ships with rather than stored anywhere, so an edit would
+have nowhere to live, and a stored profile of the same name would shadow it and
+stop it tracking the build.
+
+**New…** makes a profile of your own, copied from whichever one is open. That is
+how you change the shipped rules: copy them, then edit the copy. A new profile
+is opened but not put under review — which profile a review runs against stays
+the **Rules profile** dropdown's decision.
+
+**Delete** removes one of your own. Any repository that was reviewed against it
+falls back to Default Rules, so its next review never runs against a profile
+that is not there. A profile a repository ships is read-only here too, for the
+same reason it always was: it belongs to the project.
 
 Profiles live in the settings a repository can carry, so a project can ship the
 standard it holds itself to. **Share with the repository** writes it to
