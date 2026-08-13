@@ -547,3 +547,283 @@ def test_a_silent_500_names_the_likely_cause(monkeypatch):
     with pytest.raises(LLMError) as caught:
         client.chat("qwen3.5-4b", "sys", "user", 100)
     assert "still loading" in str(caught.value)
+
+
+# ---- 429: two problems wearing one status code, and the waiting -------------
+#
+# A rate limit passes on its own and an exhausted balance never does, so the
+# first is worth waiting out and the second is worth refusing to.
+
+
+def _serving(monkeypatch, responses):
+    """A client whose next call gets the next response in the list."""
+    remaining = list(responses)
+    seen = []
+
+    def handler(request):
+        seen.append(request)
+        return remaining.pop(0) if len(remaining) > 1 else remaining[0]
+
+    return _client_with(monkeypatch, handler, api_key="k"), seen
+
+
+def _limited(message="Rate limit reached for gpt-4o-mini.", code="rate_limit_exceeded",
+             headers=None):
+    return httpx.Response(
+        429, json={"error": {"message": message, "code": code}}, headers=headers or {}
+    )
+
+
+def _ok():
+    return httpx.Response(200, json={"data": [{"id": "gpt-4o-mini"}]})
+
+
+def test_a_rate_limit_is_waited_out_rather_than_reported(monkeypatch, slept):
+    client, seen = _serving(monkeypatch, [_limited(), _ok()])
+
+    assert client.list_models()  # no exception: it went through on the retry
+
+    assert len(seen) == 2
+    assert len(slept) == 1
+
+
+def test_the_servers_own_wait_is_honoured(monkeypatch, slept):
+    """It knows when the window turns over; a guess does not."""
+    client, _seen = _serving(
+        monkeypatch, [_limited(headers={"retry-after": "12"}), _ok()]
+    )
+
+    client.list_models()
+
+    # At least what it asked for, and a little more so twenty threads refused
+    # in the same instant do not all resume in the same instant.
+    assert 12 <= slept[0] <= 12 * 1.5
+
+
+def test_milliseconds_are_preferred_where_the_server_sends_them(monkeypatch, slept):
+    client, _seen = _serving(
+        monkeypatch, [_limited(headers={"retry-after-ms": "8500"}), _ok()]
+    )
+
+    client.list_models()
+
+    assert 8.5 <= slept[0] <= 8.5 * 1.5
+
+
+def test_backoff_grows_and_is_never_the_same_twice(monkeypatch, slept):
+    """Identical waits are the burst that caused the refusal, on a timer."""
+    client, seen = _serving(monkeypatch, [_limited(), _limited(), _limited(), _ok()])
+
+    client.list_models()
+
+    assert len(seen) == 4
+    assert len(slept) == 3
+    assert slept[-1] > slept[0]
+
+
+def test_it_gives_up_rather_than_waiting_for_ever(monkeypatch, slept):
+    client, seen = _serving(monkeypatch, [_limited()])
+
+    with pytest.raises(LLMError) as caught:
+        client.list_models()
+
+    from git_assistant.openai_client import MAX_ATTEMPTS, RETRY_BUDGET
+
+    # Time is the bound, not the attempt count -- the cap is only a backstop.
+    assert sum(slept) <= RETRY_BUDGET
+    assert 1 < len(seen) < MAX_ATTEMPTS
+
+
+def test_giving_up_says_the_limit_is_lower_than_the_run_needs(monkeypatch, slept):
+    """By then "try again" is not advice; it is what has just been tried."""
+    client, _seen = _serving(monkeypatch, [_limited()])
+
+    with pytest.raises(LLMError) as caught:
+        client.list_models()
+
+    said = str(caught.value)
+    assert "Parallel requests" in said
+    assert "backing off" in said
+
+
+def test_a_wait_longer_than_the_budget_is_not_taken(monkeypatch, slept):
+    """Five minutes of a frozen window is a hang, however politely asked for."""
+    client, seen = _serving(monkeypatch, [_limited(headers={"retry-after": "600"})])
+
+    with pytest.raises(LLMError) as caught:
+        client.list_models()
+
+    assert len(seen) == 1
+    assert slept == []
+    assert "Try again in 600s" in str(caught.value)
+
+
+def test_no_credit_is_never_retried(monkeypatch, slept):
+    """Waiting does not add credit, so waiting is the wrong thing to do."""
+    client, seen = _serving(
+        monkeypatch,
+        [_limited(message="You exceeded your current quota.", code="insufficient_quota")],
+    )
+
+    with pytest.raises(LLMError) as caught:
+        client.list_models()
+
+    assert len(seen) == 1
+    assert slept == []
+    said = str(caught.value)
+    assert "no credit left" in said
+    assert "waiting will not help" in said
+
+
+def test_the_providers_own_words_are_passed_on(monkeypatch, slept):
+    """The message named the model and the limit; we used to discard it."""
+    client, _seen = _serving(
+        monkeypatch, [_limited(message="Limit 3 RPM for gpt-4o-mini", code="x")]
+    )
+
+    with pytest.raises(LLMError) as caught:
+        client.list_models()
+
+    assert "Limit 3 RPM for gpt-4o-mini" in str(caught.value)
+
+
+def test_an_unparseable_body_still_explains_the_status(monkeypatch, slept):
+    def handler(request):
+        return httpx.Response(500, text="<html>gateway blew up</html>")
+
+    client = _client_with(monkeypatch, handler, api_key="k")
+    with pytest.raises(LLMError) as caught:
+        client.list_models()
+    assert "HTTP 500" in str(caught.value)
+    assert "gateway blew up" in str(caught.value)
+
+
+# ---- pacing off the allowance the server reports ----------------------------
+def _with_allowance(limit, remaining, resets_in):
+    return httpx.Response(
+        200,
+        json={"data": [{"id": "m"}]},
+        headers={
+            "x-ratelimit-limit-requests": str(limit),
+            "x-ratelimit-remaining-requests": str(remaining),
+            "x-ratelimit-reset-requests": resets_in,
+        },
+    )
+
+
+def test_a_comfortable_allowance_is_not_paced(monkeypatch, slept):
+    """The usual run must not pay for the unusual one."""
+    client, _seen = _serving(monkeypatch, [_with_allowance(500, 480, "60s")])
+
+    client.list_models()
+    client.list_models()
+
+    assert slept == []
+
+
+def test_the_last_of_an_allowance_is_spread_over_its_window(monkeypatch, slept):
+    """Ten requests left and a minute to refill is six seconds apart.
+
+    The call that learns this still goes at once -- there is allowance for it,
+    and spacing a request against a limit nobody had yet met would be paying
+    for information rather than using it. The spreading starts after that.
+    """
+    client, _seen = _serving(monkeypatch, [_with_allowance(500, 10, "60s")])
+
+    client.list_models()  # learns the allowance
+    client.list_models()  # goes on the strength of it
+    client.list_models()  # and this one is spaced
+
+    assert slept and slept[0] == pytest.approx(6, abs=1)
+
+
+def test_a_spent_allowance_waits_for_the_refill(monkeypatch, slept):
+    client, _seen = _serving(monkeypatch, [_with_allowance(500, 0, "20s")])
+
+    client.list_models()
+    client.list_models()
+
+    assert slept[0] == pytest.approx(20, abs=0.1)
+
+
+def test_a_server_that_reports_nothing_is_never_paced(monkeypatch, slept):
+    """LM Studio and Ollama send no such headers and have no such limits."""
+    client, _seen = _serving(monkeypatch, [_ok()])
+
+    for _ in range(5):
+        client.list_models()
+
+    assert slept == []
+
+
+def test_a_sub_second_wait_is_retried_many_times_over(monkeypatch, slept):
+    """The failure this was written for.
+
+    A tokens-per-minute limit is refused with "try again in 644ms". Four
+    attempts spent seven seconds of a ninety-second budget and gave up on a
+    wait that cost under a second each time.
+    """
+    client, seen = _serving(
+        monkeypatch,
+        [*[_limited(headers={"retry-after-ms": "644"})] * 12, _ok()],
+    )
+
+    client.list_models()
+
+    assert len(seen) == 13
+    assert sum(slept) < 15  # thirteen tries for the price of a few seconds
+
+
+def test_a_documented_wait_is_not_backed_off_past(monkeypatch, slept):
+    """Idling exponentially past a figure the server gave is idling on purpose."""
+    client, _seen = _serving(
+        monkeypatch,
+        [*[_limited(headers={"retry-after-ms": "500"})] * 5, _ok()],
+    )
+
+    client.list_models()
+
+    assert max(slept) < 2.0  # never grew away from the 0.5s it asked for
+
+
+def test_a_token_limit_paces_the_next_call(monkeypatch, slept):
+    """Requests to spare and no tokens left is still a reason to wait."""
+    spent = httpx.Response(
+        200,
+        json={"data": [{"id": "m"}]},
+        headers={
+            "x-ratelimit-limit-requests": "500",
+            "x-ratelimit-remaining-requests": "480",
+            "x-ratelimit-limit-tokens": "200000",
+            "x-ratelimit-remaining-tokens": "0",
+            "x-ratelimit-reset-tokens": "644ms",
+        },
+    )
+    client, _seen = _serving(monkeypatch, [spent])
+
+    client.list_models()
+    client.list_models()
+
+    assert slept[0] == pytest.approx(0.644, abs=0.05)
+
+
+def test_the_boilerplate_link_is_not_cut_in_half(monkeypatch, slept):
+    """It read "Visit https://platform.op" -- the cap landed inside the URL."""
+    long_one = (
+        "Rate limit reached for gpt-4o-mini in organization org-k3VWlgt1jJxL12v87N2 "
+        "on tokens per min (TPM): Limit 200000, Used 200000, Requested 2148. "
+        "Please try again in 644ms. "
+        "Visit https://platform.openai.com/account/rate-limits to learn more."
+    )
+    client, _seen = _serving(
+        monkeypatch, [_limited(message=long_one, headers={"retry-after": "600"})]
+    )
+
+    with pytest.raises(LLMError) as caught:
+        client.list_models()
+
+    said = str(caught.value)
+    assert "Requested 2148" in said
+    assert "Please try again in 644ms." in said
+    assert "Visit" not in said
+    assert "platform.op" not in said

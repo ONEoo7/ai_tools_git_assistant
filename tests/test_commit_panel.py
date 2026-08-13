@@ -1270,3 +1270,41 @@ def test_an_un_ignored_row_is_not_painted_as_a_problem(
     assert colour == QColor(Qt.GlobalColor.darkYellow)
     # Both columns, or the row reads as half a warning.
     assert panel.file_list.topLevelItem(0).foreground(1).color() == colour
+
+
+def test_both_columns_can_be_dragged(qapp, settings, tmp_path, monkeypatch):
+    """Stretch and ResizeToContents look right and refuse the mouse."""
+    from PyQt6.QtWidgets import QHeaderView
+
+    cov = _coverage(DOC, "filtered", ["x\n"] * 4, set(range(4)))
+    panel = _panel_showing(settings, tmp_path, monkeypatch, [cov])
+
+    header = panel.file_list.header()
+    assert not header.stretchLastSection()
+    for column in (0, 1):
+        assert (
+            header.sectionResizeMode(column)
+            == QHeaderView.ResizeMode.Interactive
+        )
+
+
+def test_a_dragged_width_survives_the_next_run(qapp, settings, tmp_path, monkeypatch):
+    """Refitting on every refill would undo the drag as fast as it was made."""
+    cov = _coverage(DOC, "filtered", ["x\n"] * 4, set(range(4)))
+    panel = _panel_showing(settings, tmp_path, monkeypatch, [cov])
+
+    panel.file_list.header().resizeSection(1, 400)
+    panel._populate_files([cov], staged=True)
+
+    assert panel.file_list.columnWidth(1) == 400
+
+
+def test_the_columns_are_fitted_until_then(qapp, settings, tmp_path, monkeypatch):
+    long_path = "some/quite/deeply/nested/directory/with/a/long/name/module.py"
+    short = _coverage("a.py", "sent", ["x\n"] * 2, set())
+    panel = _panel_showing(settings, tmp_path, monkeypatch, [short])
+    narrow = panel.file_list.columnWidth(0)
+
+    panel._populate_files([_coverage(long_path, "sent", ["x\n"] * 2, set())])
+
+    assert panel.file_list.columnWidth(0) > narrow

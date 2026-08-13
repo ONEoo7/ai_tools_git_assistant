@@ -1,5 +1,62 @@
 # Providers
 
+## Rate limits
+
+A hosted account has a ceiling on requests and tokens per minute, and this
+application fans out — a map-reduce over a large diff, one call per file in a
+code review — which is exactly the shape that meets it.
+
+Nothing about those ceilings is written down here. Every OpenAI-shaped response
+carries what is left of *your* allowance and how long until it refills, so the
+limits are read off the wire. A table of tiers would be wrong per model, wrong
+per account, and out of date by the next pricing change.
+
+**Both dimensions are read**, because they run out independently:
+
+| | |
+|---|---|
+| `x-ratelimit-limit-requests` · `-remaining-requests` · `-reset-requests` | requests per minute |
+| `x-ratelimit-limit-tokens` · `-remaining-tokens` · `-reset-tokens` | tokens per minute |
+
+Which one you meet depends on the work. A run of large diffs exhausts *tokens*
+per minute with requests to spare — `Limit 200000, Used 200000, Requested 2148`
+— and a run of small ones does the opposite. Watching only requests means being
+blind to whichever your account actually hits.
+
+Two things happen with what is read:
+
+- **Pacing.** While the allowance is comfortable, nothing is held back; the
+  usual run must not pay for the unusual one. Once either dimension drops into
+  its last tenth, the scarcer of the two sets the pace, and a dimension reported
+  as fully spent stops every call until it refills.
+- **Backing off.** A 429 waits at least the `Retry-After` the server asked for,
+  plus a little jitter — without it every thread refused in the same instant
+  resumes in the same instant, which is the burst that caused the refusal. Only
+  when the server names no figure does it fall back to exponential backoff. The
+  wait is shared per account, so one refusal teaches the whole run rather than
+  each call having to be refused in turn.
+
+**Time bounds the retrying, not a number of tries.** A tokens-per-minute limit
+is typically refused with "try again in 644ms", and a handful of attempts would
+spend seconds of a 90-second budget before giving up on a wait costing under a
+second each time. So a request keeps retrying while its budget lasts — a dozen
+sub-second waits if that is what the server keeps asking for.
+
+Neither mechanism waits indefinitely. Proactive pacing stops at 30 seconds and
+retrying gives up after 90, because a run that hangs for five minutes has failed
+and simply not said so. When it does give up it says the account's limit is
+lower than the run needs, and points at **Parallel requests** in Connection &
+Model — which is the setting that actually decides how hard a run pushes.
+
+Two cases are deliberately not waited out. An exhausted **balance** returns 429
+as well, and no amount of waiting adds credit, so it fails immediately saying
+so. And a server that reports no allowance headers at all — LM Studio, Ollama,
+anything local — is never paced, because it has no such limit.
+
+Claude is unaffected by all of this: the `anthropic` SDK does its own retrying
+and honours `Retry-After` itself.
+
+
 Pick one in the **Providers** list on the left of *Connection & Model*. The same
 choice appears as **AI Provider** on the Generate, Audit and Code Review tabs, so
 you can switch without leaving what you are doing. The form reshapes around the

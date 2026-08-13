@@ -10,6 +10,10 @@ was added.
 So a modal that nobody has arranged an answer for is an error, named and
 immediate. A test that means to open one says what it answers -- which every
 test here that opens one already does.
+
+The rate-limit backoff is the same problem wearing different clothes: a test
+that meets a 429 and honours the wait *does* honour it, for a minute and a
+half, and passes. So sleeping is recorded rather than lived.
 """
 
 from __future__ import annotations
@@ -55,6 +59,37 @@ def _config_dir_is_never_the_real_one(tmp_path, monkeypatch):
             monkeypatch.setattr(
                 module, "user_config_dir", lambda *a, **k: str(home)
             )
+
+@pytest.fixture(autouse=True)
+def slept(monkeypatch):
+    """Record backoff waits instead of taking them, and yield the seconds.
+
+    Autouse because the cost of forgetting is a suite that passes slowly rather
+    than one that fails: ask for ``slept`` by name to assert on the waits.
+    Limiters are dropped either side, since they are shared per account and
+    would otherwise carry one test's pacing into the next.
+
+    The clock advances by whatever was "slept", which is not decoration. A
+    recorded wait that does not move the clock leaves the limiter's next-allowed
+    moment still in the future, so the next caller waits the same interval again
+    and the recorded total comes out well over what was actually asked for --
+    a fake that made the retry budget look breached when it was not.
+    """
+    from git_assistant import ratelimit
+
+    waits: list[float] = []
+    now = [0.0]
+
+    def pass_the_time(seconds: float) -> None:
+        waits.append(seconds)
+        now[0] += seconds
+
+    monkeypatch.setattr(ratelimit, "sleep", pass_the_time)
+    monkeypatch.setattr(ratelimit, "monotonic", lambda: now[0])
+    ratelimit.forget_all()
+    yield waits
+    ratelimit.forget_all()
+
 
 #: The blocking entry points. Each returns a value the caller acts on, which is
 #: exactly why a test that does not choose one is not testing anything.

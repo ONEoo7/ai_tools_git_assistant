@@ -319,13 +319,21 @@ class CommitPanel(QWidget):
         self.file_list.setMaximumHeight(150)
         self.file_list.setRootIsDecorated(False)
         self.file_list.setHeaderLabels(["File", "Why"])
-        self.file_list.header().setStretchLastSection(False)
-        self.file_list.header().setSectionResizeMode(
-            0, QHeaderView.ResizeMode.Stretch
-        )
-        self.file_list.header().setSectionResizeMode(
-            1, QHeaderView.ResizeMode.ResizeToContents
-        )
+        header = self.file_list.header()
+        # Both Interactive, because both dividers have to be draggable: Stretch
+        # and ResizeToContents look right and refuse the mouse. A long path and
+        # a long reason cannot both fit, and which of the two matters is the
+        # reader's to decide.
+        header.setStretchLastSection(False)
+        for column in (0, 1):
+            header.setSectionResizeMode(column, QHeaderView.ResizeMode.Interactive)
+        header.setSectionsMovable(False)
+        # Widths are fitted to the rows until the reader drags one, and never
+        # again after that: a list that refilled itself back to the default on
+        # every run would undo the drag as fast as it was made.
+        self._widths_pinned = False
+        self._fitting_columns = False
+        header.sectionResized.connect(self._on_column_resized)
         self.file_list.currentItemChanged.connect(self._on_file_selected)
         self.file_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.file_list.customContextMenuRequested.connect(self._on_files_menu)
@@ -1024,10 +1032,28 @@ class CommitPanel(QWidget):
                     item.setForeground(column, colour)
             self.file_list.addTopLevelItem(item)
 
+        self._fit_columns()
         if self._coverage:
             self.file_list.setCurrentItem(self.file_list.topLevelItem(0))
         else:
             self.diff_view.clear()
+
+    # ---- column widths ------------------------------------------------------
+    def _on_column_resized(self, _index: int, _old: int, _new: int) -> None:
+        """A drag settles the widths for good; a fit of ours does not."""
+        if not self._fitting_columns:
+            self._widths_pinned = True
+
+    def _fit_columns(self) -> None:
+        """Size both columns to what is in them, until somebody says otherwise."""
+        if self._widths_pinned:
+            return
+        self._fitting_columns = True
+        try:
+            for column in (0, 1):
+                self.file_list.resizeColumnToContents(column)
+        finally:
+            self._fitting_columns = False
 
     # ---- un-ignoring one file ----------------------------------------------
     # The ignore globs are a rule and are always obeyed. This is the exception

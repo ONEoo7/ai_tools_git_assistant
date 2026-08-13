@@ -18,15 +18,27 @@ this build is one more thing to declare as a PyInstaller hidden import.
 
 from __future__ import annotations
 
+import re
+
 import httpx
 
-from git_assistant import net, usage
+from git_assistant import net, ratelimit, usage
 from git_assistant.config import DEFAULT_TEMPERATURE
 from git_assistant.llm import LLMError, ModelInfo
 
 CHAT_TIMEOUT = 600.0
 LIST_TIMEOUT = 15.0
 CONNECT_TIMEOUT = 5.0
+
+#: Time, not tries, is what bounds the retrying: a token-per-minute limit is
+#: often refused with "try again in 644ms", and four attempts spends seven
+#: seconds of a ninety-second budget before giving up on a wait that would have
+#: cost under a second each time. The attempt cap is only a backstop against a
+#: server that answers instantly and forever.
+MAX_ATTEMPTS = 30
+#: Total seconds one request may spend waiting to be allowed through. Past
+#: this, failing with an explanation beats a progress bar that never moves.
+RETRY_BUDGET = 90.0
 
 
 class OpenAICompatibleClient:
@@ -60,6 +72,32 @@ class OpenAICompatibleClient:
         self._extra_query = {k: v for k, v in (extra_query or {}).items() if v}
         self.chat_timeout = chat_timeout
         self.list_timeout = list_timeout
+        # Shared per account, not per client: the reviewer and the judge are
+        # two clients spending one allowance. See git_assistant.ratelimit.
+        self.limiter = ratelimit.for_account(provider_key, self.base_url)
+
+    def _pause_for(self, response, attempt: int, waited: float) -> float | None:
+        """How long to wait before trying this request again, or None to stop.
+
+        Stops for the one 429 that never passes -- an exhausted balance -- and
+        when waiting any longer would be worse than saying so: a run that hangs
+        for five minutes has failed, it just has not admitted it yet.
+        """
+        if attempt >= MAX_ATTEMPTS - 1:
+            return None
+        message, code = _error_body_of(response)
+        if _is_out_of_credit(message, code):
+            return None  # no amount of waiting adds credit
+        asked = ratelimit.retry_delay(response.headers)
+        # The server's figure wins outright where it sent one: it knows when the
+        # window turns over, and backing off exponentially past a documented
+        # 644ms would be idling on purpose. Only guess when it said nothing.
+        delay = (
+            ratelimit.jittered(asked) if asked > 0 else ratelimit.backoff(attempt)
+        )
+        if waited + delay > RETRY_BUDGET:
+            return None
+        return delay
 
     def _headers(self) -> dict[str, str]:
         if not self._api_key:
@@ -68,19 +106,43 @@ class OpenAICompatibleClient:
             return {"Authorization": f"Bearer {self._api_key}"}
         return {self._auth_header: self._api_key}
 
+    def _send(self, method: str, url: str, timeout: float, **kwargs):
+        with net.http_client(
+            timeout=httpx.Timeout(timeout, connect=CONNECT_TIMEOUT),
+            headers=self._headers(),
+            params=self._extra_query or None,
+        ) as client:
+            return client.request(method, url, **kwargs)
+
     def _request(self, method: str, path: str, timeout: float, **kwargs):
         url = f"{self.base_url}{path}"
+        waited = 0.0
+        attempt = 0
+        # `while True` rather than a bounded loop so the only ways out are a
+        # return and a raise. Bounding it here would make "does this always
+        # answer?" depend on MAX_ATTEMPTS agreeing with a guard in _pause_for,
+        # and a disagreement would return None to a caller expecting a payload.
         try:
-            with net.http_client(
-                timeout=httpx.Timeout(timeout, connect=CONNECT_TIMEOUT),
-                headers=self._headers(),
-                params=self._extra_query or None,
-            ) as client:
-                response = client.request(method, url, **kwargs)
+            while True:
+                waited += self.limiter.wait_turn()
+                response = self._send(method, url, timeout, **kwargs)
+                # Every response carries the allowance, not just the refusals:
+                # pacing off the successes is what stops the refusals.
+                self.limiter.observe(response.headers)
+                if response.status_code == 429:
+                    delay = self._pause_for(response, attempt, waited)
+                    if delay is not None:
+                        # Only recorded here; the wait itself is taken by the
+                        # next wait_turn. One place sleeps, and the penalty
+                        # reaches the other threads rather than each of them
+                        # having to learn about the limit by being refused.
+                        self.limiter.penalise(delay)
+                        attempt += 1
+                        continue
                 response.raise_for_status()
                 return response.json()
         except httpx.HTTPStatusError as exc:
-            raise LLMError(_explain(exc)) from exc
+            raise LLMError(_explain(exc, waited)) from exc
         except httpx.ConnectTimeout as exc:
             raise LLMError(
                 f"Could not reach {self.base_url}: nothing answered within "
@@ -175,9 +237,43 @@ class OpenAICompatibleClient:
         return models
 
 
-def _explain(exc: httpx.HTTPStatusError) -> str:
+def _error_body_of(response) -> tuple[str, str]:
+    """``(message, code)`` from the provider's error body, best effort.
+
+    Read once, up front, so every branch of :func:`_explain` can use it -- and
+    so the retry can tell the two kinds of 429 apart before deciding to wait.
+    The 429 branch used to return before this ran, which threw away the one
+    field that says which kind it was.
+    """
+    try:
+        body = response.json()
+        error = body.get("error")
+    except Exception:  # noqa: BLE001 - the body is not always JSON
+        return _trim(response.text), ""
+    if not isinstance(error, dict):
+        return _trim(str(error or "")), ""
+    code = str(error.get("code") or error.get("type") or "")
+    return _trim(str(error.get("message", ""))), code
+
+
+#: A closing "Visit <url> to learn more." OpenAI ends its rate-limit messages
+#: with. Dropped before the length cap, because otherwise the cap lands inside
+#: the URL and the message ends "Visit https://platform.op".
+_BOILERPLATE = re.compile(r"\s*Visit https?://\S+.*$", re.IGNORECASE | re.DOTALL)
+
+
+def _trim(message: str, limit: int = 220) -> str:
+    """The useful part of a provider's message, short enough to read."""
+    text = _BOILERPLATE.sub("", message or "").strip()
+    if len(text) <= limit:
+        return text
+    return text[:limit].rstrip() + "..."
+
+
+def _explain(exc: httpx.HTTPStatusError, waited: float = 0.0) -> str:
     """Turn a status code into the thing the user has to go and fix."""
     status = exc.response.status_code
+    message, code = _error_body_of(exc.response)
     if status in (401, 403):
         return (
             "The API key was rejected. Check the key stored for this provider "
@@ -190,11 +286,39 @@ def _explain(exc: httpx.HTTPStatusError) -> str:
             "the deployment."
         )
     if status == 429:
-        return "Rate limit or quota reached. Wait a moment and try again."
-    detail = ""
-    try:
-        body = exc.response.json()
-        detail = str(body.get("error", {}).get("message", ""))[:200]
-    except Exception:  # noqa: BLE001 - the body is not always JSON
-        detail = exc.response.text[:200]
-    return f"The provider returned HTTP {status}. {detail}".strip()
+        # Two unrelated things share this status, and the advice for one is
+        # wrong for the other: a rate limit passes on its own, and an exhausted
+        # balance never does. Telling somebody to wait for that is telling them
+        # to wait forever.
+        if _is_out_of_credit(message, code):
+            return (
+                "This account has no credit left, so waiting will not help: "
+                "add credit or check the billing plan for this provider. "
+                f"{message}"
+            ).strip()
+        if waited > 0:
+            # It has already been waited out, repeatedly, and the limit is
+            # still there -- so "try again" is not the advice any more.
+            return (
+                f"{message or 'Rate limit reached.'} Still limited after "
+                f"{waited:.0f}s of backing off; the account's rate limit is "
+                "lower than this run needs. Reduce Parallel requests in "
+                "Connection & Model, or review fewer files at a time."
+            )
+        after = exc.response.headers.get("retry-after", "").strip()
+        advice = f"Try again in {after}s." if after else "Wait a moment and try again."
+        # The provider's own sentence first: it names the model and the limit
+        # that was hit, and leading with ours would only say "rate limit" twice.
+        return f"{message or 'Rate limit reached.'} {advice}".strip()
+    return f"The provider returned HTTP {status}. {message}".strip()
+
+
+def _is_out_of_credit(message: str, code: str) -> bool:
+    """Whether a 429 is about the balance rather than the pace.
+
+    The code is the reliable answer; the wording is the fallback for a provider
+    that speaks OpenAI's shape without sending one.
+    """
+    if code:
+        return code == "insufficient_quota"
+    return "exceeded your current quota" in message.lower()
