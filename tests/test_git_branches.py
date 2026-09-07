@@ -449,3 +449,63 @@ def test_what_it_reports_is_what_git_refuses(tmp_path):
     )
     assert result.returncode != 0
     assert "cannot create" in result.stderr
+
+
+# ---- reading the branch without running git ----------------------------------------
+def test_head_branch_agrees_with_git(repo):
+    """The fast reader and the slow one must never disagree about the answer.
+
+    `head_branch` exists to keep a subprocess out of the repository list, which
+    is only worth doing while it gives the same answer `git rev-parse` does.
+    """
+    assert git_ops.head_branch(repo) == git_ops.current_branch(repo)
+
+    _git(repo, "checkout", "-q", "-b", "dev/rem/sg/nested/name")
+
+    assert git_ops.head_branch(repo) == "dev/rem/sg/nested/name"
+    assert git_ops.head_branch(repo) == git_ops.current_branch(repo)
+
+
+def test_a_detached_head_names_no_branch(repo):
+    """Detached is at a commit, not on a branch, so there is nothing to name."""
+    _git(repo, "checkout", "-q", "--detach", "HEAD")
+
+    assert git_ops.head_branch(repo) == ""
+    assert git_ops.current_branch(repo) == git_ops.DETACHED_HEAD
+
+
+def test_a_submodule_answers_for_itself(tmp_path):
+    """A submodule's `.git` is a file pointing elsewhere; follow it.
+
+    Without following it there is no HEAD to read and the submodule would show
+    nothing -- or, worse, the containing repository's branch.
+    """
+    inner = _init(tmp_path / "inner")
+    _commit(inner, "one\n", "initial")
+    _git(inner, "branch", "-M", "inner-main")
+
+    outer = _init(tmp_path / "outer")
+    _commit(outer, "one\n", "initial")
+    _git(outer, "branch", "-M", "outer-main")
+    _git(outer, "-c", "protocol.file.allow=always",
+         "submodule", "add", str(inner), "libs/inner")
+
+    sub = outer / "libs" / "inner"
+    assert (sub / ".git").is_file()  # the pointer, not a directory
+    assert git_ops.head_branch(sub) == "inner-main"
+    assert git_ops.head_branch(outer) == "outer-main"
+
+
+def test_a_worktree_answers_for_itself(tmp_path, repo):
+    """A linked worktree is a second checkout of one repository, on its own branch."""
+    linked = tmp_path / "side"
+    _git(repo, "worktree", "add", "-q", "-b", "side", str(linked))
+
+    assert git_ops.head_branch(linked) == "side"
+    assert git_ops.head_branch(repo) != "side"
+
+
+def test_a_path_that_is_not_a_repository_names_no_branch(tmp_path):
+    """The repository list holds repos that have since been moved or deleted."""
+    assert git_ops.head_branch(tmp_path / "never-existed") == ""
+    assert git_ops.head_branch(tmp_path) == ""

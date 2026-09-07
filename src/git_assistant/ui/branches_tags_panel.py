@@ -532,6 +532,7 @@ class BranchesTagsPanel(QWidget):
             return
         self._card().name_edit.clear()
         self._reload_branches()
+        self.repo_picker.refresh_branches()  # switched: the list names branches
         self.branch_status.setText(f"Created and switched to '{name}'.")
 
     def _on_switch_branch(self) -> None:
@@ -550,6 +551,7 @@ class BranchesTagsPanel(QWidget):
             return
         self._reload_branches()
         self._reload_tags()  # the version this repository is at may differ here
+        self.repo_picker.refresh_branches()
         self.branch_status.setText(f"On '{chosen.name}'.")
 
     def _on_delete_branch(self) -> None:

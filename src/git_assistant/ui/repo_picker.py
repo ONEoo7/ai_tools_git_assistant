@@ -12,20 +12,32 @@ stopped. So the recent ones have a group of their own, and **All** is the
 stable, alphabetical list you can scan by eye. A repository appears in both:
 All means all, and a repository that vanished from its usual place whenever it
 was used would be worse than a duplicated row.
+
+Each row names the branch that repository is on, after the name and in its own
+colour. It is the fact you need before you act on a repository and the one this
+window otherwise made you select a repository to find out -- and every tab here
+acts on the checked-out branch, so a list that does not say which one it is
+makes you check somewhere else first.
 """
 
 from __future__ import annotations
 
 from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtGui import QColor, QPalette
 from PyQt6.QtWidgets import (
+    QApplication,
     QLabel,
     QLineEdit,
+    QStyle,
+    QStyledItemDelegate,
+    QStyleOptionViewItem,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
 
+from git_assistant import git_ops
 from git_assistant.config import RepoEntry, RepoNode, Settings, build_repo_tree
 
 #: How many of the recently used are worth a shortcut. Past a handful it stops
@@ -34,6 +46,101 @@ RECENT_SHOWN = 5
 
 RECENT_GROUP = "Recently Used"
 ALL_GROUP = "All"
+
+#: Where a row keeps the branch it is on. Beside the text rather than in it, so
+#: the branch can be painted in its own colour -- and so the filter box goes on
+#: matching repository names and only those.
+BRANCH_ROLE = Qt.ItemDataRole.UserRole + 1
+
+#: Space between a repository's name and its branch. Wide enough that the two
+#: read as two things; the colour does the rest.
+_BRANCH_GAP = 12
+
+#: The branch, in green -- the colour git itself gives a branch name. Two of
+#: them because this list is drawn light and dark: the dark green disappears
+#: into a dark row and the light one washes out on a light one.
+_BRANCH_ON_LIGHT = QColor("#1a7f4b")
+_BRANCH_ON_DARK = QColor("#5fd39a")
+
+
+def _branch_colour(palette: QPalette) -> QColor:
+    """Whichever green reads on the colour this list is drawn on.
+
+    The list's own background, and not the selected row's -- which sounds like
+    the thing that would catch out a colour chosen for the list, and is not.
+    Measured on the style this ships against: the Windows 11 style paints a
+    selected row #f5f5f5 on a #ffffff list and #393939 on a #2d2d2d one, never
+    the palette's highlight colour. A row's selection moves its background by
+    about four percent, so it does not come into this.
+    """
+    background = palette.color(QPalette.ColorRole.Base)
+    return _BRANCH_ON_DARK if background.lightness() < 128 else _BRANCH_ON_LIGHT
+
+
+class _BranchDelegate(QStyledItemDelegate):
+    """Paints a row as its repository name, then the branch it is on.
+
+    A delegate rather than a second column: a column lines every branch up in a
+    stripe of its own, stranded from the short names and jammed against the
+    long ones, when what the branch belongs beside is the name it annotates.
+
+    A delegate rather than folding the branch into the item's text: one item
+    has one colour, and a branch in the same colour as the name is a longer
+    name rather than a branch.
+    """
+
+    def sizeHint(self, option, index):
+        size = super().sizeHint(option, index)
+        branch = index.data(BRANCH_ROLE)
+        if branch:
+            opt = QStyleOptionViewItem(option)
+            self.initStyleOption(opt, index)
+            width = opt.fontMetrics.horizontalAdvance(branch)
+            size.setWidth(size.width() + _BRANCH_GAP + width)
+        return size
+
+    def paint(self, painter, option, index):
+        # The row itself -- its background, its selection, its focus ring and
+        # its name -- stays the style's to draw, so it keeps looking like every
+        # other list in the window. Only the branch is drawn here, after it.
+        super().paint(painter, option, index)
+        branch = index.data(BRANCH_ROLE)
+        if not branch:
+            return
+        opt = QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+        widget = opt.widget
+        style = widget.style() if widget is not None else QApplication.style()
+        area = style.subElementRect(
+            QStyle.SubElement.SE_ItemViewItemText, opt, widget
+        )
+        metrics = opt.fontMetrics
+        area.setLeft(
+            area.left() + metrics.horizontalAdvance(opt.text) + _BRANCH_GAP
+        )
+        # Elided from the *left*, unlike the name beside it: a branch is named
+        # front-to-back from the general to the particular, so its prefix is
+        # the part every branch in the repository shares. Cut from the right,
+        # a column this narrow shows "dev/re..." against all of them.
+        shown = (
+            metrics.elidedText(branch, Qt.TextElideMode.ElideLeft, area.width())
+            if area.width() > 0
+            else ""
+        )
+        if not shown.strip("…"):
+            # The name has taken the row, and the style has already elided it
+            # there. The name is the one that has to stay readable, so a row
+            # this narrow gets no branch at all rather than an ellipsis
+            # standing in for one -- the tooltip still has it in full.
+            return
+        painter.save()
+        painter.setPen(_branch_colour(opt.palette))
+        painter.drawText(
+            area,
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+            shown,
+        )
+        painter.restore()
 
 
 class RepoPicker(QWidget):
@@ -53,6 +160,7 @@ class RepoPicker(QWidget):
         self.repo_list = QTreeWidget()
         self.repo_list.setHeaderHidden(True)
         self.repo_list.setRootIsDecorated(True)
+        self.repo_list.setItemDelegate(_BranchDelegate(self.repo_list))
         self.repo_list.currentItemChanged.connect(self._on_selected)
 
         box = QVBoxLayout(self)
@@ -93,6 +201,30 @@ class RepoPicker(QWidget):
     def current_path(self) -> str:
         item = self.repo_list.currentItem()
         return item.data(0, Qt.ItemDataRole.UserRole) if item else ""
+
+    def refresh_branches(self) -> None:
+        """Re-read the branch beside each repository, leaving the tree alone.
+
+        For after a checkout, which moves one label and nothing else: `refresh`
+        would rebuild the list and take the scroll position and whatever the
+        user had folded open with it. Every row rather than the one that was
+        checked out, because a repository can be listed twice -- once under
+        **Recently Used** and once under **All** -- and half an answer on
+        screen is worse than the stale one it replaced.
+        """
+        for item in self._items():
+            path = item.data(0, Qt.ItemDataRole.UserRole)
+            if path:
+                self._label_branch(item, path)
+
+    @staticmethod
+    def _label_branch(item: QTreeWidgetItem, path: str) -> None:
+        """Note which branch ``path`` is on, for the delegate and the tooltip."""
+        branch = git_ops.head_branch(path)
+        item.setData(0, BRANCH_ROLE, branch)
+        # The branch is elided out of a narrow list before the name is, so the
+        # tooltip is where it can always be read in full.
+        item.setToolTip(0, f"{path}\nOn branch {branch}" if branch else path)
 
     def refresh(self) -> None:
         """Reload from settings (call after repositories are added or removed)."""
@@ -178,7 +310,7 @@ class RepoPicker(QWidget):
         entry: RepoEntry = node.entry
         item = QTreeWidgetItem([entry.display()])
         item.setData(0, Qt.ItemDataRole.UserRole, entry.path)
-        item.setToolTip(0, entry.path)
+        self._label_branch(item, entry.path)
         for child in node.children:
             item.addChild(self._make_item(child))
         # Folded: one repository with forty submodules is otherwise forty-one

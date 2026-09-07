@@ -590,9 +590,11 @@ class CommitPanel(QWidget):
             return
 
         # The work tree is a different one now, so anything on screen describes
-        # the branch we just left.
+        # the branch we just left -- the repository list included, which names
+        # the branch beside every repository.
         self._clear_results()
         self._refresh_branches()
+        self.repo_picker.refresh_branches()
         self._load_staged_files()
         self.status.setText(f"Switched to '{target}'.")
 
