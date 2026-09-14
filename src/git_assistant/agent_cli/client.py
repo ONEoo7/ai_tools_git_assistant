@@ -12,17 +12,28 @@ Two shapes of overhead worth remembering, both measured (docs/cli-providers.md):
 - ``agy`` prepends about 17,000 tokens of its own prompt to every call, and
   offers no flag to replace it. ``claude`` does, through ``--system-prompt``,
   which is why that flag is not optional here.
+
+The prompt is a diff, which is whatever a repository contains, so where it goes
+is a security decision. ``claude`` is given its prompt on stdin and its system
+prompt in a file, and nothing of either reaches a command line. ``agy`` reads no
+stdin, so its prompt is an argument -- which is safe only because what is
+started is never a batch file (see `detect.command`): a program receives its
+arguments as they are, while cmd.exe would read them as commands.
 """
 
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import tempfile
 import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
+from pathlib import Path
 
-from git_assistant import usage
+from git_assistant import processes, usage
 from git_assistant.agent_cli import detect, resolved
 from git_assistant.llm import LLMError, ModelInfo
 
@@ -39,6 +50,12 @@ ASSUMED_CONTEXT = 200_000
 #: rather than ignored: a budget that does not know about it plans a prompt that
 #: will not fit.
 AGY_OVERHEAD = 18_000
+
+#: What a model id looks like, across the CLIs and providers met so far:
+#: ``sonnet``, ``claude-sonnet-4-6``, ``gemini-3.6-flash-low``, ``opus[1m]``,
+#: ``us.anthropic.claude-opus-4-1-20250805-v1:0``. It goes on a command line, so
+#: nothing else does -- not a space, not a quote, not a leading dash.
+_MODEL_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:@/\[\]+-]*")
 
 
 class CliError(LLMError):
@@ -59,6 +76,16 @@ class Answer:
 
 
 @dataclass(frozen=True)
+class Call:
+    """One completion as a process: its arguments, and what it reads on stdin."""
+
+    #: Everything after the program itself.
+    args: list[str]
+    #: The prompt, for a CLI that reads it from stdin; None gives it nothing.
+    stdin: str | None = None
+
+
+@dataclass(frozen=True)
 class Recipe:
     """How one CLI is asked for a completion, and how its answer is read."""
 
@@ -73,7 +100,12 @@ class Recipe:
     context: int = ASSUMED_CONTEXT
     overhead: int = 0
 
-    def args(self, exe: str, model: str, system: str, user: str) -> list[str]:
+    def call(self, model: str, system_file: str, prompt: str) -> Call:
+        """How to ask for one completion.
+
+        ``system_file`` holds the system prompt, for a CLI that takes one; it is
+        "" otherwise, and ``prompt`` then has both halves folded together.
+        """
         raise NotImplementedError
 
     def read(self, stdout: str) -> "Answer":
@@ -88,31 +120,34 @@ class ClaudeRecipe(Recipe):
     system_prompt: bool = True
     context: int = 200_000
 
-    def args(self, exe: str, model: str, system: str, user: str) -> list[str]:
-        return [
-            exe,
-            "-p",
-            user,
-            # Replaces Claude Code's own harness prompt rather than adding to
-            # it: measured at 3,408 cached tokens with the default and 112 with
-            # this, a thirty-fold difference on every call. Never omit it.
-            "--system-prompt",
-            system,
-            "--model",
-            model,
-            # No tools. This is a backend, not an agent with a repository.
-            "--tools",
-            "",
-            "--output-format",
-            "json",
-            "--disable-slash-commands",
-            # Neither the user's settings nor a project's may change what this
-            # sends: the prompt is the app's, and a CLAUDE.md that redirected it
-            # would be invisible from here.
-            "--setting-sources",
-            "",
-            "--no-session-persistence",
-        ]
+    def call(self, model: str, system_file: str, prompt: str) -> Call:
+        return Call(
+            args=[
+                "-p",
+                # Replaces Claude Code's own harness prompt rather than adding
+                # to it: measured at 3,408 cached tokens with the default and 112
+                # with this, a thirty-fold difference on every call. Never omit
+                # it. Read from a file, so that no part of it is an argument.
+                "--system-prompt-file",
+                system_file,
+                "--model",
+                model,
+                # No tools. This is a backend, not an agent with a repository.
+                "--tools",
+                "",
+                "--output-format",
+                "json",
+                "--disable-slash-commands",
+                # Neither the user's settings nor a project's may change what
+                # this sends: the prompt is the app's, and a CLAUDE.md that
+                # redirected it would be invisible from here.
+                "--setting-sources",
+                "",
+                "--no-session-persistence",
+            ],
+            # Given no prompt argument, `claude -p` reads the prompt from stdin.
+            stdin=prompt,
+        )
 
     def read(self, stdout: str) -> Answer:
         payload = _json(stdout, self.name)
@@ -149,17 +184,21 @@ class AgyRecipe(Recipe):
     context: int = 200_000
     overhead: int = AGY_OVERHEAD
 
-    def args(self, exe: str, model: str, system: str, user: str) -> list[str]:
-        return [
-            exe,
-            "-p",
-            user,
-            "--model",
-            model,
-            "--output-format",
-            "json",
-            "--disable-slash-commands",
-        ]
+    def call(self, model: str, system_file: str, prompt: str) -> Call:
+        # `agy -p` takes the prompt as its value and reads nothing from stdin, so
+        # the prompt stays an argument: see the module docstring for why that is
+        # safe, and detect.command for what makes it so.
+        return Call(
+            args=[
+                "-p",
+                prompt,
+                "--model",
+                model,
+                "--output-format",
+                "json",
+                "--disable-slash-commands",
+            ]
+        )
 
     def read(self, stdout: str) -> Answer:
         payload = _json(stdout, self.name)
@@ -237,11 +276,19 @@ class CliClient:
 
     # ---- the contract --------------------------------------------------------
     def chat(self, model, system, user, max_tokens, temperature=None) -> str:
-        exe = self._exe()
+        program = self._program()
         prompt = user if self.recipe.system_prompt else _folded(system, user)
         asked = model or self._default_model()
-        args = self.recipe.args(exe, asked, system, prompt)
-        answer = self.recipe.read(self._run(args))
+        # Empty is left to the CLI's own default, as it always was.
+        if asked and not _MODEL_RE.fullmatch(asked):
+            raise CliError(
+                f"{asked!r} is not a model name, so {self.name} was not asked."
+            )
+        held = system if self.recipe.system_prompt else None
+        with _in_a_file(held) as system_file:
+            call = self.recipe.call(asked, system_file, prompt)
+            printed = self._run([*program, *call.args], stdin=call.stdin)
+        answer = self.recipe.read(printed)
         if not answer.reply:
             # An empty reply from an agent CLI usually means it decided to do
             # something instead of answering. Saying so beats handing back "".
@@ -273,7 +320,9 @@ class CliClient:
         if not self.recipe.list_args:
             return [ModelInfo(id=name, note=_last_served(self.name, name))
                     for name in self.recipe.models]
-        listed = self._run([self._exe(), *self.recipe.list_args], want_json=False)
+        listed = self._run(
+            [*self._program(), *self.recipe.list_args], want_json=False
+        )
         names = [line.strip() for line in listed.splitlines() if line.strip()]
         if not names:
             raise CliError(f"{self.name} listed no models")
@@ -298,29 +347,39 @@ class CliClient:
 
     # ---- running it -----------------------------------------------------------
     def cancel(self) -> None:
-        """Stop every completion in flight, killing the CLIs' children with them."""
+        """Stop every completion in flight, killing the CLIs' children with them.
+
+        The children are the point. The process started here is not always the
+        one doing the work -- a Scoop shim starts the real program, and a CLI
+        can start helpers of its own -- and killing it alone leaves those
+        running and holding the output pipe, so `_run` would go on waiting and
+        this Cancel would not come back until they had finished anyway.
+        """
         self._cancelled = True
         with self._lock:
             running = list(self._running)
         for process in running:
-            try:
-                process.kill()  # the process group goes with it; see _popen_flags
-            except OSError:
-                pass
+            processes.kill_tree(process)
 
-    def _exe(self) -> str:
+    def _program(self) -> list[str]:
+        """How to start the CLI: never through cmd.exe. See detect.command."""
         path = detect.locate(self.name)
         if not path:
             raise CliError(
                 f"The {self.name} CLI is not installed, or not on PATH. Install "
                 "it from the Connection & Model tab."
             )
-        return path
+        try:
+            return detect.command(path)
+        except detect.UnsafeProgram as exc:
+            raise CliError(str(exc)) from exc
 
     def _default_model(self) -> str:
         return self.recipe.models[0] if self.recipe.models else ""
 
-    def _run(self, args: list[str], want_json: bool = True) -> str:
+    def _run(
+        self, args: list[str], *, stdin: str | None = None, want_json: bool = True
+    ) -> str:
         if self._cancelled:
             raise CliError("Cancelled.")
         # An empty directory, not the repository: these are workspace-aware
@@ -339,24 +398,28 @@ class CliClient:
                 process = subprocess.Popen(
                     args,
                     cwd=empty,
-                    stdin=subprocess.DEVNULL,
+                    # The prompt, for a CLI that reads it there; nothing at all
+                    # otherwise, so a CLI waiting on input fails rather than hangs.
+                    stdin=subprocess.DEVNULL if stdin is None else subprocess.PIPE,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
                     env=detect.child_env(),
-                    **_popen_flags(),
+                    # So that cancel() and the timeout below can end everything
+                    # the CLI starts, not just the process started here.
+                    **processes.killable(),
                 )
                 with self._lock:
                     self._running.add(process)
                 # Read from the local handle, never from `self._running`: a
                 # sibling thread's `finally` must not be able to take it away.
-                out, err = process.communicate(timeout=self.timeout)
+                # Bytes both ways: a text pipe on Windows would turn every "\n"
+                # of the diff into "\r\n" on its way in.
+                sent = None if stdin is None else stdin.encode("utf-8")
+                raw_out, raw_err = process.communicate(sent, timeout=self.timeout)
                 code = process.returncode
             except subprocess.TimeoutExpired as exc:
                 if process is not None:
-                    process.kill()
+                    processes.kill_tree(process)
                 raise CliError(
                     f"{self.name} did not answer within {self.timeout:.0f}s."
                 ) from exc
@@ -369,6 +432,7 @@ class CliClient:
 
         if self._cancelled:
             raise CliError("Cancelled.")
+        out, err = (_decoded(raw) for raw in (raw_out, raw_err))
         if code != 0 and not (want_json and (out or "").strip()):
             # Copilot's failure mode exactly: exit 1, nothing on either stream.
             # Say that, rather than "unexpected response shape".
@@ -378,6 +442,28 @@ class CliClient:
                 + (f"said: {detail[-1][:200]}" if detail else "printed nothing.")
             )
         return out or ""
+
+
+@contextmanager
+def _in_a_file(text: str | None) -> Iterator[str]:
+    """A file holding ``text`` for as long as the call lasts; "" for no text.
+
+    In a directory of its own, not the one the CLI runs in: that one is empty,
+    and is the fence around a workspace-aware agent.
+    """
+    if text is None:
+        yield ""
+        return
+    with tempfile.TemporaryDirectory(
+        prefix="git-assistant-cli-prompt-", ignore_cleanup_errors=True
+    ) as folder:
+        held = Path(folder) / "system-prompt.txt"
+        held.write_bytes(text.encode("utf-8"))  # as given: no "\r\n" added
+        yield str(held)
+
+
+def _decoded(raw: bytes | None) -> str:
+    return (raw or b"").decode("utf-8", "replace").replace("\r\n", "\n")
 
 
 def _last_served(cli: str, alias: str) -> str:
@@ -399,15 +485,3 @@ def _folded(system: str, user: str) -> str:
     if not system.strip():
         return user
     return f"{system.strip()}\n\n---\n\n{user}"
-
-
-def _popen_flags() -> dict:
-    """Windows: no console flash, and a killable process group."""
-    import sys
-
-    if sys.platform != "win32":
-        return {}
-    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(
-        subprocess, "CREATE_NEW_PROCESS_GROUP", 0
-    )
-    return {"creationflags": flags}

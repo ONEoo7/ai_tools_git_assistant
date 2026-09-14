@@ -2,13 +2,13 @@
 
     <repo>/.git-assistant/code-review-profile.json
 
-This is the only file this application ever writes into a working tree, and it
-is written on one explicit press. Everything else it keeps lives in the user's
-config directory, filed under a hash of the repository path -- see
-``config.repo_key`` -- precisely so that cloning a repository does not import
-somebody else's settings. A shared review profile is the exception because it is
-the point: a colleague should be reviewed against the standard the project holds
-to, not against whatever they happen to have locally.
+It is written into the working tree only on one explicit press. What else this
+application keeps about a repository lives in the user's config directory, filed
+under a hash of the repository path -- see ``config.repo_key`` -- precisely so
+that cloning a repository does not import somebody else's settings. A shared
+review profile is the exception because it is the point: a colleague should be
+reviewed against the standard the project holds to, not against whatever they
+happen to have locally.
 
 So it is self-contained. Custom tables are written out in full, with their
 fingerprint; the shipped ones are named by id and schema, because the

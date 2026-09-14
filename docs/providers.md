@@ -160,6 +160,13 @@ Marked experimental for reasons that were measured rather than assumed:
 
 They are useful when the login you already have is the only access you have.
 
+**How they are started.** The prompt is a diff, so it never goes anywhere cmd.exe
+could read it as commands. Claude Code gets its prompt on stdin and its system
+prompt in a file. A CLI installed with npm is started as `node` on the package's
+script, not through the `.cmd` shim npm puts on PATH, and a native install is
+used instead when there is one. Any other batch file is refused, with the
+vendor's installer command to run instead.
+
 ## Temperature
 
 Kept per provider *and* per model, because it is a property of the weights: what

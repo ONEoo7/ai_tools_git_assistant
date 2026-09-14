@@ -8,14 +8,22 @@ from __future__ import annotations
 
 import contextlib
 import os
+import queue
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
+import threading
+import time
+from collections import deque
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from git_assistant import processes
 
 # Directories that never contain a project repo worth listing; pruned while
 # scanning so large trees stay fast.
@@ -1628,3 +1636,328 @@ def commit(repo: str | Path, message: str) -> GitResult:
     survive intact. Only staged changes are committed.
     """
     return _run(repo, ["commit", "-F", "-"], stdin=message)
+
+
+# ---- cloning and creating ------------------------------------------------------------
+#: Variables that point git at a repository other than the one a command names.
+#: Inherited from whatever started this application (a hook, an IDE), they would
+#: make a clone or an init act on that repository instead.
+_REDIRECTING_ENV = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE")
+
+#: Seconds a cancelled clone's folder is retried for while something still holds
+#: a file in it open: git's own children as they die, a virus scanner.
+_REMOVE_FOR = 3.0
+
+#: Seconds of silence waited for once git has exited, for output still in the
+#: pipe -- bounded, because a child that outlives git can hold the pipe open.
+_LAST_WORDS = 2.0
+
+_PERCENT_RE = re.compile(r"(\d{1,3})%")
+
+
+@dataclass
+class CloneResult(GitResult):
+    """How a clone ended, and what it left on disk."""
+
+    destination: str = ""
+    #: Stopped because it was asked to be. What it had written is removed.
+    cancelled: bool = False
+    #: Everything was fetched but the files could not all be written out -- a
+    #: path too long for Windows is the usual cause. The repository is kept: it
+    #: is complete, and deleting a finished download to report an error would
+    #: help nobody.
+    checkout_failed: bool = False
+    #: A path the clean-up after a cancel could not remove, or "".
+    leftover: str = ""
+
+
+def repo_name_from_url(url: str) -> str:
+    """The folder name `git clone` would choose for ``url``.
+
+    The last part of the path without a trailing ``.git`` or ``/.git`` -- alike
+    for https and ssh URLs, ``git@host:org/repo.git`` and local folders.
+    """
+    text = url.strip().rstrip("/\\")
+    if text.lower().endswith(("/.git", "\\.git")):
+        text = text[:-5].rstrip("/\\")
+    if text.lower().endswith(".git"):
+        text = text[:-4]
+    return re.split(r"[/\\:]", text)[-1].strip()
+
+
+def _local_folder(url: str) -> Path | None:
+    """``url`` as a folder on this machine, or None when it is a URL.
+
+    ``host:path`` is git's ssh shorthand and ``C:\\work`` is a drive; asking the
+    file system settles which, where reading the text would have to guess.
+    """
+    if "://" in url:
+        return None
+    try:
+        folder = Path(url).expanduser()
+        return folder if folder.is_dir() else None
+    except (OSError, ValueError):
+        return None
+
+
+def clone(
+    url: str,
+    destination: str | Path,
+    *,
+    depth: int | None = None,
+    on_progress: Callable[[str], None] | None = None,
+    on_percent: Callable[[int], None] | None = None,
+    is_cancelled: Callable[[], bool] | None = None,
+) -> CloneResult:
+    """Clone ``url`` into ``destination``, passing on git's progress as it comes.
+
+    ``depth`` makes the clone shallow: that many commits from the tip of *every*
+    branch. Git's own shallow clone takes only the branch HEAD names and narrows
+    the remote's fetch refspec to it, which keeps every other branch out of reach
+    for good -- the Branches & Tags tab included. A local folder is cloned over
+    ``file://`` then, because git ignores a depth for a plain path and says so
+    only as a warning.
+
+    Refused before git starts: no URL, one that starts with ``-``, and a
+    destination that exists and is not an empty folder.
+
+    Cancelling kills git and everything it started, then removes what the clone
+    had written; a destination folder that already existed is left there, empty.
+    Git removes its own leftovers when a clone fails on its own.
+    """
+    dest = Path(destination)
+    source = url.strip()
+
+    def result(ok: bool, *, stdout="", stderr="", returncode=1, **extra) -> CloneResult:
+        return CloneResult(
+            ok=ok,
+            stdout=stdout,
+            stderr=stderr,
+            returncode=returncode,
+            destination=str(dest),
+            **extra,
+        )
+
+    if not source:
+        return result(False, stderr="There is no URL to clone.")
+    if source.startswith("-"):
+        return result(False, stderr=f"'{source}' is not something git can clone.")
+    existed = dest.exists()
+    if existed and (not dest.is_dir() or any(dest.iterdir())):
+        return result(False, stderr=f"{dest} exists and is not an empty folder.")
+
+    local = _local_folder(source)
+    if depth is not None and local is not None:
+        source = local.resolve().as_uri()
+    args = ["clone", "--progress"]
+    if depth is not None:
+        args += [f"--depth={max(1, depth)}", "--no-single-branch"]
+    args += ["--", source, str(dest)]
+
+    stopped = is_cancelled or (lambda: False)
+
+    def seen(line: str) -> None:
+        if on_progress is not None:
+            on_progress(line)
+        if on_percent is not None and (match := _PERCENT_RE.search(line)):
+            on_percent(min(100, int(match.group(1))))
+
+    try:
+        code, tail = _stream(
+            ["git", *args], env=_clone_env(), on_line=seen, is_cancelled=stopped
+        )
+    except OSError as exc:
+        missing = _cannot_run(exc)
+        return result(False, stderr=missing.stderr, returncode=missing.returncode)
+
+    # Asked once more after git is done: a Cancel pressed as the last line
+    # arrived still means the person did not want this repository.
+    if code is None or stopped():
+        leftover = _remove_partial(dest, keep_folder=existed)
+        return result(False, stderr="Cancelled.", cancelled=True, leftover=leftover)
+    if code == 0:
+        return result(True, stdout="\n".join(tail), returncode=0)
+    return result(
+        False,
+        stderr=_complaints(tail) or "git clone failed.",
+        returncode=code,
+        checkout_failed=(dest / ".git").is_dir(),
+    )
+
+
+def _complaints(lines: list[str]) -> str:
+    """What git said went wrong, out of everything it wrote; else its last words."""
+    said = [line for line in lines if line.startswith(("fatal:", "error:", "warning:"))]
+    return "\n".join(said or lines[-3:])
+
+
+def _clone_env() -> dict[str, str]:
+    """This process's environment, minus what would redirect git, prompts off.
+
+    There is no terminal to type a password into, so git is told not to ask for
+    one: it reports that it could not authenticate instead of waiting for an
+    answer nobody can give. A credential helper with a window of its own -- Git
+    Credential Manager -- still shows it.
+    """
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if key.upper() not in _REDIRECTING_ENV
+    }
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    return env
+
+
+def _stream(
+    argv: list[str],
+    *,
+    env: dict[str, str] | None,
+    on_line: Callable[[str], None],
+    is_cancelled: Callable[[], bool],
+    poll: float = 0.1,
+) -> tuple[int | None, list[str]]:
+    """Run ``argv``, handing ``on_line`` each line it writes while it runs.
+
+    Returns the exit code -- None when it was cancelled -- and the last lines.
+    Raises OSError when the program cannot be started at all.
+
+    Git redraws a progress line in place with a carriage return, so a line ends
+    at ``\\r`` as well as ``\\n``. The pipe is read on a thread of its own: a
+    stalled network means no output for as long as the stall lasts, and Cancel
+    has to work through exactly that.
+    """
+    proc = subprocess.Popen(
+        argv,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        env=env,
+        **processes.killable(),
+    )
+    lines: queue.SimpleQueue[str | None] = queue.SimpleQueue()
+
+    def read() -> None:
+        pending = b""
+        try:
+            while chunk := proc.stdout.read1(65536):
+                *complete, pending = re.split(rb"[\r\n]", pending + chunk)
+                for raw in complete:
+                    if text := raw.decode("utf-8", "replace").strip():
+                        lines.put(text)
+            if text := pending.decode("utf-8", "replace").strip():
+                lines.put(text)
+        except (OSError, ValueError):
+            pass  # the pipe went away under a kill
+        finally:
+            lines.put(None)
+
+    reader = threading.Thread(target=read, name="git-output", daemon=True)
+    reader.start()
+    tail: deque[str] = deque(maxlen=50)
+    quiet = 0.0
+    try:
+        while True:
+            if is_cancelled():
+                # The whole tree: the git on PATH is a launcher, and killing it
+                # alone leaves the clone running. See git_assistant.processes.
+                processes.kill_tree(proc)
+                return None, list(tail)
+            try:
+                line = lines.get(timeout=poll)
+            except queue.Empty:
+                if proc.poll() is not None:
+                    quiet += poll
+                    if quiet >= _LAST_WORDS:
+                        break
+                continue
+            if line is None:
+                break
+            quiet = 0.0
+            tail.append(line)
+            on_line(line)
+        return proc.wait(), list(tail)
+    finally:
+        # A git that finished is left alone; one still running here is one whose
+        # output handler raised.
+        processes.kill_tree(proc)
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            proc.wait(timeout=5)
+        reader.join(timeout=2)
+        # Closing the pipe while the reader is still inside a read would wait
+        # for that read to end; a finished reader has nothing left to wait on.
+        if not reader.is_alive():
+            proc.stdout.close()
+
+
+def _remove_partial(dest: Path, *, keep_folder: bool) -> str:
+    """Delete what a cancelled clone wrote into ``dest``; "" once all of it is gone.
+
+    Git makes the objects it writes read-only, which Windows refuses to delete, so
+    each is made writable first. Something can still hold a file open for a
+    moment afterwards, so removal is retried for a few seconds before the path
+    is handed back as left behind. ``keep_folder`` empties ``dest`` rather than
+    removing it: it existed before the clone did.
+    """
+
+    def writable(function, path, _exc) -> None:
+        os.chmod(path, stat.S_IWRITE)
+        function(path)
+
+    deadline = time.monotonic() + _REMOVE_FOR
+    while True:
+        try:
+            if not dest.exists():
+                return ""
+            if not keep_folder:
+                shutil.rmtree(dest, onexc=writable)
+                return ""
+            for child in list(dest.iterdir()):
+                if child.is_dir() and not child.is_symlink():
+                    shutil.rmtree(child, onexc=writable)
+                else:
+                    os.chmod(child, stat.S_IWRITE)
+                    child.unlink()
+            return ""
+        except OSError:
+            if time.monotonic() >= deadline:
+                return str(dest)
+            time.sleep(0.2)
+
+
+def init(path: str | Path, *, initial_branch: str = "") -> GitResult:
+    """Make ``path`` a new repository, creating the folder (and parents) if needed.
+
+    Refuses a folder that already is one. Git would "reinitialize" it and report
+    success, which reads as though a repository had just been created.
+    """
+    target = Path(path)
+    if has_git_dir(target):
+        return GitResult(
+            ok=False,
+            stdout="",
+            stderr=f"{target} is already a git repository.",
+            returncode=1,
+        )
+    args = ["init"]
+    if initial_branch:
+        args.append(f"--initial-branch={initial_branch}")
+    return _run_global([*args, "--", str(target)])
+
+
+def default_branch_name() -> str:
+    """The branch a new repository starts on, as configured, or "" when unset.
+
+    ``init.defaultBranch`` is read from the global config and then the system
+    one -- Git for Windows' installer writes it into the latter -- and never from
+    whatever repository this process happens to be running in.
+    """
+    for scope in ("--global", "--system"):
+        res = _run_global(["config", scope, "--get", "init.defaultBranch"])
+        if res.ok and res.stdout.strip():
+            return res.stdout.strip()
+    return ""
+
+
+def valid_branch_name(name: str) -> bool:
+    """Whether git accepts ``name`` for a branch, asked of git itself."""
+    return bool(name) and _run_global(["check-ref-format", "--branch", name]).ok

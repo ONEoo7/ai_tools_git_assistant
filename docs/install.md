@@ -40,7 +40,8 @@ The installer is deliberately per-user. A Program Files install would make every
    still runs.
 
 2. **Repositories & Settings** — add repositories one at a time, or scan a
-   folder for all of them. Submodules are found too and listed under the
+   folder for all of them. A repository not on this machine yet can be cloned
+   from the **Clone & Create** tab, which adds it to the list. Submodules are found too and listed under the
    repository they belong to. Tick a scanned folder to **auto-watch** it, and
    repositories cloned there afterwards are added on their own.
 

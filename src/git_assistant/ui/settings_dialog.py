@@ -84,6 +84,7 @@ from git_assistant.ui.theme_picker import ThemePicker
 from git_assistant.ui.preview_dialog import SECTION_GAP, CommitPanel
 from git_assistant.ui.review_panel import ReviewPanel
 from git_assistant.ui.branches_tags_panel import BranchesTagsPanel
+from git_assistant.ui.clone_create_panel import CloneCreatePanel
 from git_assistant.ui.usage_pane import UsagePane
 from git_assistant.review import judge as judge_mod
 from git_assistant.ui.update_prompt import UpdateCheckWorker
@@ -233,6 +234,7 @@ class SettingsDialog(QDialog):
         # Read from their own file, seeded from git on first run.
         self.identity_store = IdentityStore.bootstrap()
 
+        tabs.addTab(self._build_clone_create_tab(), "Clone && Create")
         tabs.addTab(self._build_commit_tab(), "Commit")
         tabs.addTab(self._build_tags_tab(), "Branches && Tags")
         tabs.addTab(self._build_agents_tab(), "Audit")
@@ -244,12 +246,17 @@ class SettingsDialog(QDialog):
         tabs.addTab(self._build_mcp_tab(), "MCP Server")
         tabs.addTab(self._build_template_tab(), "Template")
         tabs.addTab(self._build_advanced_tab(), "Advanced")
+        # Commit is where the window opens, as it did before a tab went to its
+        # left: it is the daily one. Still before `_ready`, so this switch is
+        # not treated as someone opening the tab.
+        tabs.setCurrentWidget(self.commit_panel)
 
         # Above the tabs, not inside one: the identity applies to whichever
         # repository is active, and both repo-driven tabs can change that. Each
         # tab owns its own RepoPicker, so the bar follows both.
         self.identity_bar = IdentityBar(self.settings, self.identity_store)
         for panel in (
+            self.clone_panel,
             self.commit_panel,
             self.tags_panel,
             self.agents_panel,
@@ -295,6 +302,7 @@ class SettingsDialog(QDialog):
         # behind it. See git_assistant.ui.busy_bar.
         self.busy = BusyBar()
         for panel in (
+            self.clone_panel,
             self.commit_panel,
             self.agents_panel,
             self.review_panel,
@@ -399,9 +407,25 @@ class SettingsDialog(QDialog):
             self.bottom_bar.setColumnMinimumWidth(column, wide)
 
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt naming
-        # An audit can still be reading the object store, and a review can have
-        # thirty calls in flight; stop them rather than leaving them running
-        # behind a closed window.
+        self._stop_background_work()
+        super().closeEvent(event)
+
+    def done(self, result: int) -> None:
+        # Esc ends the window through reject() -> done() and never raises a
+        # closeEvent, so what closing has to do is done from here as well.
+        self._stop_background_work()
+        super().done(result)
+
+    def _stop_background_work(self) -> None:
+        """What closing this window has to do, however it is closed.
+
+        Safe to run twice: closing with the title bar's button runs both
+        `closeEvent` and `done`.
+        """
+        # An audit can still be reading the object store, a review can have
+        # thirty calls in flight and a clone can be half downloaded; stop them
+        # rather than leaving them running behind a closed window.
+        self.clone_panel.cancel_running()
         self.agents_panel.cancel_running()
         self.review_panel.cancel_running()
         if self._setup_worker is not None:
@@ -410,7 +434,6 @@ class SettingsDialog(QDialog):
         # Push whatever the last run left buffered. Not a shutdown: the tray
         # outlives this window and can start another run from its menu.
         tracing.flush()
-        super().closeEvent(event)
 
     def flush_pending_edits(self) -> None:
         """Write any debounced edit that has not landed yet.
@@ -595,6 +618,14 @@ class SettingsDialog(QDialog):
         self._show_update_state("update check failed", tooltip=message)
 
     # ---- tabs --------------------------------------------------------------
+    def _build_clone_create_tab(self) -> QWidget:
+        # Built before the Repositories tree exists. `add_repository` is only
+        # called once a clone or create has finished, long after it does.
+        self.clone_panel = CloneCreatePanel(
+            self.settings, add_repository=self.add_repository
+        )
+        return self.clone_panel
+
     def _build_commit_tab(self) -> QWidget:
         # Does not auto-generate: opening the window should cost nothing.
         # Settings edited in other tabs are applied just before a run.
@@ -2974,14 +3005,35 @@ class SettingsDialog(QDialog):
                 self, "Not a git repo", f"{path}\nis not a git repository."
             )
             return
-        if self._norm(path) in self._repo_items_by_path():
-            return  # already present
+        self.add_repository(path)
+
+    def add_repository(self, path: str) -> str:
+        """List ``path`` on the tree, and in settings straight away.
+
+        Returns the path as it is stored, which is the spelling to select by:
+        a repository already listed under another spelling of the same path
+        (slashes, case) is not added twice, and selection compares paths as
+        strings.
+
+        Settings are updated now rather than at the next save because the tree
+        is what that save rebuilds them from -- and selecting the repository,
+        which records it as recently used, only records paths settings list.
+        """
+        listed = self._repo_items_by_path().get(self._norm(path))
+        if listed is not None:
+            return listed.data(0, Qt.ItemDataRole.UserRole).path
+        path = os.path.normpath(path)
         self._add_repo_row(path)
-        # A repo added by hand can bring submodules of its own with it.
+        # A repository can bring submodules of its own with it.
         for sub in git_ops.find_submodules(path):
             if self._norm(sub) not in self._repo_items_by_path():
                 self._add_repo_row(sub)
         self._refresh_counts()
+        repos, roots, watched = self._collect_repos_and_roots()
+        self.settings.repos = repos
+        self.settings.scan_roots = roots
+        self.settings.watched_roots = watched
+        return path
 
     def _add_repo_row(self, path: str) -> QTreeWidgetItem:
         """Insert a repo row under its containing repo, or its folder group."""

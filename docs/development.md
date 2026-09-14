@@ -62,6 +62,7 @@ uv run python tools/check_tag_version.py v0.3.1
 | `repo_config.py` | What belongs to a repository, the three tiers, and the bound view a run reads |
 | `jsonc.py` | JSON with comments, for the files people edit |
 | `git_ops.py` | Every git command. Nothing else shells out |
+| `starter_files.py` | README, .gitignore, .gitattributes and LICENSE for a new or existing repository. The templates ship in `resources/starter_templates.json`, refreshed by `tools/update_starter_templates.py` |
 | `commit_generator.py`, `estimate.py` | Writing a message, and pricing it first |
 | `agents/` | The four audits |
 | `review/` | Rules, profiles, languages, the reviewer |

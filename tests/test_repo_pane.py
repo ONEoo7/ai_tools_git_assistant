@@ -143,16 +143,20 @@ def test_the_commit_tab_keeps_its_run_settings_on_screen_with_the_list_folded(
         assert control.isVisibleTo(panel)
 
 
-@pytest.mark.parametrize("tab", ["AgentsPanel", "ReviewPanel", "BranchesTagsPanel"])
+@pytest.mark.parametrize(
+    "tab", ["AgentsPanel", "ReviewPanel", "BranchesTagsPanel", "CloneCreatePanel"]
+)
 def test_every_repo_driven_tab_folds_its_repository_list(qapp, settings, tab):
     from git_assistant.ui.agents_panel import AgentsPanel
     from git_assistant.ui.branches_tags_panel import BranchesTagsPanel
+    from git_assistant.ui.clone_create_panel import CloneCreatePanel
     from git_assistant.ui.review_panel import ReviewPanel
 
     build = {
         "AgentsPanel": AgentsPanel,
         "ReviewPanel": ReviewPanel,
         "BranchesTagsPanel": BranchesTagsPanel,
+        "CloneCreatePanel": CloneCreatePanel,
     }[tab]
     panel = build(settings)
 

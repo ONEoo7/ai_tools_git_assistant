@@ -9,6 +9,7 @@ from PyQt6.QtWidgets import QApplication  # noqa: E402
 from git_assistant.config import RepoEntry, Settings  # noqa: E402
 from git_assistant.ui.agents_panel import AgentsPanel  # noqa: E402
 from git_assistant.ui.busy_bar import BusyBar  # noqa: E402
+from git_assistant.ui.clone_create_panel import CloneCreatePanel  # noqa: E402
 from git_assistant.ui.preview_dialog import CommitPanel  # noqa: E402
 from git_assistant.ui.review_panel import ReviewPanel  # noqa: E402
 from git_assistant.ui.settings_dialog import SettingsDialog  # noqa: E402
@@ -126,7 +127,9 @@ def test_stopping_something_that_never_started_is_harmless(bar):
 
 
 # ---- the tabs no longer have their own -------------------------------------------
-@pytest.mark.parametrize("panel", [AgentsPanel, ReviewPanel, CommitPanel])
+@pytest.mark.parametrize(
+    "panel", [AgentsPanel, ReviewPanel, CommitPanel, CloneCreatePanel]
+)
 def test_no_tab_keeps_a_progress_bar_of_its_own(qapp, settings, panel):
     from PyQt6.QtWidgets import QProgressBar
 
@@ -134,7 +137,9 @@ def test_no_tab_keeps_a_progress_bar_of_its_own(qapp, settings, panel):
     assert not made.findChildren(QProgressBar)
 
 
-@pytest.mark.parametrize("panel", [AgentsPanel, ReviewPanel, CommitPanel])
+@pytest.mark.parametrize(
+    "panel", [AgentsPanel, ReviewPanel, CommitPanel, CloneCreatePanel]
+)
 def test_a_panel_without_a_window_still_runs(qapp, settings, panel):
     """The tray opens one on its own; reporting to nothing must be a no-op."""
     made = panel(settings) if panel is not CommitPanel else panel(settings, False)
@@ -147,7 +152,12 @@ def test_a_panel_without_a_window_still_runs(qapp, settings, panel):
 # ---- wired into the window ----------------------------------------------------------
 def test_the_window_has_one_and_every_tab_reports_to_it(qapp, settings):
     dialog = SettingsDialog(settings)
-    for panel in (dialog.commit_panel, dialog.agents_panel, dialog.review_panel):
+    for panel in (
+        dialog.clone_panel,
+        dialog.commit_panel,
+        dialog.agents_panel,
+        dialog.review_panel,
+    ):
         assert panel.busy is dialog.busy
 
 

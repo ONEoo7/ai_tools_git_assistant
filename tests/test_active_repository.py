@@ -145,12 +145,36 @@ def test_the_branch_is_the_green_the_repository_list_uses(app, settings):
 
 
 # ---- in the window ------------------------------------------------------------------
-def test_the_first_tab_is_called_commit(qapp, settings):
+def test_clone_and_create_sits_just_left_of_commit(qapp, settings):
+    from git_assistant.ui.settings_dialog import SettingsDialog
+
+    dlg = SettingsDialog(settings)
+    commit = dlg.tabs.indexOf(dlg.commit_panel)
+
+    assert dlg.tabs.tabText(commit) == "Commit"
+    assert dlg.tabs.widget(commit - 1) is dlg.clone_panel
+    assert dlg.tabs.tabText(commit - 1) == "Clone && Create"
+
+
+def test_the_window_still_opens_on_commit(qapp, settings):
+    """It is the tab used every day; a tab to its left does not change that."""
     from git_assistant.ui.settings_dialog import SettingsDialog
 
     dlg = SettingsDialog(settings)
 
-    assert dlg.tabs.tabText(dlg.tabs.indexOf(dlg.commit_panel)) == "Commit"
+    assert dlg.tabs.currentWidget() is dlg.commit_panel
+
+
+def test_choosing_a_repository_on_clone_and_create_updates_the_bar(
+    qapp, settings, repos
+):
+    from git_assistant.ui.settings_dialog import SettingsDialog
+
+    dlg = SettingsDialog(settings)
+    dlg.clone_panel.repo_picker.select(str(repos["beta"]))
+
+    assert dlg.identity_bar.repo_name.text() == "forks\\beta"
+    assert dlg.identity_bar.repo_branch.text() == "feature/login"
 
 
 def test_switching_branch_on_the_commit_tab_updates_the_bar(qapp, settings, repos):

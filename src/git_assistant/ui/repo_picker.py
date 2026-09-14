@@ -212,6 +212,28 @@ class RepoPicker(QWidget):
         item = self.repo_list.currentItem()
         return item.data(0, Qt.ItemDataRole.UserRole) if item else ""
 
+    def select(self, path: str) -> bool:
+        """Select ``path`` as a click would; False when it is not in the list.
+
+        Everything a click does: it becomes the active repository, is recorded as
+        recently used, saved, and `repoChanged` fires -- which is why this goes
+        through `_on_selected` rather than around it. A row that is already the
+        selected one does not change, so that is called directly.
+        """
+        groups = (
+            self.repo_list.topLevelItem(i)
+            for i in range(self.repo_list.topLevelItemCount())
+        )
+        everything = next((g for g in groups if g.text(0) == ALL_GROUP), None)
+        target = self._find(everything, path) if everything is not None else None
+        if target is None:
+            return False
+        if self.repo_list.currentItem() is target:
+            self._on_selected()
+        else:
+            self.repo_list.setCurrentItem(target)
+        return True
+
     def refresh_branches(self) -> None:
         """Re-read the branch beside each repository, leaving the tree alone.
 

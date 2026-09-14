@@ -19,6 +19,7 @@ from git_assistant.review import history as review_history  # noqa: E402
 from git_assistant.review import rules as review_rules  # noqa: E402
 from git_assistant.ui.agents_panel import AgentsPanel  # noqa: E402
 from git_assistant.ui.branches_tags_panel import BranchesTagsPanel  # noqa: E402
+from git_assistant.ui.clone_create_panel import CloneCreatePanel  # noqa: E402
 from git_assistant.ui.preview_dialog import SECTION_GAP, CommitPanel  # noqa: E402
 from git_assistant.ui.review_panel import ReviewPanel  # noqa: E402
 from git_assistant.ui.usage_pane import UsagePane  # noqa: E402
@@ -68,7 +69,8 @@ def _vertical_gaps(pane):
 
 
 @pytest.mark.parametrize(
-    "build", [CommitPanel, AgentsPanel, ReviewPanel, BranchesTagsPanel]
+    "build",
+    [CloneCreatePanel, CommitPanel, AgentsPanel, ReviewPanel, BranchesTagsPanel],
 )
 def test_every_pane_is_inset_from_the_handles_beside_it(qapp, settings, build):
     panel = build(settings) if build is not CommitPanel else build(settings, auto_start=False)

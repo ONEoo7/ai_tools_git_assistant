@@ -518,7 +518,22 @@ def test_closing_the_window_stops_a_running_agent(qapp, with_repo):
 
     dlg.close()
 
-    assert stopped == [True]
+    assert stopped and set(stopped) == {True}
+
+
+@pytest.mark.parametrize("close", ["reject", "close", "accept"])
+def test_every_way_of_closing_stops_what_is_running(qapp, with_repo, close):
+    """Esc is reject(), which never raises a closeEvent -- and used to skip this."""
+    dlg = SettingsDialog(with_repo)
+    stopped: list[str] = []
+    dlg.agents_panel.cancel_running = lambda: stopped.append("audit")
+    dlg.review_panel.cancel_running = lambda: stopped.append("review")
+    dlg.clone_panel.cancel_running = lambda: stopped.append("clone")
+    dlg.show()
+
+    getattr(dlg, close)()
+
+    assert {"audit", "review", "clone"} <= set(stopped)
 
 
 # ---- one setting, three places that show it -----------------------------------

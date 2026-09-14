@@ -68,8 +68,7 @@ same reason it always was: it belongs to the project.
 Profiles live in the settings a repository can carry, so a project can ship the
 standard it holds itself to. **Share with the repository** writes it to
 `.git-assistant/code-review-profile.json` — your own tables in full, the shipped
-ones by name. That is the only file this application ever writes into a working
-tree, and it takes an explicit press.
+ones by name. It is written into the working tree only on that explicit press.
 
 ## Rule sets
 

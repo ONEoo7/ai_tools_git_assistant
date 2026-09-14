@@ -185,3 +185,27 @@ def settings_with(settings=None, **values):
             setattr(base, name, value)
     base.save = lambda: None
     return repo_config.bind(base, base.active_repo)
+
+
+#: The ``.cmd`` that ``npm install -g`` writes for a package's command, in the
+#: shape current npm writes it. SCRIPT is the script node is to run.
+NPM_SHIM = (
+    "@ECHO off\r\nGOTO start\r\n:find_dp0\r\nSET dp0=%~dp0\r\nEXIT /b\r\n:start\r\n"
+    "SETLOCAL\r\nCALL :find_dp0\r\n\r\nIF EXIST \"%dp0%\\node.exe\" (\r\n"
+    "  SET \"_prog=%dp0%\\node.exe\"\r\n) ELSE (\r\n  SET \"_prog=node\"\r\n"
+    "  SET PATHEXT=%PATHEXT:;.JS;=;%\r\n)\r\n\r\n"
+    "endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & \"%_prog%\"  "
+    "\"%dp0%\\SCRIPT\" %*\r\n"
+)
+
+
+def npm_install(root, name, script_text="// the CLI\n", *, shim_text=NPM_SHIM):
+    """A CLI as ``npm install -g`` leaves it on Windows: ``<name>.cmd`` in
+    ``root``, naming ``node_modules\\<name>\\cli.js``. Returns (shim, script)."""
+    script = root / "node_modules" / name / "cli.js"
+    script.parent.mkdir(parents=True)
+    script.write_text(script_text, encoding="utf-8")
+    shim = root / f"{name}.cmd"
+    relative = f"node_modules\\{name}\\cli.js"
+    shim.write_text(shim_text.replace("SCRIPT", relative), encoding="utf-8")
+    return shim, script

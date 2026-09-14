@@ -1,5 +1,6 @@
 """The Repositories tab: submodules nest under the repository that contains them."""
 
+import os
 import subprocess
 import sys
 import time
@@ -317,3 +318,50 @@ def test_a_repository_added_by_hand_is_listed(
     dlg._on_add_repo()
 
     assert _listed(dlg) == ["alpha"]
+
+
+# ---- a repository made on another tab -----------------------------------------------
+def test_a_new_repository_is_listed_and_in_settings_at_once(
+    qapp, empty_settings, tmp_path
+):
+    """Selecting it records it as recently used -- which only happens for a path
+    settings already list, so the next autosave is too late."""
+    repo = _real_repo(tmp_path / "alpha")
+    dlg = SettingsDialog(empty_settings)
+
+    stored = dlg.add_repository(str(repo).replace("\\", "/"))
+
+    assert stored == os.path.normpath(str(repo))
+    assert _listed(dlg) == ["alpha"]
+    assert [entry.path for entry in empty_settings.repos] == [stored]
+
+
+def test_a_repository_already_listed_comes_back_under_its_stored_path(
+    qapp, empty_settings, tmp_path
+):
+    """Selection compares paths as strings: the one to select is the stored one."""
+    repo = _real_repo(tmp_path / "alpha")
+    dlg = SettingsDialog(empty_settings)
+    first = dlg.add_repository(str(repo))
+
+    again = dlg.add_repository(str(repo).replace("\\", "/") + "/")
+
+    assert again == first
+    assert len(list(dlg._all_repo_items())) == 1, "one row, not one per spelling"
+    if sys.platform == "win32":  # where case is not a different folder
+        assert dlg.add_repository(str(repo).upper()) == first
+        assert len(list(dlg._all_repo_items())) == 1
+
+
+def test_a_new_repository_survives_the_next_save_and_stays_active(
+    qapp, empty_settings, tmp_path
+):
+    repo = _real_repo(tmp_path / "alpha")
+    dlg = SettingsDialog(empty_settings)
+    stored = dlg.add_repository(str(repo))
+    empty_settings.active_repo = stored
+
+    dlg._autosave()
+
+    assert [entry.path for entry in empty_settings.repos] == [stored]
+    assert empty_settings.active_repo == stored

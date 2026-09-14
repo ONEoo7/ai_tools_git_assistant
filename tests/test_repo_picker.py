@@ -172,3 +172,45 @@ def test_the_row_reserves_room_for_the_branch(qapp, settings, repos):
     without = delegate.sizeHint(option, index)
 
     assert with_branch.width() > without.width()
+
+
+# ---- selecting from code ------------------------------------------------------------
+def test_selecting_a_repository_does_everything_a_click_does(qapp, settings, repos):
+    """A repository cloned on Clone & Create is selected this way."""
+    saved, changed = [], []
+    settings.save = lambda: saved.append(True)
+    picker = RepoPicker(settings)
+    picker.repoChanged.connect(changed.append)
+
+    assert picker.select(str(repos["beta"])) is True
+
+    assert picker.current_path() == str(repos["beta"])
+    assert settings.active_repo == str(repos["beta"])
+    assert settings.recent_repos[0] == str(repos["beta"])
+    assert (changed, saved) == ([str(repos["beta"])], [True])
+
+
+def test_selecting_the_repository_already_selected_is_still_announced(
+    qapp, settings, repos
+):
+    """The row does not change, so no click-like signal would fire on its own."""
+    picker = RepoPicker(settings)
+    changed = []
+    picker.repoChanged.connect(changed.append)
+
+    assert picker.select(str(repos["alpha"])) is True
+
+    assert changed == [str(repos["alpha"])]
+
+
+def test_a_repository_that_is_not_listed_cannot_be_selected(
+    qapp, settings, repos, tmp_path
+):
+    picker = RepoPicker(settings)
+    changed = []
+    picker.repoChanged.connect(changed.append)
+
+    assert picker.select(str(tmp_path / "elsewhere")) is False
+
+    assert changed == []
+    assert picker.current_path() == str(repos["alpha"])

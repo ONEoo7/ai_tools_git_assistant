@@ -126,13 +126,25 @@ def test_the_console_companion_refuses_to_open_a_tray_icon(tmp_path):
     assert _entry(["GitAssistantMcp.exe"], "GitAssistantMcp.exe") == 2
 
 
+@pytest.mark.parametrize(
+    "resource",
+    [
+        # Code Review: a build without them reviews against nothing.
+        "review_rules.json",
+        # Clone & Create: a build without them has no .gitignore or license to add.
+        "starter_templates.json",
+    ],
+)
 @pytest.mark.parametrize("spec", (*ONEDIR_SPECS, "git-assistant.spec"))
-def test_every_build_ships_the_review_rules(spec):
-    """Read at runtime, so a build without them reviews against nothing."""
+def test_every_build_ships_the_files_read_at_runtime(spec, resource):
     text = _read(spec)
     app = text[: text.index("mcp_a = Analysis")] if "mcp_a = Analysis" in text else text
-    assert "review_rules.json" in app
-    assert '"git_assistant/resources"' in app
+    assert resource in app
+    assert (ROOT / "src" / "git_assistant" / "resources" / resource).is_file()
+    datas = app[app.index("datas=[") : app.index("]", app.index("datas=["))]
+    assert '"git_assistant/resources"' in datas
+    name = resource.split(".")[0].upper()
+    assert f"(str({name}), " in datas, f"{resource} is declared but never shipped"
 
 
 # ---- Langfuse tracing ------------------------------------------------------------

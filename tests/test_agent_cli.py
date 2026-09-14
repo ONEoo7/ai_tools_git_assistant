@@ -20,6 +20,8 @@ from git_assistant.agent_cli import detect, resolved
 from git_assistant.agent_cli.client import CliClient, CliError
 from git_assistant.config import Settings
 
+from conftest import NPM_SHIM, npm_install
+
 CLAUDE_JSON = json.dumps(
     {
         "type": "result",
@@ -60,7 +62,11 @@ def installed(monkeypatch):
 
 
 class FakeProcess:
-    """Stands in for Popen. Records the call; never starts anything."""
+    """Stands in for Popen. Records the call; never starts anything.
+
+    Also records what was sent on stdin, and what the system prompt file said
+    while the call lasted -- it is gone once the call returns.
+    """
 
     last: dict = {}
 
@@ -68,8 +74,17 @@ class FakeProcess:
         FakeProcess.last = {"args": list(args), **kwargs}
         self.returncode = FakeProcess.code
 
-    def communicate(self, timeout=None):
-        return FakeProcess.stdout, FakeProcess.stderr
+    def communicate(self, input=None, timeout=None):
+        FakeProcess.last["input"] = input
+        # While the call lasts: the directory is removed as soon as it returns.
+        cwd = Path(FakeProcess.last.get("cwd") or ".")
+        FakeProcess.last["cwd_contents"] = sorted(p.name for p in cwd.iterdir())
+        args = FakeProcess.last["args"]
+        if "--system-prompt-file" in args:
+            held = Path(args[args.index("--system-prompt-file") + 1])
+            FakeProcess.last["system_file"] = held
+            FakeProcess.last["system"] = held.read_bytes()
+        return FakeProcess.stdout.encode(), FakeProcess.stderr.encode()
 
     def kill(self):
         FakeProcess.last["killed"] = True
@@ -132,8 +147,8 @@ def test_claude_always_replaces_its_own_system_prompt(installed, monkeypatch):
     _spawn(monkeypatch, stdout=CLAUDE_JSON)
     CliClient("claude").chat("sonnet", "be brief", "the diff", 512)
 
-    args = FakeProcess.last["args"]
-    assert args[args.index("--system-prompt") + 1] == "be brief"
+    assert "--system-prompt" not in FakeProcess.last["args"], "an argument"
+    assert FakeProcess.last["system"] == b"be brief"
 
 
 def test_claude_ignores_the_user_s_own_settings_and_project_files(
@@ -157,7 +172,16 @@ def test_every_call_runs_in_an_empty_directory_not_the_repository(
 
     where = Path(FakeProcess.last["cwd"])
     assert where.name.startswith("git-assistant-cli-")
-    assert not any(where.iterdir()) if where.exists() else True
+    assert FakeProcess.last["cwd_contents"] == []
+
+
+def test_claude_s_workspace_is_empty_too_system_prompt_file_and_all(
+    installed, monkeypatch
+):
+    _spawn(monkeypatch, stdout=CLAUDE_JSON)
+    CliClient("claude").chat("sonnet", "s", "u", 512)
+
+    assert FakeProcess.last["cwd_contents"] == []
 
 
 def test_a_directory_the_cli_still_holds_does_not_lose_the_answer(
@@ -178,10 +202,181 @@ def test_a_directory_the_cli_still_holds_does_not_lose_the_answer(
     assert seen.get("ignore_cleanup_errors") is True
 
 
-def test_nothing_is_read_from_stdin(installed, monkeypatch):
+def test_agy_is_given_nothing_to_read_on_stdin(installed, monkeypatch):
+    """It reads no prompt there; a CLI waiting on input must fail, not hang."""
+    _spawn(monkeypatch, stdout=AGY_JSON)
+    CliClient("agy").chat("gemini", "s", "u", 512)
+
+    assert FakeProcess.last["stdin"] is subprocess.DEVNULL
+    assert FakeProcess.last["input"] is None
+
+
+# ---- where the prompt goes: never where cmd.exe could read it -----------------------
+def test_no_part_of_a_claude_prompt_is_on_the_command_line(installed, monkeypatch):
+    _spawn(monkeypatch, stdout=CLAUDE_JSON)
+    CliClient("claude").chat("sonnet", "SYSTEM TEXT", "DIFF TEXT", 512)
+
+    joined = " ".join(FakeProcess.last["args"])
+    assert "SYSTEM TEXT" not in joined and "DIFF TEXT" not in joined
+    assert FakeProcess.last["stdin"] is subprocess.PIPE
+    assert FakeProcess.last["input"] == b"DIFF TEXT"
+
+
+def test_the_prompt_arrives_byte_for_byte(installed, monkeypatch):
+    """A text pipe on Windows would add a carriage return to every line."""
+    _spawn(monkeypatch, stdout=CLAUDE_JSON)
+    system, diff = "Be terse.\nNo emoji.", "+line one\n-line two\r\n+ünïcode\n"
+
+    CliClient("claude").chat("sonnet", system, diff, 512)
+
+    assert FakeProcess.last["input"] == diff.encode("utf-8")
+    assert FakeProcess.last["system"] == system.encode("utf-8")
+
+
+def test_the_system_prompt_file_is_not_in_the_directory_the_cli_runs_in(
+    installed, monkeypatch
+):
+    """That directory is empty on purpose: it is the fence around the agent."""
     _spawn(monkeypatch, stdout=CLAUDE_JSON)
     CliClient("claude").chat("sonnet", "s", "u", 512)
-    assert FakeProcess.last["stdin"] is subprocess.DEVNULL
+
+    held = FakeProcess.last["system_file"]
+    assert held.parent != Path(FakeProcess.last["cwd"])
+    assert not held.exists(), "removed once the call is over"
+
+
+@pytest.mark.parametrize(
+    "model",
+    [
+        'sonnet" & calc & "',
+        "--dangerously-skip-permissions",
+        "opus 4",
+        "a&b",
+        "x%PATH%",
+    ],
+)
+def test_a_model_name_that_is_not_one_never_reaches_the_command_line(
+    installed, monkeypatch, model
+):
+    _spawn(monkeypatch, stdout=CLAUDE_JSON)
+
+    with pytest.raises(CliError, match="not a model name"):
+        CliClient("claude").chat(model, "s", "u", 512)
+    assert FakeProcess.last == {}, "nothing was started"
+
+
+@pytest.mark.parametrize(
+    "model",
+    ["sonnet", "claude-sonnet-4-6", "opus[1m]", "us.anthropic.claude-opus-4-1-v1:0"],
+)
+def test_real_model_names_are_all_accepted(installed, monkeypatch, model):
+    _spawn(monkeypatch, stdout=CLAUDE_JSON)
+    CliClient("claude").chat(model, "s", "u", 512)
+
+    args = FakeProcess.last["args"]
+    assert args[args.index("--model") + 1] == model
+
+
+def test_a_batch_file_that_is_not_an_npm_shim_is_never_started(monkeypatch, tmp_path):
+    shim = tmp_path / "claude.cmd"
+    shim.write_text("@echo off\r\necho %*\r\n", encoding="utf-8")
+    monkeypatch.setattr(detect, "locate", lambda name: str(shim))
+    _spawn(monkeypatch, stdout=CLAUDE_JSON)
+
+    with pytest.raises(CliError, match="batch file") as raised:
+        CliClient("claude").chat("sonnet", "s", "u", 512)
+
+    assert FakeProcess.last == {}, "nothing was started"
+    assert detect.INSTALL_COMMANDS["claude"] in str(raised.value)
+
+
+# ---- how a CLI found on PATH is started ---------------------------------------------
+#: How npm wrote a shim before its current shape: the same script, named twice.
+OLD_NPM_SHIM = (
+    "@IF EXIST \"%~dp0\\node.exe\" (\r\n"
+    "  \"%~dp0\\node.exe\"  \"%~dp0\\SCRIPT\" %*\r\n"
+    ") ELSE (\r\n  @SETLOCAL\r\n  @SET PATHEXT=%PATHEXT:;.JS;=;%\r\n"
+    "  node  \"%~dp0\\SCRIPT\" %*\r\n)\r\n"
+)
+
+
+def _npm(tmp_path, *, node_beside=True, shim_text=NPM_SHIM):
+    """What `npm install -g` leaves: a shim, the package, and sometimes a node."""
+    npm = tmp_path / "npm"
+    shim, script = npm_install(npm, "claude", shim_text=shim_text)
+    if node_beside:
+        (npm / "node.exe").write_bytes(b"")
+    return shim, script
+
+
+def test_a_program_is_started_as_it_is(tmp_path):
+    program = tmp_path / "claude.exe"
+    program.write_bytes(b"")
+    assert detect.command(str(program)) == [str(program)]
+
+
+@pytest.mark.parametrize("shim_text", [NPM_SHIM, OLD_NPM_SHIM], ids=["npm", "old npm"])
+def test_an_npm_shim_is_started_as_node_and_its_script(tmp_path, shim_text):
+    shim, script = _npm(tmp_path, shim_text=shim_text)
+
+    assert detect.command(str(shim)) == [str(shim.parent / "node.exe"), str(script)]
+
+
+def test_an_npm_shim_with_no_node_beside_it_uses_the_node_on_path(
+    tmp_path, monkeypatch
+):
+    shim, script = _npm(tmp_path, node_beside=False)
+    monkeypatch.setattr(detect, "node_program", lambda: "C:/nodejs/node.exe")
+
+    assert detect.command(str(shim)) == ["C:/nodejs/node.exe", str(script)]
+
+
+def test_an_npm_shim_is_refused_when_there_is_no_node_to_run_it(
+    tmp_path, monkeypatch
+):
+    shim, _script = _npm(tmp_path, node_beside=False)
+    monkeypatch.setattr(detect, "node_program", lambda: "")
+
+    with pytest.raises(detect.UnsafeProgram):
+        detect.command(str(shim))
+
+
+def test_a_scoop_shim_is_judged_by_what_it_starts(tmp_path):
+    shim, script = _npm(tmp_path)
+    program = tmp_path / "scoop" / "shims" / "claude.exe"
+    program.parent.mkdir(parents=True)
+    program.write_bytes(b"")
+    program.with_suffix(".shim").write_text(f'path = "{shim}"\n', encoding="utf-8")
+
+    assert detect.command(str(program)) == [str(shim.parent / "node.exe"), str(script)]
+
+
+@pytest.mark.skipif(os.name != "nt", reason="PATHEXT and .cmd are Windows")
+def test_a_native_program_is_preferred_to_an_npm_shim_earlier_on_path(
+    tmp_path, monkeypatch
+):
+    shim, _script = _npm(tmp_path)
+    native = tmp_path / "native"
+    native.mkdir()
+    (native / "claude.exe").write_bytes(b"")
+    searched = os.pathsep.join([str(shim.parent), str(native)])
+    monkeypatch.setattr(detect, "search_path", lambda: searched)
+
+    assert detect.locate("claude").lower() == str(native / "claude.exe").lower()
+
+
+def test_probing_a_batch_file_it_will_not_start_says_why(tmp_path, monkeypatch):
+    shim = tmp_path / "claude.cmd"
+    shim.write_text("@echo off\r\necho %*\r\n", encoding="utf-8")
+    monkeypatch.setattr(detect, "locate", lambda name: str(shim))
+
+    def started(*args, **kwargs):
+        raise AssertionError("the batch file was run")
+
+    monkeypatch.setattr(subprocess, "run", started)
+    found = detect.probe("claude")
+
+    assert found.installed and "batch file" in found.problem
 
 
 # ---- reading the answers ------------------------------------------------------------
@@ -257,7 +452,9 @@ def test_agy_gets_the_two_halves_folded_and_labelled(installed, monkeypatch):
 def test_claude_keeps_them_apart(installed, monkeypatch):
     _spawn(monkeypatch, stdout=CLAUDE_JSON)
     CliClient("claude").chat("sonnet", "You are terse.", "the diff", 512)
-    assert FakeProcess.last["args"][2] == "the diff"
+
+    assert FakeProcess.last["input"] == b"the diff"
+    assert FakeProcess.last["system"] == b"You are terse."
 
 
 # ---- models and context --------------------------------------------------------------
@@ -509,14 +706,17 @@ def test_concurrent_calls_do_not_take_each_other_s_process(installed, monkeypatc
 
 
 def test_cancel_stops_everything_in_flight(installed, monkeypatch):
+    """Each with everything it started: see test_processes for the real thing."""
     _spawn(monkeypatch, stdout=CLAUDE_JSON)
     client = CliClient("claude")
     first, second = FakeProcess([], stdin=None), FakeProcess([], stdin=None)
     client._running = {first, second}
+    ended = []
+    monkeypatch.setattr(client_mod.processes, "kill_tree", ended.append)
 
     client.cancel()
 
-    assert FakeProcess.last.get("killed") is True
+    assert set(ended) == {first, second}
     assert client._cancelled
 
 

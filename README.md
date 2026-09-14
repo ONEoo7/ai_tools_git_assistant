@@ -16,19 +16,33 @@ The tray icon opens the window. Its right-click menu is three items — **Git
 Assistant**, **About**, **Exit** — because everything else belongs in the window.
 
 Every tab that acts on a repository picks one from the same list: **Recently
-Used** at the top, five at most, and **All** below it in alphabetical order with
-each repository's submodules folded away until you open them. A repository you
+Used** at the top, most recent first, and **All** below it in alphabetical order
+with each repository's submodules folded away until you open them. A repository you
 have just used appears in both — All means all, so nothing ever moves out of the
 place you expect to find it.
 
 Above the tabs, on every one of them, sits the bar that says what the *active
 repository* is configured with: **Commit as** (the identity the next commit will
-carry) and **Active Settings** (which of the three settings files is in force).
+carry), **Active Settings** (which of the three settings files is in force) and
+**Active Repository** (which repository, and which branch, the tabs work on).
 Top right is the theme picker: follow the system, light, dark, or pink.
 
 ---
 
 ## What it does, tab by tab
+
+### Clone & Create
+
+| | |
+|---|---|
+| **Clone** | A URL or a folder, where to put it, and how much history: all of it, or a shallow copy of the last few commits of *every* branch. Git's progress shows as it works; **Cancel** stops it and removes what was downloaded. |
+| **Create** | A new repository in a folder of your choosing, starting on the branch you name. |
+| **Starter files** | An empty `README.md`; a `.gitignore` for the languages you tick — the same list as Code Review, from GitHub's gitignore collection; a `.gitattributes` saying which files get LF, CRLF or native line endings; an MIT or Apache 2.0 `LICENSE`. Each is previewed before it is written, into a new repository or the one selected. |
+
+A repository cloned or created here joins the list and is selected. Nothing
+already in a repository is overwritten without asking: a README never, a license
+only when you confirm, and `.gitignore` and `.gitattributes` are added to rather
+than rewritten. Nothing is staged or committed.
 
 ### Commit
 

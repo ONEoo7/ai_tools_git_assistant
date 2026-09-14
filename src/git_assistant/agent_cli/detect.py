@@ -13,11 +13,14 @@ Two answers, and both are needed:
 - read the PATH back out of the registry rather than out of the environment, and
 - know where each installer puts things, because those locations are fixed and
   a direct check answers even when the registry read does not.
+
+And one thing found must never be run as it is: a **batch file**. See `command`.
 """
 
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -122,16 +125,115 @@ def locate(name: str) -> str:
     PATH first, then the places the installers are known to use. The second
     check is not a fallback for tidiness -- it is what makes an install
     detectable in the same session that performed it, whatever the registry did.
+
+    A batch file found first on PATH -- ``npm install -g`` puts a ``.cmd`` there
+    -- gives way to a real program of the same name found anywhere else: that is
+    what the vendors' own installers put down, and it needs no shim read to be
+    started safely (see `command`).
     """
-    found = shutil.which(name, path=search_path())
-    if found:
+    path = search_path()
+    found = shutil.which(name, path=path)
+    if found and not is_batch_file(found):
         return found
     home = Path.home()
-    for relative in KNOWN_LOCATIONS.get(name, ()):
-        candidate = home / relative
-        if candidate.is_file():
-            return str(candidate)
-    return ""
+    native = [shutil.which(f"{name}.exe", path=path)] if sys.platform == "win32" else []
+    native += [str(home / relative) for relative in KNOWN_LOCATIONS.get(name, ())]
+    for candidate in native:
+        if candidate and Path(candidate).is_file() and not is_batch_file(candidate):
+            return candidate
+    return found or ""
+
+
+# ---- starting it without cmd.exe ---------------------------------------------------
+#: What Windows starts through cmd.exe rather than as a program.
+BATCH_SUFFIXES = (".bat", ".cmd")
+
+#: The line an npm shim ends with: ``"%dp0%\node_modules\...\cli.js" %*`` (older
+#: npm wrote ``%~dp0``). The script is what the shim exists to start.
+_NPM_SCRIPT_RE = re.compile(r'"%~?dp0%?\\([^"%]+?\.[cm]?js)"\s+%\*', re.IGNORECASE)
+
+#: A Scoop shim is a real program that starts whatever its ``.shim`` file names.
+_SCOOP_TARGET_RE = re.compile(r'^\s*path\s*=\s*"?([^"\r\n]+?)"?\s*$', re.MULTILINE)
+
+
+class UnsafeProgram(Exception):
+    """A program that cannot be handed a prompt without cmd.exe reading it."""
+
+
+def is_batch_file(path: str) -> bool:
+    return Path(path).suffix.lower() in BATCH_SUFFIXES
+
+
+def command(path: str) -> list[str]:
+    """How to start the program at ``path`` so that nothing reads its arguments
+    as commands.
+
+    A program is started as it is. A batch file is not, ever: Windows runs one
+    through cmd.exe, and cmd.exe reads the arguments as a command line of its
+    own. Python quotes an argument for programs, escaping a quote as ``\\"``,
+    which cmd.exe does not understand -- so a quote and an ``&`` in a prompt,
+    and the rest of the prompt is a command. The prompt is a diff, and a diff
+    is whatever a repository contains.
+
+    An npm shim is started as what it starts, ``node <script>``. Any other
+    batch file is refused. A Scoop shim, a program that starts the file its
+    ``.shim`` names, is judged by that file.
+
+    Raises `UnsafeProgram` saying what to do instead.
+    """
+    target = Path(path)
+    named = _scoop_target(target)
+    if named is not None:
+        target = named
+    if not is_batch_file(str(target)):
+        return [path]
+    started = _npm_command(target)
+    if started is not None:
+        return started
+    install = INSTALL_COMMANDS.get(target.stem.lower(), "")
+    raise UnsafeProgram(
+        f"{target} is a batch file, and a prompt handed to one is read by cmd.exe, "
+        "where the text of a diff can run as a command. It will not be started. "
+        + (
+            f"Install the program itself instead, from PowerShell: {install}"
+            if install
+            else "Install the program itself, not a script that starts it."
+        )
+    )
+
+
+def _npm_command(shim: Path) -> list[str] | None:
+    """``[node, script]`` for an npm shim, or None when it is not one."""
+    try:
+        text = shim.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    found = _NPM_SCRIPT_RE.search(text)
+    if found is None:
+        return None
+    script = shim.parent / found.group(1)
+    if not script.is_file():
+        return None
+    # The shim's own rule: a node.exe beside it, else whichever node is on PATH.
+    beside = shim.parent / "node.exe"
+    node = str(beside) if beside.is_file() else node_program()
+    return [node, str(script)] if node else None
+
+
+def node_program() -> str:
+    """The node on PATH, when it is a program rather than another batch file."""
+    found = shutil.which("node", path=search_path())
+    return found if found and not is_batch_file(found) else ""
+
+
+def _scoop_target(program: Path) -> Path | None:
+    """What a Scoop shim starts, read from the ``.shim`` file beside it."""
+    try:
+        text = program.with_suffix(".shim").read_text(encoding="utf-8")
+    except (OSError, ValueError):
+        return None
+    found = _SCOOP_TARGET_RE.search(text)
+    return Path(found.group(1)) if found else None
 
 
 def child_env() -> dict[str, str]:
@@ -156,8 +258,13 @@ def probe(name: str, version_args: tuple[str, ...] = ("--version",)) -> Found:
     if not path:
         return Found(name=name)
     try:
+        started = command(path)
+    except UnsafeProgram as exc:
+        # Said now, on the Connection & Model tab, rather than at the first run.
+        return Found(name=name, path=path, problem=str(exc))
+    try:
         done = subprocess.run(
-            [path, *version_args],
+            [*started, *version_args],
             capture_output=True,
             text=True,
             timeout=PROBE_TIMEOUT,

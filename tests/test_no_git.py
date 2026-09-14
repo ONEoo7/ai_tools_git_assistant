@@ -89,6 +89,24 @@ def test_listing_branches_is_empty_rather_than_fatal(no_git):
     assert git_ops.list_branches("/x/repo") == []
 
 
+def test_cloning_reports_the_failure_rather_than_raising(no_git, tmp_path):
+    result = git_ops.clone("https://example.com/org/repo.git", tmp_path / "copy")
+
+    assert not result.ok
+    assert result.returncode == git_ops.NOT_INSTALLED
+    assert git_ops.GIT_MISSING in result.stderr
+    assert not result.cancelled
+
+
+def test_creating_a_repository_reports_the_failure_rather_than_raising(
+    no_git, tmp_path
+):
+    result = git_ops.init(tmp_path / "project", initial_branch="main")
+
+    assert not result.ok
+    assert result.returncode == git_ops.NOT_INSTALLED
+
+
 def test_asking_for_a_diff_reports_the_failure(no_git):
     """Callers that raise GitError on failure still do; they just do not crash."""
     try:

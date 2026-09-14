@@ -14,6 +14,11 @@ ICON = ROOT / "src" / "git_assistant" / "resources" / "icon.ico"
 # The rules the Code Review tab ships with. Read at runtime through
 # git_assistant.packaged.data_file, so it has to land beside the icon.
 REVIEW_RULES = ROOT / "src" / "git_assistant" / "resources" / "review_rules.json"
+# The .gitignore templates and license texts the Clone & Create tab writes into a
+# repository. Read the same way, from the same folder.
+STARTER_TEMPLATES = (
+    ROOT / "src" / "git_assistant" / "resources" / "starter_templates.json"
+)
 
 # Shared with the onedir spec so both builds describe themselves identically.
 sys.path.insert(0, str(ROOT / "tools"))
@@ -40,6 +45,7 @@ a = Analysis(
         # Ship the .ico so the tray/window icon resolves at runtime.
         (str(ICON), "git_assistant/resources"),
         (str(REVIEW_RULES), "git_assistant/resources"),
+        (str(STARTER_TEMPLATES), "git_assistant/resources"),
         *_lf_datas,
     ],
     # `anthropic` is imported inside a function (git_assistant.claude_client)

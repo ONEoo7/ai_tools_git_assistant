@@ -6,6 +6,7 @@ The workers:
 - ``ReviewWorker``     : reviews the marked files against a rule table.
 - ``AgentWorker``      : runs the ticked repository audits, which can take minutes.
 - ``SetupWorker``      : installs LM Studio and downloads a model.
+- ``CloneWorker``      : clones a repository, passing on git's progress.
 - ``FunctionWorker``   : runs an arbitrary callable (e.g. listing models) off-thread.
 
 Each is a QObject meant to be moved onto a QThread; see ``run_worker`` for the
@@ -295,6 +296,47 @@ class SetupWorker(QObject):
             self.finished.emit(lmstudio_setup.run(self._settings, ctx))
         except lmstudio_setup.Cancelled:
             self.error.emit("Cancelled.")
+        except Exception as exc:  # surface any failure to the UI
+            self.error.emit(str(exc))
+
+
+class CloneWorker(QObject):
+    """Clones a repository: minutes of network, so it reports and can be stopped.
+
+    A cancelled clone still ends in `finished`, with ``cancelled`` set on the
+    result -- which also says whether anything was left behind. `error` is for
+    what `git_ops.clone` never meant to raise.
+    """
+
+    progress = pyqtSignal(str)
+    percent = pyqtSignal(int)
+    finished = pyqtSignal(object)  # git_ops.CloneResult
+    error = pyqtSignal(str)
+
+    def __init__(self, url: str, destination: str, *, depth: int | None = None) -> None:
+        super().__init__()
+        self.url = url
+        self.destination = destination
+        self.depth = depth
+        self._cancelled = False
+
+    def cancel(self) -> None:
+        self._cancelled = True
+
+    def run(self) -> None:
+        from git_assistant import git_ops
+
+        try:
+            self.finished.emit(
+                git_ops.clone(
+                    self.url,
+                    self.destination,
+                    depth=self.depth,
+                    on_progress=self.progress.emit,
+                    on_percent=self.percent.emit,
+                    is_cancelled=lambda: self._cancelled,
+                )
+            )
         except Exception as exc:  # surface any failure to the UI
             self.error.emit(str(exc))
 

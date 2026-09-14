@@ -18,15 +18,28 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
-from git_assistant.git_ops import _NO_WINDOW
+from git_assistant import processes
 
 #: How often a consumer should look at the cancel flag. Cheap enough to be
 #: responsive, rare enough not to show up in a profile.
 CANCEL_EVERY = 20_000
 
+#: Seconds a git whose pipes have been closed gets to exit on its own, before
+#: everything it started is killed.
+_GRACE = 0.5
+
 
 def _kill(proc: subprocess.Popen | None) -> None:
-    """End a child that may still be running, and wait for it to go."""
+    """End a child that may still be running, and wait for it to go.
+
+    Closing its pipes is usually all it takes: git stops at its next write to a
+    pipe nobody reads, or at the end of the input it was reading -- and a git
+    that finished has nothing left to do, so its caller pays no more than that.
+    One still there a moment later is killed along with everything it started.
+    The git on PATH is a launcher, and killing only the process started here
+    would leave the real git working on until it next writes, which a long walk
+    through a large pack may not do for a while (see git_assistant.processes).
+    """
     if proc is None:
         return
     for stream in (proc.stdout, proc.stdin):
@@ -35,12 +48,14 @@ def _kill(proc: subprocess.Popen | None) -> None:
                 stream.close()
         except OSError:
             pass
-    if proc.poll() is None:
-        proc.kill()
     try:
-        proc.wait(timeout=5)
+        proc.wait(timeout=_GRACE)
     except subprocess.TimeoutExpired:
-        pass
+        processes.kill_tree(proc)
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
 
 
 def _popen(repo: str | Path, args: list[str], **kwargs) -> subprocess.Popen:
@@ -56,7 +71,7 @@ def _popen(repo: str | Path, args: list[str], **kwargs) -> subprocess.Popen:
             ["git", "-C", str(repo), *args],
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
-            creationflags=_NO_WINDOW,
+            **processes.killable(),
             **kwargs,
         )
     except OSError as exc:
