@@ -1273,6 +1273,7 @@ def test_ignoring_a_repositorys_own_settings_is_called_out(
     )
     # And in the bar, where the choice is made, as a flag with the sentence on it.
     assert dlg.identity_bar.tier_warning.text() == "Repo settings exist"
+    assert not dlg.identity_bar.tier_warning.isHidden()
     assert "Not recommended setup" in dlg.identity_bar.tier_warning.toolTip()
 
 
@@ -1287,6 +1288,7 @@ def test_the_bar_says_which_settings_the_active_repository_runs_on(
 
     assert dlg.identity_bar.tier_combo.currentData() == "repo"
     assert dlg.identity_bar.tier_warning.text() == ""
+    assert dlg.identity_bar.tier_warning.isHidden()  # and takes no room
 
 
 def test_the_bar_offers_nothing_to_choose_without_a_repository(qapp, with_repo):
@@ -1298,6 +1300,7 @@ def test_the_bar_offers_nothing_to_choose_without_a_repository(qapp, with_repo):
 
     assert not dlg.identity_bar.tier_combo.isEnabled()
     assert dlg.identity_bar.tier_warning.text() == ""
+    assert dlg.identity_bar.tier_warning.isHidden()
 
 
 def test_no_warning_when_there_are_no_repo_settings_to_ignore(

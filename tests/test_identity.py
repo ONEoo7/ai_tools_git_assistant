@@ -436,7 +436,7 @@ def test_bar_reports_what_will_authenticate_a_push(qapp, settings, store, repo):
     _git(repo, "remote", "add", "origin", "https://ONEoo7@github.com/ONEoo7/x.git")
     bar = IdentityBar(settings, store)
 
-    assert bar.auth_status.text() == "push: github.com as ONEoo7"
+    assert bar.auth_status.text() == "github.com as ONEoo7"  # after "Push to:"
     assert bar.auth_status.styleSheet() == INFO_STYLE
 
 

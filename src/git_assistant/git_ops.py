@@ -570,6 +570,17 @@ class PushAuth:
             return f"push: {self.host} as {self.account}"
         return f"push: {self.host}"
 
+    def destination(self) -> str:
+        """`summary` for a readout that is already captioned "Push to:"."""
+        if not self.kind:
+            return "no remote"
+        if self.kind == "ssh":
+            via = "default key" if self.shared else "key from SSH config"
+            return f"{self.host} over SSH ({via})"
+        if self.account:
+            return f"{self.host} as {self.account}"
+        return self.host
+
     def warning(self) -> str:
         """Why the credential may not be the one this identity implies."""
         if not self.shared:

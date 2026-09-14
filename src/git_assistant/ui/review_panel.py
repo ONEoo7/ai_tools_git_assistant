@@ -16,7 +16,7 @@ import html
 from datetime import date
 from pathlib import Path
 
-from PyQt6.QtCore import Qt, QUrl
+from PyQt6.QtCore import Qt, QUrl, pyqtSignal
 from PyQt6.QtGui import QColor, QDesktopServices, QGuiApplication
 from PyQt6.QtWidgets import (
     QCheckBox,
@@ -91,6 +91,10 @@ _MUTED = QColor("#888888")
 
 class ReviewPanel(QWidget):
     """Pick a repository and a rule table, mark files, review them."""
+
+    #: The provider was changed here; it is application-wide, so the bar above
+    #: the tabs names it too.
+    providerChanged = pyqtSignal()  # noqa: N815 - Qt signal naming
 
     def __init__(self, settings: Settings, before_run=None, parent=None) -> None:
         super().__init__(parent)
@@ -734,6 +738,7 @@ class ReviewPanel(QWidget):
         self.settings.provider = key
         self.settings.save()
         self.refresh_provider()  # the model line belongs to the new provider
+        self.providerChanged.emit()
 
     def _on_repo_changed(self, _path: str = "") -> None:
         self._refresh_tables()

@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from git_assistant import CONTRIBUTORS, PROJECT_URL, __author__, __version__
+from git_assistant import AUTHOR_URL, CONTRIBUTORS, PROJECT_URL, __author__, __version__
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -36,6 +36,10 @@ def test_the_link_is_https():
     assert PROJECT_URL.startswith("https://")
 
 
+def test_the_author_links_to_their_github():
+    assert AUTHOR_URL == "https://github.com/ONEoo7"
+
+
 # ---- what the window shows ------------------------------------------------------
 pytest.importorskip("PyQt6.QtWidgets")
 
@@ -57,9 +61,41 @@ def dialog(qapp):
     return SettingsDialog(s)
 
 
+# ---- the foot of the window ---------------------------------------------------------
+def test_the_author_is_credited_left_of_the_version(dialog):
+    from PyQt6.QtGui import QTextDocument
+
+    shown = QTextDocument()
+    shown.setHtml(dialog.credit.text())
+
+    assert shown.toPlainText() == f"Git Assistant by {__author__}"
+    row = dialog._version_row
+    assert row.indexOf(dialog.credit) < row.indexOf(dialog.version_current)
+
+
+def test_only_the_name_is_the_link(dialog):
+    text = dialog.credit.text()
+    assert f'<a href="{AUTHOR_URL}"' in text
+    assert text.index("Git Assistant by") < text.index("<a ")
+    assert text.endswith(f">{__author__}</a>")
+
+
+def test_clicking_the_name_opens_their_github(dialog, monkeypatch):
+    import git_assistant.ui.settings_dialog as dialog_mod
+
+    opened = []
+    monkeypatch.setattr(
+        dialog_mod.QDesktopServices, "openUrl", staticmethod(opened.append)
+    )
+
+    dialog.credit.linkActivated.emit(AUTHOR_URL)
+
+    assert [url.toString() for url in opened] == [AUTHOR_URL]
+
+
 # ---- the About box ----------------------------------------------------------------
-# The link and the author were along the bottom of the window before this
-# existed. One place for all three facts beat two of them on every tab.
+# The project link and the contributors are in here; the author is credited
+# along the foot of the window as well.
 def test_there_is_an_about_button(dialog):
     assert dialog.about_btn.text() == "About"
 

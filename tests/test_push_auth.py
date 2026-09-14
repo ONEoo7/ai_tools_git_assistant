@@ -46,7 +46,27 @@ def test_no_remote_is_reported_as_such(repo):
     auth = git_ops.describe_push_auth(repo)
     assert auth.kind == ""
     assert auth.summary() == "no remote"
+    assert auth.destination() == "no remote"
     assert auth.warning() == ""
+
+
+@pytest.mark.parametrize(
+    "url, destination",
+    [
+        ("https://ONEoo7@github.com/ONEoo7/thing.git", "github.com as ONEoo7"),
+        ("https://github.com/ONEoo7/thing.git", "github.com"),
+        ("git@github.com:ONEoo7/thing.git", "github.com over SSH (default key)"),
+        (
+            "git@github-personal:ONEoo7/thing.git",
+            "github-personal over SSH (key from SSH config)",
+        ),
+    ],
+)
+def test_the_destination_reads_on_after_a_push_to_caption(repo, url, destination):
+    """The bar captions it "Push to:", so it does not say "push" again."""
+    auth = _with_remote(repo, url)
+
+    assert auth.destination() == destination
 
 
 # ---- HTTPS -----------------------------------------------------------------

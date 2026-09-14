@@ -15,18 +15,20 @@ from is the Identities tab's business; which one is in force is this row's.
 
 from __future__ import annotations
 
-from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QPalette
+from PyQt6.QtCore import QRect, QSize, Qt, pyqtSignal
+from PyQt6.QtGui import QColor, QPainter, QPalette
 from PyQt6.QtWidgets import (
+    QWIDGETSIZE_MAX,
     QApplication,
     QComboBox,
     QHBoxLayout,
     QLabel,
     QMessageBox,
+    QSizePolicy,
     QWidget,
 )
 
-from git_assistant import git_ops, repo_config
+from git_assistant import git_ops, providers, repo_config
 from git_assistant.config import RepoEntry, Settings
 from git_assistant.identities import IdentityStore
 from git_assistant.ui import theme
@@ -40,6 +42,144 @@ UNSAVED = "__unsaved__"
 
 INFO_STYLE = "color: #8ab;"
 WARN_STYLE = "color: #b36b00;"
+
+
+class _Shrinking(QLabel):
+    """A readout that can be drawn narrower than its text, cut short with "…".
+
+    A plain label given less room than its text is clipped mid-letter, with
+    nothing to say that there was more. Only what is painted is cut: `text()`
+    is still the whole text, and the tooltip goes on saying what it said.
+    """
+
+    def __init__(self, mode: Qt.TextElideMode = Qt.TextElideMode.ElideRight) -> None:
+        super().__init__("")
+        self._mode = mode
+        # Drawn as it reads, never as markup: a repository's label and a model's
+        # name are someone else's text, and what is cut is characters.
+        self.setTextFormat(Qt.TextFormat.PlainText)
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802 - Qt naming
+        hint = super().minimumSizeHint()
+        # Two letters and the ellipsis: any narrower, and all it could show is
+        # that something was cut.
+        least = self.fontMetrics().horizontalAdvance("MM…")
+        return QSize(min(hint.width(), least), hint.height())
+
+    def shown(self) -> str:
+        """What is painted: the text, cut short to the width it has been given."""
+        return self.fontMetrics().elidedText(
+            self.text(), self._mode, self.contentsRect().width()
+        )
+
+    def paintEvent(self, _event) -> None:  # noqa: N802 - Qt naming
+        painter = QPainter(self)
+        try:
+            self.style().drawItemText(
+                painter,
+                self.contentsRect(),
+                self.alignment().value,
+                self.palette(),
+                self.isEnabled(),
+                self.shown(),
+                self.foregroundRole(),
+            )
+        finally:
+            painter.end()
+
+
+class _Divider(QWidget):
+    """The upright line between one group on the bar and the next."""
+
+    #: The line and the room either side of it.
+    WIDTH = 9
+
+    #: How much of the text colour the line is drawn with, out of 255: enough to
+    #: see where one group ends, not so much that it reads as a character.
+    INK = 80
+
+    def __init__(self) -> None:
+        super().__init__()
+        # Fixed by policy rather than by `setFixedWidth`: an explicit minimum is
+        # one a row with no room left would have to draw over its neighbours.
+        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
+        theme.on_change(self._repaint)
+
+    def sizeHint(self) -> QSize:  # noqa: N802 - Qt naming
+        return QSize(self.WIDTH, self.fontMetrics().height())
+
+    def colour(self) -> QColor:
+        """The text colour of the theme in force, faded.
+
+        Read off the application's palette at the time, as the branch's green
+        is: a widget's own palette is not told when the theme changes.
+        """
+        ink = QApplication.palette().color(QPalette.ColorRole.WindowText)
+        ink.setAlpha(self.INK)
+        return ink
+
+    def paintEvent(self, _event) -> None:  # noqa: N802 - Qt naming
+        # As tall as a line of the text beside it, and centred on it.
+        height = min(self.fontMetrics().height(), self.height())
+        line = QRect(self.width() // 2, (self.height() - height) // 2, 1, height)
+        painter = QPainter(self)
+        try:
+            painter.fillRect(line, self.colour())
+        finally:
+            painter.end()
+
+    def _repaint(self) -> None:
+        self.update()
+
+
+class _Row(QHBoxLayout):
+    """The bar's row, which decides what is cut short when there is no room.
+
+    Qt's own row takes the same few pixels from everything that can spare them,
+    which cut "gpt-4o-mini" to "gpt…" to spare a sentence that had plenty to
+    lose. Here the readouts give way one at a time, in the order they were
+    offered: each only as far as it still reads, and only once every one of
+    them is that short do they carry on, in the same order, to an ellipsis.
+    """
+
+    def __init__(self, parent: QWidget) -> None:
+        super().__init__(parent)
+        self._giving: list[tuple[QWidget, int]] = []
+
+    def give_way(self, widget: QWidget, readable: int) -> None:
+        """Let `widget` be cut short, after everything offered before it.
+
+        It is cut down to `readable` characters' width before anything offered
+        after it is cut at all, and past that only once everything is that short.
+        """
+        self._giving.append((widget, readable))
+
+    def setGeometry(self, rect: QRect) -> None:  # noqa: N802 - Qt naming
+        whole = [widget.sizeHint().width() for widget, _ in self._giving]
+        # Qt's width for the row counts each readout as no wider than it was
+        # last allowed to be, so what that took off is added back.
+        wanted = super().sizeHint().width() + sum(
+            width - min(width, widget.maximumWidth())
+            for (widget, _), width in zip(self._giving, whole)
+        )
+        short = wanted - rect.width()
+        widths = list(whole)
+        for floor in (self._readable, self._least):
+            for i, (widget, readable) in enumerate(self._giving):
+                give = max(0, min(short, widths[i] - floor(widget, readable)))
+                widths[i] -= give
+                short -= give
+        for (widget, _), width, full in zip(self._giving, widths, whole):
+            widget.setMaximumWidth(width if width < full else QWIDGETSIZE_MAX)
+        super().setGeometry(rect)
+
+    @staticmethod
+    def _readable(widget: QWidget, characters: int) -> int:
+        return widget.fontMetrics().averageCharWidth() * characters
+
+    @staticmethod
+    def _least(widget: QWidget, _characters: int) -> int:
+        return widget.minimumSizeHint().width()
 
 
 class IdentityBar(QWidget):
@@ -65,16 +205,19 @@ class IdentityBar(QWidget):
         self._loading = False
 
         self.combo = QComboBox()
-        self.combo.setMinimumWidth(320)
+        # As wide as its longest entry, and no wider: a fixed width reserved
+        # room the rest of the row now needs, and a width fixed when it was
+        # first shown would cut short an identity added after that.
+        self.combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
         self.combo.currentIndexChanged.connect(self._on_selected)
 
-        self.status = QLabel("")
+        self.status = _Shrinking()
         self.status.setStyleSheet(INFO_STYLE)
 
         # Deliberately its own readout rather than more tooltip on the combo.
         # "Commit as" is only half the answer, and the half it leaves out is
         # the one people assume it covers.
-        self.auth_status = QLabel("")
+        self.auth_status = _Shrinking()
         self.auth_status.setStyleSheet(INFO_STYLE)
 
         # Which of the three sets of settings this repository runs on. Here
@@ -101,26 +244,53 @@ class IdentityBar(QWidget):
         # Which repository every tab is working on, and the branch it is on.
         # Here because the repository list folds away, and this is what it was
         # mostly being read for -- so the list only has to be opened to switch.
-        self.repo_name = QLabel("")
-        self.repo_branch = QLabel("")
+        # Cut from the middle, keeping the folder it sits in and the end of its
+        # own name; the branch from the left, as the repository list cuts it.
+        self.repo_name = _Shrinking(Qt.TextElideMode.ElideMiddle)
+        self.repo_branch = _Shrinking(Qt.TextElideMode.ElideLeft)
         self._restyle_branch()
         theme.on_change(self._restyle_branch)
 
-        box = QHBoxLayout(self)
+        # What every run is generated with: the provider, and the model it will
+        # be asked for. Chosen on Connection & Model and in the Commit tab's
+        # folded Inference section, and named here for the same reason the
+        # repository is -- it decides what the next run does.
+        self.inference_name = QLabel("")
+        self.inference_model = _Shrinking()
+
+        box = _Row(self)
         box.setContentsMargins(0, 0, 0, 0)
         box.addWidget(QLabel("Commit as:"))
         box.addWidget(self.combo)
         box.addWidget(self.status)
-        box.addSpacing(16)
+        box.addWidget(_Divider())
         box.addWidget(QLabel("Active Settings:"))
         box.addWidget(self.tier_combo)
         box.addWidget(self.tier_warning)
-        box.addSpacing(16)
+        box.addWidget(_Divider())
         box.addWidget(QLabel("Active Repository:"))
         box.addWidget(self.repo_name)
         box.addWidget(self.repo_branch)
+        box.addWidget(_Divider())
+        box.addWidget(QLabel("Active Inference:"))
+        box.addWidget(self.inference_name)
+        box.addWidget(self.inference_model)
+        # The slack goes here, so where a push goes stays over at the right,
+        # against the theme picker -- and the line after it divides it from that.
         box.addStretch(1)
+        box.addWidget(_Divider())
+        box.addWidget(QLabel("Push to:"))
         box.addWidget(self.auth_status)
+        box.addWidget(_Divider())
+        # What a window too narrow for all of it cuts short first: the readouts
+        # that explain -- each has its tooltip -- before the names that say what
+        # is in use. The captions, the combos and the provider stay whole for as
+        # long as anything here can still give.
+        box.give_way(self.status, 10)
+        box.give_way(self.auth_status, 14)
+        box.give_way(self.repo_name, 14)
+        box.give_way(self.repo_branch, 12)
+        box.give_way(self.inference_model, 14)
 
         self.refresh()
 
@@ -150,6 +320,27 @@ class IdentityBar(QWidget):
         self.repo_branch.setText(branch)
         self.repo_branch.setToolTip(f"On branch {branch}" if branch else "")
 
+    def show_active_inference(self) -> None:
+        """Name the provider every run uses, and the model it will ask for.
+
+        Application-wide rather than per repository, so it is read from the
+        settings as they stand and asks nothing of git.
+        """
+        provider = providers.get(self.settings.provider)
+        # The label, not `display()`: "(experimental)" belongs to choosing it, and
+        # the tooltip keeps it for anyone who wants the long form.
+        self.inference_name.setText(provider.label)
+        self.inference_name.setToolTip(provider.display())
+        model = self.settings.active_model()
+        self.inference_model.setText(model or "no model selected")
+        self.inference_model.setStyleSheet(INFO_STYLE if model else WARN_STYLE)
+        self.inference_model.setToolTip(
+            "The model runs are generated with. Chosen on Connection & Model."
+            if model
+            else "No model is selected for this provider yet: choose one on "
+            "Connection & Model before generating."
+        )
+
     def _restyle_branch(self) -> None:
         """The same green the repository list gives a branch, for this theme.
 
@@ -167,12 +358,16 @@ class IdentityBar(QWidget):
             self.combo.clear()
             repo = self._repo or self.settings.active_repo
             self.show_active_repository()
+            self.show_active_inference()
             self._show_tier(repo)
             if not repo:
                 self.combo.setEnabled(False)
                 self.status.setText("No repository selected")
                 self.status.setToolTip("")
-                self.auth_status.setText("")
+                # As Active Repository says it, rather than a caption with
+                # nothing after it.
+                self.auth_status.setText("(none)")
+                self.auth_status.setStyleSheet(INFO_STYLE)
                 self.auth_status.setToolTip("")
                 return
 
@@ -218,6 +413,7 @@ class IdentityBar(QWidget):
         if not repo:
             self.tier_warning.setText("")
             self.tier_warning.setToolTip("")
+            self.tier_warning.setVisible(False)
             return
 
         tier = repo_config.effective_tier(repo, self.settings.settings_tier(repo))
@@ -233,6 +429,9 @@ class IdentityBar(QWidget):
             repo
         )
         self.tier_warning.setText("Repo settings exist" if stranded else "")
+        # Hidden rather than empty: an empty label still takes the row's spacing,
+        # and the line after it then stands further off this group than the next.
+        self.tier_warning.setVisible(stranded)
         self.tier_warning.setToolTip(
             "Not recommended setup, Repo settings exist.\n\n"
             f"This repository has {repo_config.path_for(repo_config.Tier.REPO, repo)}, "
@@ -294,7 +493,7 @@ class IdentityBar(QWidget):
         """Say what will authenticate a push, which the identity does not decide."""
         auth = git_ops.describe_push_auth(repo)
         warning = auth.warning()
-        self.auth_status.setText(auth.summary())
+        self.auth_status.setText(auth.destination())
         self.auth_status.setStyleSheet(WARN_STYLE if warning else INFO_STYLE)
         self.auth_status.setToolTip(
             warning

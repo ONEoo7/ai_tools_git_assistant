@@ -38,6 +38,7 @@ from PyQt6.QtWidgets import (
 )
 
 from git_assistant import (
+    AUTHOR_URL,
     CONTRIBUTORS,
     PROJECT_URL,
     __author__,
@@ -268,6 +269,10 @@ class SettingsDialog(QDialog):
             panel.repo_picker.branchesChanged.connect(
                 self.identity_bar.show_active_repository
             )
+        # The provider is application-wide, so a change on any tab that offers
+        # one is named in the bar straight away.
+        for panel in (self.commit_panel, self.agents_panel, self.review_panel):
+            panel.providerChanged.connect(self.identity_bar.show_active_inference)
         # Editing the list must re-offer it; picking "Manage identities..."
         # is a request for the tab that owns the list.
         self.identities_panel.identitiesChanged.connect(self.identity_bar.refresh)
@@ -330,15 +335,32 @@ class SettingsDialog(QDialog):
         for lbl in (self.version_current, self.version_arrow, self.version_online):
             lbl.setStyleSheet("color: #888;")
 
-        # The project link and the author used to sit here. They are in About
-        # now, where the contributors are too: the same three facts in one
-        # place reads better than two of them along the bottom of every tab.
-        # Three columns rather than one row, so the bar is centred in the
-        # *window* and not merely in whatever space the version text and the
-        # buttons left over. The outer columns carry equal stretch, so they
-        # take equal shares of the slack and the middle one lands on the
-        # midpoint; the bar keeps its natural width in it.
+        # Before the version: who wrote it, the name linking to their GitHub.
+        # The colour of the name goes inline, as the update link's does: a
+        # stylesheet colour does not reach inside an anchor.
+        self.credit = QLabel(
+            f'Git Assistant by <a href="{AUTHOR_URL}" '
+            'style="color: #8ab; text-decoration: none;">'
+            f"{html.escape(__author__)}</a>"
+        )
+        self.credit.setTextFormat(Qt.TextFormat.RichText)
+        self.credit.setStyleSheet("color: #888;")
+        self.credit.setToolTip(AUTHOR_URL)
+        self.credit.setTextInteractionFlags(
+            Qt.TextInteractionFlag.LinksAccessibleByMouse
+            | Qt.TextInteractionFlag.LinksAccessibleByKeyboard
+        )
+        self.credit.linkActivated.connect(self._on_author_link)
+
+        # The project link and the contributors are in About. Three columns
+        # rather than one row, so the bar is centred in the *window* and not
+        # merely in whatever space the version text and the buttons left over.
+        # The outer columns carry equal stretch, so they take equal shares of the
+        # slack and the middle one lands on the midpoint; the bar keeps its
+        # natural width in it.
         version_row = QHBoxLayout()
+        version_row.addWidget(self.credit)
+        version_row.addSpacing(SECTION_GAP)
         for label in (self.version_current, self.version_arrow, self.version_online):
             version_row.addWidget(label)
         version_row.addStretch(1)
@@ -361,7 +383,7 @@ class SettingsDialog(QDialog):
         self._version_row = version_row
         self._buttons_row = buttons_row
 
-        # The identity bar takes the slack, so "push: ..." stays hard against
+        # The identity bar takes the slack, so "Push to: ..." stays hard against
         # the theme picker and the picker stays hard against the window's edge.
         top = QHBoxLayout()
         top.addWidget(self.identity_bar, 1)
@@ -1240,6 +1262,7 @@ class SettingsDialog(QDialog):
             self.commit_panel.refresh_provider()
             self.agents_panel.refresh_provider()
             self.review_panel.refresh_provider()
+            self.identity_bar.show_active_inference()
 
         self._apply_provider_fields(provider)
         self._show_provider_model(provider)
@@ -2362,6 +2385,8 @@ class SettingsDialog(QDialog):
     def _autosave(self) -> None:
         self._apply_to_settings()
         self.settings.save()
+        # The model is one of the edits this copies into settings; the bar names it.
+        self.identity_bar.show_active_inference()
 
     def _apply_to_settings(self) -> None:
         """Copy every widget's value into ``self.settings`` (without saving)."""
@@ -3203,6 +3228,9 @@ class SettingsDialog(QDialog):
 
     def _on_about(self) -> None:
         show_about(self)
+
+    def _on_author_link(self, href: str) -> None:
+        QDesktopServices.openUrl(QUrl(href))
 
     def _on_open_config(self) -> None:
         folder = config_path().parent

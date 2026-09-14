@@ -19,6 +19,8 @@ __version__ = "0.3.18"
 #: (`tools/win_version_info.py`) and the installer (`installer/*.nsi`), which
 #: cannot import this module -- tests/test_about.py holds the three in step.
 __author__ = "Stefan Ghitescu"
+#: Where the author's name at the foot of the window links to.
+AUTHOR_URL = "https://github.com/ONEoo7"
 PROJECT_URL = "https://github.com/ONEoo7/ai_tools_git_assistant"
 
 #: Everyone else who shaped this, and what they contributed. Shown under About.

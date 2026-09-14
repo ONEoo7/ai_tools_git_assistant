@@ -25,7 +25,7 @@ from __future__ import annotations
 from datetime import date, datetime, timezone
 from pathlib import Path
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QGuiApplication
 from PyQt6.QtWidgets import (
     QCheckBox,
@@ -126,6 +126,10 @@ def _history_note(repo: str, runs: list, limit: int) -> str:
 
 class AgentsPanel(QWidget):
     """Pick a repository, pick an agent, run it, read the report."""
+
+    #: The provider was changed here; it is application-wide, so the bar above
+    #: the tabs names it too.
+    providerChanged = pyqtSignal()  # noqa: N815 - Qt signal naming
 
     def __init__(self, settings: Settings, before_run=None, parent=None) -> None:
         super().__init__(parent)
@@ -585,6 +589,7 @@ class AgentsPanel(QWidget):
         self.settings.provider = key
         self.settings.save()
         self.refresh_provider()  # the model line belongs to the new provider
+        self.providerChanged.emit()
 
     def _refresh_header(self, stored=None) -> None:
         title = self._label_of(self._agent_id()) if self._agent_id() else "Audit"

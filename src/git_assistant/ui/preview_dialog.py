@@ -47,6 +47,7 @@ from git_assistant.diff_strategy import (
     split_diff,
 )
 from git_assistant.providers import PROVIDERS
+from git_assistant.ui.branch_picker import BRANCH_TAB, BranchPicker
 from git_assistant.ui.estimate_dialog import confirm
 from git_assistant.ui.repo_pane import RepoPane
 from git_assistant.ui.repo_picker import RepoPicker
@@ -77,6 +78,9 @@ SECTION_GAP = 12
 # Compared against the status text to clear it once repositories exist, so a
 # generation result shown in the same label is not wiped by a refresh.
 NO_REPOS_MESSAGE = "No repositories configured - add one in Repositories."
+
+#: The title the provider and its model fold behind, beside Repository and Branch.
+INFERENCE_TAB = "Inference"
 
 
 def _history_note(repo: str, runs: list, limit: int) -> str:
@@ -169,6 +173,9 @@ class CommitPanel(QWidget):
     """
 
     committed = pyqtSignal()  # a commit was created successfully
+    #: The provider was changed here. It is application-wide, so whatever else
+    #: names it -- the bar above the tabs -- has to hear about it.
+    providerChanged = pyqtSignal()  # noqa: N815 - Qt signal naming
 
     def __init__(
         self,
@@ -203,13 +210,8 @@ class CommitPanel(QWidget):
         # The branch the commit will land on. Picking one here checks it out,
         # because that is the only way the choice could mean anything: the diff
         # being described is the work tree's, and so is the commit.
-        self.branch_combo = QComboBox()
-        self.branch_combo.setToolTip(
-            "Branch checked out in this repository.\n"
-            "Choosing another one runs 'git switch'; uncommitted changes come "
-            "along with you, and git refuses the switch if they would be lost."
-        )
-        self.branch_combo.currentIndexChanged.connect(self._on_branch_changed)
+        self.branch_picker = BranchPicker()
+        self.branch_picker.branchChosen.connect(self._on_branch_chosen)
 
         # Each project can use its own prompt template; picking one here is what
         # assigns it to the selected repository.
@@ -224,8 +226,8 @@ class CommitPanel(QWidget):
         # it is an account and a connection, not a property of a project.
         self.provider_combo = QComboBox()
         self.provider_combo.setToolTip(
-            "Which inference provider generates the message. Configure it "
-            "under Inference Providers in the Connection & Model tab."
+            "Which inference provider generates the message, for every tab. "
+            "Configure it under Inference Providers in the Connection & Model tab."
         )
         for provider in PROVIDERS:
             self.provider_combo.addItem(provider.display(), provider.key)
@@ -280,23 +282,30 @@ class CommitPanel(QWidget):
         self.btn_row.addWidget(self.commit_btn)
         self.btn_row.addWidget(self.push_btn)
 
-        # ---- far left: the repository, folded until it is wanted ----------
+        # ---- far left: repository, branch and inference, folded until wanted -
+        # All three behind the repository's own strip: each is chosen when
+        # switching and only looked at otherwise, and the bar above the tabs
+        # names every one of them.
         self.repo_pane = RepoPane(self.repo_picker, margins=(0, 0, SECTION_GAP, 0))
+        self.repo_pane.add_page(self.branch_picker, BRANCH_TAB)
+        inference = QWidget()
+        inference_box = QVBoxLayout(inference)
+        inference_box.setContentsMargins(0, 0, 0, 0)
+        inference_box.addWidget(QLabel("Provider:"))
+        inference_box.addWidget(self.provider_combo)
+        inference_box.addWidget(self.provider_label)
+        inference_box.addStretch(1)
+        self.repo_pane.add_page(inference, INFERENCE_TAB)
 
         # ---- then what a generation runs with ------------------------------
         # A column of its own rather than under the list, so that folding the
-        # list does not fold these away with it: they are read on every run,
-        # and the list only when switching.
+        # list does not fold it away with it: it is read on every run, and the
+        # list only when switching.
         run_pane = QWidget()
         run_box = QVBoxLayout(run_pane)
         run_box.setContentsMargins(SECTION_GAP, 0, SECTION_GAP, 0)
-        run_box.addWidget(QLabel("Branch:"))
-        run_box.addWidget(self.branch_combo)
         run_box.addWidget(QLabel("Template:"))
         run_box.addWidget(self.template_combo)
-        run_box.addWidget(QLabel("Inference Providers:"))
-        run_box.addWidget(self.provider_combo)
-        run_box.addWidget(self.provider_label)
         run_box.addStretch(1)
 
         # ---- left pane: the commit message -------------------------------
@@ -573,37 +582,19 @@ class CommitPanel(QWidget):
 
     # ---- branch ------------------------------------------------------------
     def _refresh_branches(self) -> None:
-        """List the repository's local branches, with the checked-out one shown.
+        """List the repository's local branches, with the checked-out one marked.
 
-        Populated with signals blocked: filling the box is not the user choosing
-        a branch, and treating it as one would check out whatever landed first.
+        Filling the list is not the user choosing a branch; the picker emits
+        nothing for it. See git_assistant.ui.branch_picker.
         """
         repo = self._current_repo_path()
         self._branches = git_ops.list_branches(repo) if repo else []
         current = git_ops.current_branch(repo) if repo else ""
+        self.branch_picker.set_branches(self._branches, current)
+        self.branch_picker.setEnabled(bool(self._branches))
 
-        self.branch_combo.blockSignals(True)
-        self.branch_combo.clear()
-        for name in self._branches:
-            # The branch to switch to is the item's data, so the entry below --
-            # which is a state, not a branch -- cannot be checked out by name.
-            self.branch_combo.addItem(name, name)
-        if current and current not in self._branches:
-            # Detached HEAD, or a repo git cannot read: show the state rather
-            # than silently selecting a branch that is not checked out.
-            label = (
-                "(detached HEAD)" if current == git_ops.DETACHED_HEAD else current
-            )
-            self.branch_combo.insertItem(0, label, None)
-            self.branch_combo.setCurrentIndex(0)
-        else:
-            self.branch_combo.setCurrentIndex(self.branch_combo.findData(current))
-        self.branch_combo.setEnabled(bool(self._branches))
-        self.branch_combo.blockSignals(False)
-
-    def _on_branch_changed(self, _index: int) -> None:
+    def _on_branch_chosen(self, target: str) -> None:
         repo = self._current_repo_path()
-        target = self.branch_combo.currentData()
         current = git_ops.current_branch(repo) if repo else ""
         if not repo or not target or target == current:
             return
@@ -622,7 +613,7 @@ class CommitPanel(QWidget):
             )
             != QMessageBox.StandardButton.Yes
         ):
-            self._refresh_branches()  # put the box back on the real branch
+            self._refresh_branches()  # the list back on the branch it is really on
             return
 
         result = git_ops.switch_branch(repo, target)
@@ -696,6 +687,7 @@ class CommitPanel(QWidget):
         self.settings.provider = key
         self.settings.save()
         self.refresh_provider()  # the model line belongs to the new provider
+        self.providerChanged.emit()
 
     def _on_template_changed(self, _index: int) -> None:
         repo = self._current_repo_path()
@@ -732,8 +724,8 @@ class CommitPanel(QWidget):
         produces a message for the wrong changes.
         """
         self._clear_results()
-        # Branches are switched outside this window too, and the box would
-        # otherwise keep naming the one that was checked out when it was opened.
+        # Branches are switched outside this window too, and the list would
+        # otherwise keep marking the one that was checked out when it was opened.
         self._refresh_branches()
         self._load_staged_files()
 
@@ -1212,7 +1204,7 @@ class CommitPanel(QWidget):
         self.copy_btn.setEnabled(not busy)
         self.commit_btn.setEnabled(not busy)
         # Switching branch mid-run changes the diff the worker is describing.
-        self.branch_combo.setEnabled(not busy and bool(self._branches))
+        self.branch_picker.setEnabled(not busy and bool(self._branches))
 
     # ---- actions -----------------------------------------------------------
     def _on_copy(self) -> None:

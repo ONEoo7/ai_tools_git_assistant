@@ -139,8 +139,9 @@ def test_the_commit_tab_keeps_its_run_settings_on_screen_with_the_list_folded(
     panel = CommitPanel(settings, auto_start=False)
 
     assert panel.repo_pane.is_open() is False
-    for control in (panel.branch_combo, panel.template_combo, panel.provider_combo):
-        assert control.isVisibleTo(panel)
+    assert panel.template_combo.isVisibleTo(panel)
+    # The provider folds with the repository now, behind "Inference".
+    assert not panel.provider_combo.isVisibleTo(panel)
 
 
 @pytest.mark.parametrize(

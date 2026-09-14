@@ -566,15 +566,65 @@ def _panel_for(settings, repo):
     return CommitPanel(settings, auto_start=False)
 
 
+def _click(panel, name):
+    """What a click on a branch in the list does: selects the row, then says so."""
+    item = panel.branch_picker.item_for(name)
+    assert item is not None, f"{name} is not listed"
+    panel.branch_picker.branch_list.setCurrentItem(item)
+    panel.branch_picker.branch_list.itemClicked.emit(item)
+
+
 def test_branch_selector_lists_branches_and_shows_the_current_one(qapp, settings, tmp_path):
     from git_assistant import git_ops
 
     repo = _repo_with_branches(tmp_path)
     panel = _panel_for(settings, repo)
 
-    shown = [panel.branch_combo.itemText(i) for i in range(panel.branch_combo.count())]
+    shown = panel.branch_picker.branches()
     assert set(shown) == {git_ops.current_branch(repo), "feature"}
-    assert panel.branch_combo.currentData() == git_ops.current_branch(repo)
+    assert panel.branch_picker.current_branch() == git_ops.current_branch(repo)
+    assert panel.branch_picker.selected_branch() == git_ops.current_branch(repo)
+
+
+def test_the_branches_are_behind_their_own_title_beside_the_repository(
+    qapp, settings, tmp_path
+):
+    """Not among the run settings any more: folded away with the repository."""
+    from PyQt6.QtWidgets import QComboBox
+
+    panel = _panel_for(settings, _repo_with_branches(tmp_path))
+    pane = panel.repo_pane
+
+    titles = [pane.tabs.tabText(i) for i in range(pane.tabs.count())]
+    assert titles == ["Repository", "Branch", "Inference"]
+    assert pane.widget(1) is panel.branch_picker
+    assert not hasattr(panel, "branch_combo")
+    assert set(panel.findChildren(QComboBox)) == {
+        panel.template_combo,
+        panel.provider_combo,
+    }
+
+
+def test_the_provider_and_its_model_are_behind_the_inference_title(
+    qapp, settings, tmp_path
+):
+    """Folded with the repository and the branch; the run settings keep the template."""
+    panel = _panel_for(settings, _repo_with_branches(tmp_path))
+    inference = panel.repo_pane.widget(2)
+
+    assert inference.isAncestorOf(panel.provider_combo)
+    assert inference.isAncestorOf(panel.provider_label)
+    assert not inference.isAncestorOf(panel.template_combo)
+
+
+def test_choosing_a_provider_there_says_so(qapp, settings, tmp_path):
+    panel = _panel_for(settings, _repo_with_branches(tmp_path))
+    heard = []
+    panel.providerChanged.connect(lambda: heard.append(settings.provider))
+
+    panel.provider_combo.setCurrentIndex(panel.provider_combo.findData("openai"))
+
+    assert heard == ["openai"]
 
 
 def test_choosing_a_branch_checks_it_out(qapp, settings, tmp_path):
@@ -583,10 +633,11 @@ def test_choosing_a_branch_checks_it_out(qapp, settings, tmp_path):
     repo = _repo_with_branches(tmp_path)
     panel = _panel_for(settings, repo)
 
-    panel.branch_combo.setCurrentIndex(panel.branch_combo.findData("feature"))
+    _click(panel, "feature")
 
     assert git_ops.current_branch(repo) == "feature"
     assert "feature" in panel.status.text()
+    assert panel.branch_picker.current_branch() == "feature"
 
 
 def test_switching_branch_drops_the_message_written_for_the_other_one(
@@ -596,7 +647,7 @@ def test_switching_branch_drops_the_message_written_for_the_other_one(
     panel = _panel_for(settings, repo)
     panel.editor.setPlainText("feat: something about the other branch")
 
-    panel.branch_combo.setCurrentIndex(panel.branch_combo.findData("feature"))
+    _click(panel, "feature")
 
     assert panel.editor.toPlainText() == ""
 
@@ -617,10 +668,10 @@ def test_declining_the_confirmation_leaves_the_branch_alone(
         QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Cancel
     )
 
-    panel.branch_combo.setCurrentIndex(panel.branch_combo.findData("feature"))
+    _click(panel, "feature")
 
     assert git_ops.current_branch(repo) == start
-    assert panel.branch_combo.currentData() == start, "the box must not lie"
+    assert panel.branch_picker.selected_branch() == start, "the list must not lie"
 
 
 def test_a_clean_repo_switches_without_asking(qapp, settings, tmp_path, monkeypatch):
@@ -635,26 +686,26 @@ def test_a_clean_repo_switches_without_asking(qapp, settings, tmp_path, monkeypa
         raise AssertionError("nothing to warn about in a clean work tree")
 
     monkeypatch.setattr(QMessageBox, "question", refuse)
-    panel.branch_combo.setCurrentIndex(panel.branch_combo.findData("feature"))
+    _click(panel, "feature")
 
     assert git_ops.current_branch(repo) == "feature"
 
 
 def test_a_repo_without_commits_offers_nothing_to_switch_to(qapp, settings, tmp_path):
-    """An unborn branch has no ref; the box shows the state and stays inert."""
+    """An unborn branch has no ref; the list shows the state and stays inert."""
     panel = _panel_for(settings, _repo(tmp_path))
 
-    assert panel.branch_combo.isEnabled() is False
+    assert panel.branch_picker.isEnabled() is False
 
 
-def test_the_branch_box_is_disabled_while_generating(qapp, settings, tmp_path):
+def test_the_branch_list_is_disabled_while_generating(qapp, settings, tmp_path):
     """Switching mid-run changes the diff the worker is describing."""
     panel = _panel_for(settings, _repo_with_branches(tmp_path))
 
     panel._set_busy(True)
-    assert not panel.branch_combo.isEnabled()
+    assert not panel.branch_picker.isEnabled()
     panel._set_busy(False)
-    assert panel.branch_combo.isEnabled()
+    assert panel.branch_picker.isEnabled()
 
 
 # ---- View LLM Calls -----------------------------------------------------------
