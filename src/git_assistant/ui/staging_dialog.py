@@ -24,21 +24,27 @@ in a quiet ``\\n`` or ``\\r\\n``, and spaces and tabs are drawn as dots and
 arrows. It is still line for line as git wrote it -- a line on screen is a line
 of the patch -- so the endings are drawn after the text rather than as line
 breaks of their own, and the Unicode separators that would split a line in two
-are drawn as a symbol.
+are drawn as a symbol. Down its left side run Git Extensions' two columns of line
+numbers, the old file's and the new's, and removed and added lines are tinted red
+and green right across -- all drawn beside and beneath the text, for the same
+reason.
 """
 
 from __future__ import annotations
 
 import re
+from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 
-from PyQt6.QtCore import QItemSelectionModel, Qt
+from PyQt6.QtCore import QItemSelectionModel, QRect, QSize, Qt
 from PyQt6.QtGui import (
     QColor,
     QFontDatabase,
+    QPainter,
     QPalette,
     QSyntaxHighlighter,
+    QTextBlock,
     QTextCharFormat,
     QTextOption,
 )
@@ -294,6 +300,165 @@ class _DiffColours(QSyntaxHighlighter):
                 self.setFormat(start, length, quiet)
 
 
+class _Gutter(QWidget):
+    """The strip down a `DiffView`'s left edge that its line numbers are drawn in."""
+
+    def __init__(self, view: DiffView) -> None:
+        super().__init__(view)
+        self._view = view
+
+    def sizeHint(self) -> QSize:  # noqa: N802 - Qt naming
+        return QSize(self._view.gutter_width(), 0)
+
+    def paintEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        self._view.paint_gutter(event.rect())
+
+
+def _tint(colour: str, alpha: int) -> QColor:
+    tinted = QColor(colour)
+    tinted.setAlpha(alpha)
+    return tinted
+
+
+class DiffView(QPlainTextEdit):
+    """A diff drawn the way Git Extensions draws one: numbered, and tinted.
+
+    Two columns of numbers down its left side: each line's number in the old
+    file, then in the new. A removed line has only the first and an added line
+    only the second, and each of those lines is tinted right across -- red and
+    green -- with its number a shade stronger; an ``@@`` line is a band across
+    both columns. All of it is drawn around and beneath the text rather than
+    written into it, so that a line on screen is still exactly a line of the
+    patch.
+    """
+
+    #: Space either side of a number.
+    PAD = 6
+    #: How strongly a removed or added line is tinted, and its number: stronger,
+    #: so the number still stands out against the line it belongs to.
+    LINE_TINT = 40
+    NUMBER_TINT = 70
+    BAND_TINT = 50
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        #: Diff line -> (number in the old file, number in the new). Empty for a
+        #: sentence in place of a diff, which then has no gutter at all.
+        self.numbers: dict[int, tuple[int | None, int | None]] = {}
+        self._digits = 1
+        self.gutter = _Gutter(self)
+        self.updateRequest.connect(self._on_update_request)
+
+    def set_numbers(self, numbers: dict[int, tuple[int | None, int | None]]) -> None:
+        """Number the diff about to be shown; set before its text is."""
+        self.numbers = dict(numbers)
+        highest = max(
+            (n for pair in self.numbers.values() for n in pair if n is not None),
+            default=0,
+        )
+        self._digits = len(str(highest))
+        self.setViewportMargins(self.gutter_width(), 0, 0, 0)
+        self._place_gutter()
+        self.gutter.update()
+
+    def column_width(self) -> int:
+        """One column of numbers, as wide as the longest number needs."""
+        digit = self.fontMetrics().horizontalAdvance("9")
+        return self._digits * digit + 2 * self.PAD
+
+    def gutter_width(self) -> int:
+        return 2 * self.column_width() + self.PAD if self.numbers else 0
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        super().resizeEvent(event)
+        self._place_gutter()
+
+    def _place_gutter(self) -> None:
+        area = self.contentsRect()
+        self.gutter.setGeometry(
+            QRect(area.left(), area.top(), self.gutter_width(), area.height())
+        )
+
+    def _on_update_request(self, rect: QRect, dy: int) -> None:
+        if dy:
+            self.gutter.scroll(0, dy)
+        else:
+            self.gutter.update(0, rect.y(), self.gutter.width(), rect.height())
+
+    def change_at(self, line: int) -> str:
+        """"-" for a removed line, "+" for an added one, "" for any other line."""
+        old, new = self.numbers.get(line, (None, None))
+        if old is not None and new is None:
+            return "-"
+        if new is not None and old is None:
+            return "+"
+        return ""
+
+    def _rows(self, area: QRect) -> Iterator[tuple[QTextBlock, int, int]]:
+        """Each line on screen that reaches into ``area``: it, its top, its height."""
+        block = self.firstVisibleBlock()
+        offset = self.contentOffset()
+        top = round(self.blockBoundingGeometry(block).translated(offset).top())
+        while block.isValid() and top <= area.bottom():
+            height = round(self.blockBoundingRect(block).height())
+            if block.isVisible() and top + height >= area.top():
+                yield block, top, height
+            block = block.next()
+            top += height
+
+    def paintEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        # The tints go down first: the text is then drawn over them.
+        if self.numbers:
+            painter = QPainter(self.viewport())
+            try:
+                colours = diff_colours()
+                width = self.viewport().width()
+                for block, top, height in self._rows(event.rect()):
+                    change = self.change_at(block.blockNumber())
+                    if change:
+                        painter.fillRect(
+                            QRect(0, top, width, height),
+                            _tint(colours[change], self.LINE_TINT),
+                        )
+            finally:
+                painter.end()
+        super().paintEvent(event)
+
+    def paint_gutter(self, area: QRect) -> None:
+        painter = QPainter(self.gutter)
+        try:
+            self._paint_gutter(painter, area)
+        finally:
+            painter.end()
+
+    def _paint_gutter(self, painter: QPainter, area: QRect) -> None:
+        colours = diff_colours()
+        painter.fillRect(area, self.palette().color(QPalette.ColorRole.Base))
+        column = self.column_width()
+        right = Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        for block, top, height in self._rows(area):
+            number = block.blockNumber()
+            old, new = self.numbers.get(number, (None, None))
+            first = QRect(0, top, column, height)
+            second = QRect(column, top, column, height)
+            change = self.change_at(number)
+            if block.text().startswith("@@"):
+                band = _tint(colours["head"], self.BAND_TINT)
+                painter.fillRect(first.united(second), band)
+            elif change:
+                cell = first if change == "-" else second
+                painter.fillRect(cell, _tint(colours[change], self.NUMBER_TINT))
+            painter.setPen(QColor(colours["head"]))
+            for cell, value in ((first, old), (second, new)):
+                if value is not None:
+                    painter.drawText(
+                        cell.adjusted(0, 0, -self.PAD, 0), right, str(value)
+                    )
+        # The edge between the numbers and the diff.
+        painter.setPen(QColor(colours["ws"]))
+        painter.drawLine(2 * column, area.top(), 2 * column, area.bottom())
+
+
 class StagingDialog(QDialog):
     """Stage and unstage a repository's changes: files, hunks or lines."""
 
@@ -380,7 +545,7 @@ class StagingDialog(QDialog):
         self.line_endings = QLabel("")
         self.line_endings.setWordWrap(True)
         self.line_endings.setVisible(False)
-        self.diff_view = QPlainTextEdit()
+        self.diff_view = DiffView()
         self.diff_view.setReadOnly(True)
         self.diff_view.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
         self.diff_view.setFont(
@@ -821,16 +986,21 @@ class StagingDialog(QDialog):
         whole = "" if partial else " - stages as a whole file"
         self.diff_title.setText(where + whole)
         shown = shown_diff(raw)
-        self._display(shown.text, shown.marks)
+        self._display(shown.text, shown.marks, staging.line_numbers(diff))
 
     def _display(
-        self, text: str, marks: list[list[tuple[int, int]]] | None = None
+        self,
+        text: str,
+        marks: list[list[tuple[int, int]]] | None = None,
+        numbers: dict[int, tuple[int | None, int | None]] | None = None,
     ) -> None:
         """Put a diff -- or, without ``marks``, a sentence -- in the diff view.
 
         Dots and arrows for whitespace only in a diff: in a sentence saying why
-        there is no diff, they are only in the way of reading it.
+        there is no diff, they are only in the way of reading it. Line numbers
+        likewise, which a sentence has none of.
         """
+        self.diff_view.set_numbers(numbers or {})
         document = self.diff_view.document()
         option = document.defaultTextOption()
         flag = QTextOption.Flag.ShowTabsAndSpaces
@@ -873,7 +1043,8 @@ class StagingDialog(QDialog):
         hunk.setEnabled(self._diff is not None)
         lines.setEnabled(self._diff is not None)
         at = self.diff_view.cursorForPosition(position).blockNumber()
-        chosen = menu.exec(self.diff_view.mapToGlobal(position))
+        # The position is the viewport's, which the line numbers push right.
+        chosen = menu.exec(self.diff_view.viewport().mapToGlobal(position))
         if chosen is hunk:
             self.apply_hunk(at)
         elif chosen is lines:

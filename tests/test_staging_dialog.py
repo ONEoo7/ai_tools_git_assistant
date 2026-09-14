@@ -306,6 +306,144 @@ def test_a_sentence_in_place_of_a_diff_has_no_dots_in_it(qapp, repo, slot_errors
     assert not flags & QTextOption.Flag.ShowTabsAndSpaces
 
 
+# ---- line numbers --------------------------------------------------------------------
+def test_each_line_is_numbered_in_the_old_file_and_the_new(qapp, repo, slot_errors):
+    """Git Extensions' two columns: a removed line has only its old number, an
+    added one only its new, and git's header and @@ lines have neither."""
+    (repo / "a.txt").write_bytes(
+        BASE.replace(b"line 5\n", b"LINE 5\n").replace(b"line 9\n", b"")
+    )
+
+    dialog = StagingDialog(str(repo))
+    dialog.show_file("a.txt")
+    numbers = dialog.diff_view.numbers
+
+    assert numbers[_line(dialog, " line 4")] == (4, 4)
+    assert numbers[_line(dialog, "-line 5")] == (5, None)
+    assert numbers[_line(dialog, "+LINE 5")] == (None, 5)
+    assert numbers[_line(dialog, "-line 9")] == (9, None)
+    assert numbers[_line(dialog, " line 10")] == (10, 9), "one line fewer after it"
+    assert 0 not in numbers, "diff --git"
+    assert _line(dialog, "@@ -2,11 +2,10 @@ line 1") not in numbers
+
+
+def test_the_numbers_are_drawn_beside_the_diff_not_written_into_it(
+    qapp, repo, slot_errors
+):
+    """A line on screen is still a line of the patch: selections depend on it."""
+    (repo / "a.txt").write_bytes(BASE.replace(b"line 5\n", b"LINE 5\n"))
+
+    dialog = StagingDialog(str(repo))
+    dialog.show_file("a.txt")
+    view = dialog.diff_view
+
+    assert "-line 5" + LF_MARK in _shown(dialog)
+    assert view.gutter_width() > 0
+    assert view.viewportMargins().left() == view.gutter_width()
+    assert view.gutter.width() == view.gutter_width()
+
+
+def test_the_columns_are_as_wide_as_the_longest_number_needs(qapp, repo, slot_errors):
+    long_file = b"".join(b"line %d\n" % n for n in range(1, 1201))
+    (repo / "long.txt").write_bytes(long_file)
+    _git(repo, "add", "long.txt")
+    _git(repo, "commit", "-q", "-m", "long")
+    (repo / "long.txt").write_bytes(long_file.replace(b"line 1100\n", b"LINE 1100\n"))
+    (repo / "a.txt").write_bytes(BASE.replace(b"line 5\n", b"LINE 5\n"))
+
+    dialog = StagingDialog(str(repo))
+    dialog.show_file("a.txt")
+    short = dialog.diff_view.column_width()
+    dialog.show_file("long.txt")
+
+    digit = dialog.diff_view.fontMetrics().horizontalAdvance("9")
+    assert dialog.diff_view.column_width() - short == 3 * digit, "8 at most, then 1103"
+
+
+def test_a_sentence_in_place_of_a_diff_has_no_line_numbers(qapp, repo, slot_errors):
+    """Not even the ones the diff shown before it had."""
+    (repo / "a.txt").write_bytes(BASE.replace(b"line 5\n", b"LINE 5\n"))
+    _write(repo, "src/one.py")
+    dialog = StagingDialog(str(repo))
+    dialog.show_file("a.txt")
+    assert dialog.diff_view.numbers
+
+    tree = dialog.unstaged_list
+    folder = next(
+        tree.topLevelItem(i)
+        for i in range(tree.topLevelItemCount())
+        if tree.topLevelItem(i).text(1) == "src"
+    )
+    tree.setCurrentItem(folder)  # a folder: a sentence about it, not a diff
+
+    assert dialog.diff_view.numbers == {}
+    assert dialog.diff_view.gutter_width() == 0
+    assert dialog.diff_view.viewportMargins().left() == 0
+
+
+def test_removed_and_added_lines_are_tinted_in_their_own_column(
+    qapp, repo, slot_errors
+):
+    """As Git Extensions draws them: red behind an old number, green behind a new."""
+    from PyQt6.QtGui import QPalette
+
+    (repo / "a.txt").write_bytes(BASE.replace(b"line 5\n", b"LINE 5\n"))
+    dialog = StagingDialog(str(repo))
+    dialog.resize(1300, 760)
+    dialog.show()
+    dialog.show_file("a.txt")
+    qapp.processEvents()
+    view = dialog.diff_view
+    image = view.gutter.grab().toImage()
+    column = view.column_width()
+
+    def pixel(text, x):
+        block = view.document().findBlockByNumber(_line(dialog, text))
+        top = view.blockBoundingGeometry(block).translated(view.contentOffset()).top()
+        return image.pixelColor(x, int(top) + 2).name()
+
+    page = QApplication.palette().color(QPalette.ColorRole.Base).name()
+    assert pixel("-line 5", 1) != page, "the old number's cell of a removed line"
+    assert pixel("-line 5", column + 1) == page, "and not the new one's"
+    assert pixel("+LINE 5", column + 1) != page
+    assert pixel("+LINE 5", 1) == page
+    assert pixel(" line 4", 1) == page == pixel(" line 4", column + 1)
+    dialog.close()
+
+
+def test_removed_and_added_lines_are_tinted_right_across(qapp, repo, slot_errors):
+    """Red behind a removed line and green behind an added one, to the far edge;
+    nothing behind git's own lines -- "+++ b/a.txt" included -- or context."""
+    from PyQt6.QtGui import QPalette
+
+    (repo / "a.txt").write_bytes(BASE.replace(b"line 5\n", b"LINE 5\n"))
+    dialog = StagingDialog(str(repo))
+    dialog.resize(1300, 760)
+    dialog.show()
+    dialog.show_file("a.txt")
+    qapp.processEvents()
+    view = dialog.diff_view
+    # The whole window: a viewport grabbed on its own is drawn without the
+    # background its frame gives it.
+    image = dialog.grab().toImage()
+    viewport = view.viewport()
+    corner = viewport.mapTo(dialog, viewport.rect().topLeft())
+    edge = corner.x() + viewport.width() - 3  # past the end of every line's text
+
+    def colour(text):
+        block = view.document().findBlockByNumber(_line(dialog, text))
+        top = view.blockBoundingGeometry(block).translated(view.contentOffset()).top()
+        return image.pixelColor(edge, corner.y() + int(top) + 2)
+
+    page = QApplication.palette().color(QPalette.ColorRole.Base).name()
+    removed, added = colour("-line 5"), colour("+LINE 5")
+    assert removed.name() != page and removed.red() > removed.green()
+    assert added.name() != page and added.green() > added.red()
+    for untinted in (" line 4", "+++ b/a.txt", "@@ -2,7 +2,7 @@ line 1"):
+        assert colour(untinted).name() == page, untinted
+    dialog.close()
+
+
 # ---- how a file is marked ------------------------------------------------------------
 def test_a_new_file_is_marked_plus_and_a_removed_one_minus(qapp, repo, slot_errors):
     """Not git's "?", which asks about a file rather than saying what changed."""

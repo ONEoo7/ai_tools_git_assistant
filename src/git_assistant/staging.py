@@ -93,6 +93,33 @@ class FileDiff:
         }
 
 
+def line_numbers(diff: FileDiff) -> dict[int, tuple[int | None, int | None]]:
+    """Each body line's number in the old file and in the new, by diff line.
+
+    Counted from each hunk's ``@@ -old +new @@``, the way Git Extensions numbers
+    a diff in its two margin columns. A removed line has only an old number and
+    an added one only a new; a line both sides share has both. Header lines,
+    ``@@`` lines and git's "\\ No newline at end of file" have neither, and are
+    not in the result.
+    """
+    numbers: dict[int, tuple[int | None, int | None]] = {}
+    for hunk in diff.hunks:
+        old, new = hunk.old_start, hunk.new_start
+        for at, line in zip(hunk.numbers(), hunk.lines):
+            kind = line[:1]
+            if kind == b"-":
+                numbers[at] = (old, None)
+                old += 1
+            elif kind == b"+":
+                numbers[at] = (None, new)
+                new += 1
+            elif kind in (b" ", b""):  # an empty line is context git left blank
+                numbers[at] = (old, new)
+                old += 1
+                new += 1
+    return numbers
+
+
 def parse(raw: bytes) -> FileDiff:
     """Take a single file's diff, as `git_ops.file_diff` returns it, apart."""
     lines = raw.split(b"\n")

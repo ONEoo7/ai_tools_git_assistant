@@ -11,7 +11,7 @@ import sys
 import pytest
 
 from git_assistant import git_ops
-from git_assistant.staging import PartialPatchError, build_patch, parse
+from git_assistant.staging import PartialPatchError, build_patch, line_numbers, parse
 
 _NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
 
@@ -102,6 +102,38 @@ def test_lines_are_numbered_as_they_appear_in_the_diff():
         for number, line in zip(hunk.numbers(), hunk.lines):
             assert shown[number] == line
     assert diff.partial
+
+
+def test_each_line_is_numbered_in_the_old_file_and_in_the_new():
+    """Git Extensions' two margin columns: removed lines are only in the old file,
+    added ones only in the new, and header and @@ lines are in neither."""
+    assert line_numbers(parse(TWO_HUNKS)) == {
+        5: (1, 1),  # " one"
+        6: (2, None),  # "-two"
+        7: (None, 2),  # "+TWO"
+        8: (3, 3),  # " three"
+        10: (10, 10),  # " ten"
+        11: (None, 11),  # "+ten and a half"
+        12: (11, 12),  # " eleven"
+    }
+
+
+def test_a_new_file_has_only_new_line_numbers():
+    raw = (
+        b"diff --git a/n.txt b/n.txt\nnew file mode 100644\n--- /dev/null\n"
+        b"+++ b/n.txt\n@@ -0,0 +1,2 @@\n+first\n+second\n"
+    )
+    assert line_numbers(parse(raw)) == {5: (None, 1), 6: (None, 2)}
+
+
+def test_the_no_newline_notice_is_not_a_line_of_either_file():
+    raw = b"--- a/f\n+++ b/f\n@@ -1 +1 @@\n-a\n\\ No newline at end of file\n+b\n"
+    assert line_numbers(parse(raw)) == {3: (1, None), 5: (None, 1)}
+
+
+def test_a_diff_with_no_hunks_has_no_line_numbers():
+    raw = b"diff --git a/x.png b/x.png\nBinary files a/x.png and b/x.png differ\n"
+    assert line_numbers(parse(raw)) == {}
 
 
 def test_a_line_knows_its_hunk_and_a_range_knows_its_changes():

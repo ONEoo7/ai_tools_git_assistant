@@ -35,7 +35,7 @@ Top right is the theme picker: follow the system, light, dark, or pink.
 
 | | |
 |---|---|
-| **Clone** | A URL or a folder, where to put it, and how much history: all of it, or a shallow copy of the last few commits of *every* branch. Git's progress shows as it works; **Cancel** stops it and removes what was downloaded. |
+| **Clone** | A URL or a folder, where to put it, and how much history: by default a shallow copy holding the latest commit of *every* branch, or deeper, or all of it. Git's progress shows as it works; **Cancel** stops it and removes what was downloaded. |
 | **Create** | A new repository in a folder of your choosing, starting on the branch you name. |
 | **Starter files** | An empty `README.md`; a `.gitignore` for the languages you tick — the same list as Code Review, from GitHub's gitignore collection; a `.gitattributes` saying which files get LF, CRLF or native line endings; an MIT or Apache 2.0 `LICENSE`. Each is previewed before it is written, into a new repository or the one selected. |
 

@@ -4,7 +4,8 @@ Left to right:
 
 - the Repository pane every repo-driven tab has, folded until it is wanted. The
   starter files are added to the repository selected there;
-- **Clone** -- the whole history, or a shallow copy of every branch -- and
+- **Clone** -- a shallow copy of every branch, one commit deep unless asked for
+  more, or the whole history -- and
   **Create**, a new repository in a folder of your choosing;
 - **Starter files**: README.md, .gitignore, .gitattributes and LICENSE, each set
   up and previewed before anything is written.
@@ -49,7 +50,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from git_assistant import git_ops, repo_config, starter_files
+from git_assistant import git_ops, starter_files
 from git_assistant.config import RepoEntry, Settings, norm_path
 from git_assistant.review import languages
 from git_assistant.ui import side_panel as side_panel_mod
@@ -88,6 +89,10 @@ _CREDENTIALS_RE = re.compile(r"^https?://[^/@\s]+@", re.IGNORECASE)
 
 #: Git's progress lines can be long; a status label is not the place for all of it.
 _PROGRESS_MAX = 160
+
+#: How deep a clone is unless the user chooses otherwise: the latest commit of
+#: every branch. Quick to download, and the rest can always be fetched later.
+CLONE_DEPTH = 1
 
 
 def folder_name_problem(name: str) -> str:
@@ -188,7 +193,6 @@ class CloneCreatePanel(QWidget):
         form.addRow("Folder name:", self.clone_name)
 
         self.full_history = QRadioButton("Full history")
-        self.full_history.setChecked(True)
         self.shallow = QRadioButton("Shallow:")
         self.shallow.setToolTip(
             "Only the most recent commits of every branch: quicker to download.\n"
@@ -196,9 +200,10 @@ class CloneCreatePanel(QWidget):
         )
         self.depth = QSpinBox()
         self.depth.setRange(1, 1_000_000)
-        self.depth.setValue(repo_config.FetchRules().depth)
-        self.depth.setEnabled(False)
+        self.depth.setValue(CLONE_DEPTH)
+        # A depth only means something for a shallow clone.
         self.shallow.toggled.connect(self.depth.setEnabled)
+        self.shallow.setChecked(True)
         history = QHBoxLayout()
         history.addWidget(self.full_history)
         history.addWidget(self.shallow)

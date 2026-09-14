@@ -210,21 +210,56 @@ def test_a_clone_is_listed_and_selected(
     assert panel.clone_btn.isEnabled() and not panel.cancel_btn.isEnabled()
 
 
-def test_a_shallow_clone_takes_the_depth_chosen_for_every_branch(
+def _commits(destination):
+    return _git(destination, "rev-list", "--count", "HEAD").stdout.strip()
+
+
+def _is_shallow(destination):
+    return _git(destination, "rev-parse", "--is-shallow-repository").stdout.strip()
+
+
+def test_a_clone_is_one_commit_of_every_branch_unless_asked_otherwise(
     qapp, settings, source, tmp_path, inline, slot_errors
 ):
     panel = CloneCreatePanel(settings)
+    assert panel.shallow.isChecked() and not panel.full_history.isChecked()
+    assert panel.depth.isEnabled() and panel.depth.value() == 1
     _clone_setup(panel, source, tmp_path / "clones")
-    panel.shallow.setChecked(True)
-    panel.depth.setValue(1)
 
     panel._on_clone()
 
     destination = tmp_path / "clones" / "source"
     assert inline[0].depth == 1
-    shallow = _git(destination, "rev-parse", "--is-shallow-repository").stdout
-    assert shallow.strip() == "true"
+    assert (_is_shallow(destination), _commits(destination)) == ("true", "1")
     assert "origin/other" in _git(destination, "branch", "-r").stdout
+
+
+def test_a_shallow_clone_takes_the_depth_chosen(
+    qapp, settings, source, tmp_path, inline, slot_errors
+):
+    panel = CloneCreatePanel(settings)
+    _clone_setup(panel, source, tmp_path / "clones")
+    panel.depth.setValue(2)
+
+    panel._on_clone()
+
+    assert inline[0].depth == 2
+    assert _commits(tmp_path / "clones" / "source") == "2"
+
+
+def test_full_history_is_one_click_away(
+    qapp, settings, source, tmp_path, inline, slot_errors
+):
+    panel = CloneCreatePanel(settings)
+    _clone_setup(panel, source, tmp_path / "clones")
+
+    panel.full_history.setChecked(True)
+    assert not panel.depth.isEnabled()
+    panel._on_clone()
+
+    destination = tmp_path / "clones" / "source"
+    assert inline[0].depth is None
+    assert _is_shallow(destination) == "false"
 
 
 def test_a_clone_the_window_lists_is_selected_under_the_windows_spelling(
