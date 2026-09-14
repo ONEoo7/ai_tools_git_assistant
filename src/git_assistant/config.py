@@ -206,7 +206,12 @@ class RepoEntry:
 
     path: str
     label: str = ""
-    owner: str = ""  # remote owner/org, e.g. "ONEoo7" (for disambiguation)
+    #: The remote's owner/org, e.g. "ONEoo7". Retired, and kept: nothing sets
+    #: or reads it any more -- `display` names the folder a repository sits
+    #: in -- but it is still loaded and saved, because an older build labels
+    #: its repositories with it, and one that finds it empty spends a git call
+    #: per repository filling it back in.
+    owner: str = ""
     template: str = ""  # named template to use; "" means the default one
     #: Named rule table this repository is code-reviewed against; "" means none
     #: has been chosen. The tables themselves live in code_review_rules.json --
@@ -221,10 +226,26 @@ class RepoEntry:
     review_profile: str = ""
 
     def display(self) -> str:
+        """``<containing folder>\\<repository>``, or the label if one is set.
+
+        The folder read off the path, not the remote's owner -- which is what
+        this showed until the two were noticed to be different things. A
+        repository cloned from ``github.com/ONEoo7/x`` usually does sit in a
+        folder called ONEoo7, so the prefix looked right; it went wrong exactly
+        where a prefix earns its place, which is telling two repositories of
+        the same name apart. A fork, a mirror, a second clone kept beside the
+        first, a repository with no remote at all: the remote says one thing
+        about all of them, and where they sit on disk says a different thing
+        about each.
+        """
         if self.label:
             return self.label
-        name = Path(self.path).name or self.path
-        return f"{self.owner}\\{name}" if self.owner else name
+        path = Path(self.path)
+        name = path.name or self.path
+        # "" at a drive or filesystem root, where there is no folder above
+        # to name and the repository is the whole answer.
+        folder = path.parent.name
+        return f"{folder}\\{name}" if folder else name
 
 
 def norm_path(path: str) -> str:

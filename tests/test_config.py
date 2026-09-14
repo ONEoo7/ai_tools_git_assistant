@@ -10,27 +10,50 @@ def _p(*parts):
     return "/".join(("/x", *parts))
 
 
-def test_scan_roots_and_owner_roundtrip():
+def test_scan_roots_roundtrip():
     s = Settings(
-        repos=[RepoEntry("/a/repo", owner="ONEoo7")],
+        repos=[RepoEntry("/a/repo")],
         scan_roots=["/a", "/b"],
         watched_roots=["/a"],
     )
     s2 = Settings.from_dict(s.to_dict())
     assert s2.scan_roots == ["/a", "/b"]
     assert s2.watched_roots == ["/a"]
-    assert s2.repos[0].owner == "ONEoo7"
 
 
-def test_display_uses_owner_prefix():
-    assert RepoEntry("/x/ai_tools", owner="ONEoo7").display() == "ONEoo7\\ai_tools"
+def test_a_retired_owner_survives_a_round_trip():
+    """Nothing here reads it any more, and it is kept for a build that does.
+
+    An older build labels its repositories with the owner, and one that finds
+    it gone runs a git command per repository to put it back. Dropping it on
+    save would make every downgrade pay for that.
+    """
+    s = Settings(repos=[RepoEntry("/a/repo", owner="ONEoo7")])
+    assert Settings.from_dict(s.to_dict()).repos[0].owner == "ONEoo7"
 
 
-def test_display_without_owner_is_basename():
-    assert RepoEntry("/x/ai_tools").display() == "ai_tools"
+def test_display_names_the_folder_the_repository_is_in():
+    assert RepoEntry("/x/ai_tools").display() == "x\\ai_tools"
 
 
-def test_display_label_overrides_owner():
+def test_display_ignores_the_remote_owner():
+    """It used to be the prefix, and it is not the same thing as the folder.
+
+    They agree for a repository cloned into a folder named after its org,
+    which is why this went unnoticed; the prefix is there for the ones that
+    disagree.
+    """
+    assert RepoEntry("/clones/fork/ai_tools", owner="ONEoo7").display() == (
+        "fork\\ai_tools"
+    )
+
+
+def test_display_at_a_root_is_just_the_repository():
+    """There is no folder above it to name."""
+    assert RepoEntry("/ai_tools").display() == "ai_tools"
+
+
+def test_display_label_overrides_the_folder():
     assert RepoEntry("/x/ai_tools", label="Work", owner="ONEoo7").display() == "Work"
 
 

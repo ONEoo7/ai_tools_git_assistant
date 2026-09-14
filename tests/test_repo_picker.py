@@ -5,9 +5,9 @@ of ``git``, and a stub for the one thing that writes that file would only be
 testing this file's idea of what git writes.
 """
 
-import os
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -72,11 +72,16 @@ def settings(repos):
 
 
 def _branches(picker):
-    """The branch shown against each repository name, by name."""
+    """The branch shown against each repository, keyed by its folder name.
+
+    By path rather than by the row's own text: the text is `display()`, which
+    names the folder the repository sits in -- here a pytest temporary
+    directory, whose name is different on every run.
+    """
     return {
-        item.text(0): item.data(0, BRANCH_ROLE)
+        Path(path).name: item.data(0, BRANCH_ROLE)
         for item in picker._items()
-        if item.data(0, Qt.ItemDataRole.UserRole)
+        if (path := item.data(0, Qt.ItemDataRole.UserRole))
     }
 
 
@@ -141,9 +146,9 @@ def test_the_filter_matches_repository_names_and_not_branches(qapp, settings, re
     picker.filter_edit.setText("release")
 
     shown = [
-        item.text(0)
+        Path(path).name
         for item in picker._items()
-        if item.data(0, Qt.ItemDataRole.UserRole) and not item.isHidden()
+        if (path := item.data(0, Qt.ItemDataRole.UserRole)) and not item.isHidden()
     ]
     assert shown == ["alpha"]  # the selected one, which stays visible regardless
 

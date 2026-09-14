@@ -352,37 +352,6 @@ def switch_branch(repo: str | Path, name: str) -> GitResult:
 _SCP_RE = re.compile(r"^[^/@]+@([^/:]+):(.+)$")
 
 
-def parse_owner_repo(url: str) -> tuple[str | None, str | None]:
-    """Extract (owner, repo) from a git remote URL.
-
-    Handles HTTPS (``https://github.com/ONEoo7/ai_tools.git``), scp-style
-    (``git@github.com:ONEoo7/ai_tools.git``) and ssh:// URLs. The owner is the
-    path segment just before the repository name (matches GitHub/GitLab).
-    Returns (None, None) if nothing usable can be parsed.
-    """
-    if not url:
-        return None, None
-    url = url.strip().rstrip("/")
-    if url.endswith(".git"):
-        url = url[:-4]
-
-    scp = _SCP_RE.match(url)
-    if scp:
-        path = scp.group(2)
-    elif "://" in url:
-        rest = url.split("://", 1)[1]  # strip scheme
-        path = rest.split("/", 1)[1] if "/" in rest else ""  # drop host
-    else:
-        path = url
-
-    parts = [p for p in path.split("/") if p]
-    if len(parts) >= 2:
-        return parts[-2], parts[-1]
-    if len(parts) == 1:
-        return None, parts[0]
-    return None, None
-
-
 def get_remote_url(repo: str | Path) -> str | None:
     """Return the URL of ``origin`` (or the first remote), if any."""
     res = _run(repo, ["remote", "get-url", "origin"])
@@ -397,34 +366,20 @@ def get_remote_url(repo: str | Path) -> str | None:
     return None
 
 
-def resolve_repo_meta(repo: str | Path) -> tuple[str, bool]:
-    """Return ``(owner, blocked)`` for a repo.
+def blocked_by_ownership(repo: str | Path) -> bool:
+    """True when git refuses to work in ``repo`` because of who owns it.
 
-    ``owner`` is the remote owner/org ("" if none), and ``blocked`` is True when
-    git refused to read the repo due to a dubious-ownership (safe.directory)
-    error, which the user must resolve in their global git config.
+    That is the dubious-ownership check: a repository owned by another account
+    is off limits until the user adds a ``safe.directory`` exception to their
+    global git config, and every command run in it fails until they do.
+
+    Any command that opens the repository runs the check, so this asks the
+    cheapest one -- the same question `is_git_repo` asks. It used to be answered
+    as a side effect of looking up the remote, back when the remote's owner was
+    wanted as well: a lookup of up to three git calls to learn a boolean the
+    first of them had already settled.
     """
-    res = _run(repo, ["remote", "get-url", "origin"])
-    if res.ok and res.stdout.strip():
-        owner, _ = parse_owner_repo(res.stdout.strip())
-        return owner or "", False
-    if _is_dubious_ownership(res):
-        return "", True
-    names = _run(repo, ["remote"])
-    if _is_dubious_ownership(names):
-        return "", True
-    if names.ok and names.stdout.split():
-        alt = _run(repo, ["remote", "get-url", names.stdout.split()[0]])
-        if alt.ok and alt.stdout.strip():
-            owner, _ = parse_owner_repo(alt.stdout.strip())
-            return owner or "", False
-    return "", False
-
-
-def repo_owner(repo: str | Path) -> str | None:
-    """Return the owner/org of the repo's remote, or None if not determinable."""
-    owner, _ = resolve_repo_meta(repo)
-    return owner or None
+    return _is_dubious_ownership(_run(repo, ["rev-parse", "--is-inside-work-tree"]))
 
 
 def _run_global(args: list[str]) -> GitResult:

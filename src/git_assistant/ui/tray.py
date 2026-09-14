@@ -66,10 +66,6 @@ class TrayApp:
         self.watcher.folderChanged.connect(self._on_watched_change)
         self._refresh_watcher()
 
-        # Fill in any missing repo owners (e.g. from configs saved before owners
-        # were resolved, or repos unblocked since) so the tray shows owner\name.
-        self._backfill_owners()
-
         if self._updates_on:
             self._check_for_update()
             # Then keep checking, so an application left running for days does
@@ -172,9 +168,6 @@ class TrayApp:
         self.settings = Settings.load()
         self._rebuild_menu()
         self._refresh_watcher()
-        # If safe.directory was just fixed here, previously-blocked owners can
-        # now be resolved.
-        self._backfill_owners()
 
     def _notify(self, title: str, message: str) -> None:
         if self.tray.supportsMessages():
@@ -332,51 +325,19 @@ class TrayApp:
         )
         QTimer.singleShot(2000, self.app.quit)
 
-    # ---- owner backfill ----------------------------------------------------
-    def _backfill_owners(self) -> None:
-        """Resolve owners for repos that lack one, off-thread, then persist."""
-        missing = [r.path for r in self.settings.repos if not r.owner]
-        if not missing:
-            return
-        worker = FunctionWorker(
-            lambda paths=tuple(missing): {
-                p: (git_ops.repo_owner(p) or "") for p in paths
-            }
-        )
-        worker.finished.connect(
-            lambda owners, w=worker: self._apply_owners(owners, w)
-        )
-        worker.error.connect(lambda _m, w=worker: self._watch_workers.discard(w))
-        self._watch_workers.add(worker)
-        thread = run_worker(worker)
-        self._watch_threads.add(thread)
-        thread.finished.connect(lambda t=thread: self._watch_threads.discard(t))
-
-    def _apply_owners(self, owners: dict, worker) -> None:
-        self._watch_workers.discard(worker)
-        changed = False
-        for repo in self.settings.repos:
-            resolved = owners.get(repo.path)
-            if resolved and not repo.owner:
-                repo.owner = resolved
-                changed = True
-        if changed:
-            self.settings.save()
-            self._rebuild_menu()
-
     # ---- auto-watch --------------------------------------------------------
     def _refresh_watcher(self) -> None:
         self.watcher.set_roots(list(self.settings.watched_roots))
 
     def _on_watched_change(self, folder: str) -> None:
         """A watched folder changed: rescan it off-thread and auto-add new repos."""
-        worker = FunctionWorker(
-            lambda f=folder: [
-                (p, *git_ops.resolve_repo_meta(p)) for p in git_ops.find_git_repos(f)
-            ]
-        )
+        # Paths and nothing else. This used to ask git two more things about
+        # every repository it found -- the remote's owner, and whether the
+        # repository was blocked -- and kept only the owner, which is no longer
+        # shown anywhere.
+        worker = FunctionWorker(lambda f=folder: git_ops.find_git_repos(f))
         worker.finished.connect(
-            lambda results, f=folder, w=worker: self._merge_watched(f, results, w)
+            lambda paths, f=folder, w=worker: self._merge_watched(f, paths, w)
         )
         worker.error.connect(lambda _m, w=worker: self._watch_workers.discard(w))
         self._watch_workers.add(worker)
@@ -384,13 +345,13 @@ class TrayApp:
         self._watch_threads.add(thread)
         thread.finished.connect(lambda t=thread: self._watch_threads.discard(t))
 
-    def _merge_watched(self, folder: str, results, worker) -> None:
+    def _merge_watched(self, folder: str, paths: list[str], worker) -> None:
         self._watch_workers.discard(worker)
         existing = {_norm(r.path) for r in self.settings.repos}
         added = 0
-        for path, owner, _blocked in results:
+        for path in paths:
             if _norm(path) not in existing:
-                self.settings.repos.append(RepoEntry(path=path, owner=owner))
+                self.settings.repos.append(RepoEntry(path=path))
                 existing.add(_norm(path))
                 added += 1
         if added:

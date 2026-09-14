@@ -377,9 +377,9 @@ def test_picker_nests_submodules_under_their_repo(qapp, settings):
     # Under "All", by name, with the submodule folded into its parent.
     assert _rows(panel.repo_picker) == [
         ("All", 0),
-        ("alpha", 1),
-        ("inner", 2),
-        ("beta", 1),
+        ("x\\alpha", 1),
+        ("libs\\inner", 2),
+        ("x\\beta", 1),
     ]
     # A submodule is a repository in its own right, so it counts as one. The
     # group header is not one, and neither is a repeat under Recently Used.
@@ -393,27 +393,39 @@ def test_picker_folds_submodules_away(qapp, settings):
     panel = CommitPanel(settings, auto_start=False)
 
     alpha = panel.repo_picker.repo_list.topLevelItem(0).child(0)
-    assert alpha.text(0) == "alpha"
+    assert alpha.text(0) == "x\\alpha"
     assert not alpha.isExpanded()
 
 
-def test_the_recently_used_come_first_and_stop_at_five(qapp, settings):
+def test_every_recently_used_repository_is_listed_most_recent_first(
+    qapp, settings
+):
+    """All of them, not the last few, and in the order they were used.
+
+    Used in the reverse of their alphabetical order, so a group that merely
+    sorted by name would come out backwards.
+    """
+    from PyQt6.QtCore import Qt
+
     from git_assistant.ui.repo_picker import ALL_GROUP, RECENT_GROUP
 
     settings.repos = [RepoEntry(f"/x/r{i}") for i in range(8)]
-    settings.recent_repos = [f"/x/r{i}" for i in range(8)]
-    settings.active_repo = "/x/r0"
+    settings.recent_repos = [f"/x/r{i}" for i in reversed(range(8))]
+    settings.active_repo = "/x/r7"
     panel = CommitPanel(settings, auto_start=False)
 
     tree = panel.repo_picker.repo_list
-    assert tree.topLevelItem(0).text(0) == RECENT_GROUP
-    assert tree.topLevelItem(1).text(0) == ALL_GROUP
-    assert tree.topLevelItem(0).childCount() == 5
-    assert [
-        tree.topLevelItem(0).child(i).text(0) for i in range(5)
-    ] == ["r0", "r1", "r2", "r3", "r4"]
-    # All means all: the five are still where you expect to find them.
-    assert tree.topLevelItem(1).childCount() == 8
+    recent, everything = tree.topLevelItem(0), tree.topLevelItem(1)
+
+    def paths(group):
+        role = Qt.ItemDataRole.UserRole
+        return [group.child(i).data(0, role) for i in range(group.childCount())]
+
+    assert recent.text(0) == RECENT_GROUP
+    assert paths(recent) == [f"/x/r{i}" for i in reversed(range(8))]
+    # All means all, and stays in its own order whatever was used last.
+    assert everything.text(0) == ALL_GROUP
+    assert paths(everything) == [f"/x/r{i}" for i in range(8)]
     assert panel.repo_picker.count() == 8
 
 
@@ -424,7 +436,9 @@ def test_a_repository_since_removed_is_not_offered_as_recent(qapp, settings):
     panel = CommitPanel(settings, auto_start=False)
 
     recent = panel.repo_picker.repo_list.topLevelItem(0)
-    assert [recent.child(i).text(0) for i in range(recent.childCount())] == ["alpha"]
+    assert [recent.child(i).text(0) for i in range(recent.childCount())] == [
+        "x\\alpha"
+    ]
 
 
 def test_the_recent_group_is_absent_until_something_is_recent(qapp, settings):
@@ -519,7 +533,7 @@ def test_a_group_title_is_not_something_the_filter_matches(qapp, settings):
     # "beta" is the selection, which is always kept visible; the group survives
     # only because of that child, never because its own title read "All".
     everything = tree.topLevelItem(0)
-    assert everything.child(0).text(0) == "beta"
+    assert everything.child(0).text(0) == "x\\beta"
     assert not everything.isHidden()
 
 

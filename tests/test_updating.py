@@ -274,7 +274,6 @@ def quiet_tray(monkeypatch, tmp_path):
     settings = Settings()
     settings.save = lambda: None
     monkeypatch.setattr(Settings, "load", staticmethod(lambda: settings))
-    monkeypatch.setattr(tray_module.TrayApp, "_backfill_owners", lambda self: None)
     monkeypatch.setattr(tray_module.TrayApp, "_refresh_watcher", lambda self: None)
     return settings
 

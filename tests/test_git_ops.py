@@ -184,39 +184,46 @@ def test_find_git_repos_root_is_repo(tmp_path):
     assert found == [os.path.normpath(str(tmp_path))]
 
 
-@pytest.mark.parametrize(
-    "url, expected",
-    [
-        ("https://github.com/ONEoo7/ai_tools.git", ("ONEoo7", "ai_tools")),
-        ("https://github.com/ONEoo7/ai_tools", ("ONEoo7", "ai_tools")),
-        ("git@github.com:ONEoo7/ai_tools.git", ("ONEoo7", "ai_tools")),
-        ("ssh://git@github.com/ONEoo7/ai_tools.git", ("ONEoo7", "ai_tools")),
-        ("https://gitlab.com/grp/sub/repo.git", ("sub", "repo")),
-        ("", (None, None)),
-        ("not-a-url", (None, "not-a-url")),
-    ],
+#: What git prints for a repository some other account owns, verbatim but for
+#: the names. Every command run in such a repository fails with it.
+_DUBIOUS_OWNERSHIP = (
+    "fatal: detected dubious ownership in repository at 'D:/work/repo'\n"
+    "'D:/work/repo' is owned by:\n"
+    "\t(inconvertible) (S-1-5-21-1-2-3-1003)\n"
+    "but the current user is:\n"
+    "\tDOMAIN/someone (S-1-5-21-4-5-6-238179)\n"
+    "To add an exception for this directory, call:\n"
+    "\n"
+    "\tgit config --global --add safe.directory D:/work/repo\n"
 )
-def test_parse_owner_repo(url, expected):
-    assert git_ops.parse_owner_repo(url) == expected
 
 
-def test_repo_owner_from_real_remote(repo):
-    _git(repo, "remote", "add", "origin", "https://github.com/ONEoo7/ai_tools.git")
-    assert git_ops.repo_owner(repo) == "ONEoo7"
+def test_a_repository_git_works_in_is_not_blocked(repo):
+    assert git_ops.blocked_by_ownership(repo) is False
 
 
-def test_repo_owner_none_without_remote(repo):
-    assert git_ops.repo_owner(repo) is None
-
-
-def test_resolve_repo_meta_with_remote(repo):
+def test_a_remote_has_nothing_to_do_with_being_blocked(repo):
+    """This used to be answered by looking the remote up, as a side effect."""
     _git(repo, "remote", "add", "origin", "git@github.com:ONEoo7/x.git")
-    assert git_ops.resolve_repo_meta(repo) == ("ONEoo7", False)
+    assert git_ops.blocked_by_ownership(repo) is False
 
 
-def test_resolve_repo_meta_no_remote(repo):
-    # No remote, but accessible -> owner empty, not blocked.
-    assert git_ops.resolve_repo_meta(repo) == ("", False)
+def test_a_repository_owned_by_another_account_is_blocked(repo, monkeypatch):
+    """Faked: doing it for real takes a folder some other account owns."""
+    refused = git_ops.GitResult(
+        ok=False, stdout="", stderr=_DUBIOUS_OWNERSHIP, returncode=128
+    )
+    monkeypatch.setattr(git_ops, "_run", lambda *a, **k: refused)
+
+    assert git_ops.blocked_by_ownership(repo) is True
+
+
+def test_a_failure_for_any_other_reason_is_not_blocked(tmp_path):
+    """A folder that is not a repository fails as well, and is not this."""
+    plain = tmp_path / "plain"
+    plain.mkdir()
+
+    assert git_ops.blocked_by_ownership(plain) is False
 
 
 def test_trust_all_repositories_isolated(tmp_path, monkeypatch):

@@ -1360,7 +1360,8 @@ class SettingsDialog(QDialog):
         self.scan_btn.clicked.connect(self._on_scan_folder)
         self.rescan_btn = QPushButton("Rescan selected folder")
         self.rescan_btn.setToolTip(
-            "Re-scan the selected folder for new repositories and refresh owners."
+            "Re-scan the selected folder for new repositories, and for ones "
+            "that have gone from disk."
         )
         self.rescan_btn.clicked.connect(self._on_rescan_selected)
         remove_btn = QPushButton("Remove selected")
@@ -2970,17 +2971,17 @@ class SettingsDialog(QDialog):
             return
         if self._norm(path) in self._repo_items_by_path():
             return  # already present
-        self._add_repo_row(path, git_ops.repo_owner(path) or "")
+        self._add_repo_row(path)
         # A repo added by hand can bring submodules of its own with it.
         for sub in git_ops.find_submodules(path):
             if self._norm(sub) not in self._repo_items_by_path():
-                self._add_repo_row(sub, git_ops.repo_owner(sub) or "")
+                self._add_repo_row(sub)
         self._refresh_counts()
 
-    def _add_repo_row(self, path: str, owner: str) -> QTreeWidgetItem:
+    def _add_repo_row(self, path: str) -> QTreeWidgetItem:
         """Insert a repo row under its containing repo, or its folder group."""
         parent = self._parent_for_repo_path(path)
-        item = self._make_repo_item(RepoEntry(path=path, owner=owner))
+        item = self._make_repo_item(RepoEntry(path=path))
         parent.addChild(item)
         parent.setExpanded(True)
         return item
@@ -3081,7 +3082,7 @@ class SettingsDialog(QDialog):
         self.rescan_btn.setEnabled(False)
         worker = FunctionWorker(
             lambda f=folder: [
-                (p, *git_ops.resolve_repo_meta(p)) for p in git_ops.find_git_repos(f)
+                (p, git_ops.blocked_by_ownership(p)) for p in git_ops.find_git_repos(f)
             ]
         )
         worker.finished.connect(self._on_scan_done)
@@ -3089,20 +3090,21 @@ class SettingsDialog(QDialog):
         self._scan_worker = worker
         self._scan_thread = run_worker(worker)
 
-    def _on_scan_done(self, results: list[tuple[str, str, bool]]) -> None:
+    def _on_scan_done(self, results: list[tuple[str, bool]]) -> None:
+        """Merge ``(path, blocked)`` for each repository the scan found."""
         self.scan_btn.setEnabled(True)
         self.rescan_btn.setEnabled(True)
         folder = getattr(self, "_scanning_folder", None)
         header = self._ensure_root_header(folder) if folder else None
         existing = self._repo_items_by_path()
 
-        added = backfilled = blocked = 0
-        for path, owner, is_blocked in results:
+        added = blocked = 0
+        for path, is_blocked in results:
             if is_blocked:
                 blocked += 1
             item = existing.get(self._norm(path))
             if item is None:
-                new_item = self._make_repo_item(RepoEntry(path=path, owner=owner))
+                new_item = self._make_repo_item(RepoEntry(path=path))
                 # Submodules come back after their parent (the scan sorts by
                 # path), so the row they nest under already exists here.
                 parent = (
@@ -3114,13 +3116,6 @@ class SettingsDialog(QDialog):
                 parent.setExpanded(True)
                 existing[self._norm(path)] = new_item
                 added += 1
-            elif owner:
-                entry: RepoEntry = item.data(0, Qt.ItemDataRole.UserRole)
-                if entry.owner != owner:  # backfill / update a stale owner
-                    entry.owner = owner
-                    item.setData(0, Qt.ItemDataRole.UserRole, entry)
-                    item.setText(0, f"{entry.display()}  -  {entry.path}")
-                    backfilled += 1
 
         pruned = self._prune_missing_under(header)
 
@@ -3133,8 +3128,6 @@ class SettingsDialog(QDialog):
             self.scan_status.setText(f"No git repositories found in {folder}.")
             return
         msg = f"Found {len(results)} repo(s) in {folder}; added {added} new"
-        if backfilled:
-            msg += f", updated {backfilled} owner(s)"
         if pruned:
             msg += f", removed {pruned} missing"
         if blocked:
@@ -3210,10 +3203,7 @@ class SettingsDialog(QDialog):
             if result.stdout.strip() == "already trusted":
                 self.scan_status.setText("All repositories are already trusted.")
             else:
-                self.scan_status.setText(
-                    "Done. All repositories are now trusted - re-scan the folder "
-                    "to fill in owners for the previously blocked repos."
-                )
+                self.scan_status.setText("Done. All repositories are now trusted.")
         else:
             QMessageBox.critical(
                 self,

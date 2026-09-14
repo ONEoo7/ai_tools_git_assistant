@@ -40,10 +40,6 @@ from PyQt6.QtWidgets import (
 from git_assistant import git_ops
 from git_assistant.config import RepoEntry, RepoNode, Settings, build_repo_tree
 
-#: How many of the recently used are worth a shortcut. Past a handful it stops
-#: being a shortcut and becomes a second copy of the list below it.
-RECENT_SHOWN = 5
-
 RECENT_GROUP = "Recently Used"
 ALL_GROUP = "All"
 
@@ -262,16 +258,21 @@ class RepoPicker(QWidget):
         return sorted(self.settings.repos, key=lambda e: e.display().casefold())
 
     def _recent_entries(self) -> list[RepoEntry]:
-        """The last few used, most recent first, skipping any since removed."""
+        """Every repository used, most recent first, skipping any since removed.
+
+        All of them rather than the last few: settings keeps the whole history,
+        and a repository used last week is no less worth reaching for because
+        five others were opened since.
+        """
         by_path = {r.path: r for r in self.settings.repos}
-        seen: list[RepoEntry] = []
+        recent: list[RepoEntry] = []
+        seen: set[str] = set()  # by path: a list scan per row is quadratic now
         for path in self.settings.recent_repos:
             entry = by_path.get(path)
-            if entry is not None and entry not in seen:
-                seen.append(entry)
-            if len(seen) == RECENT_SHOWN:
-                break
-        return seen
+            if entry is not None and path not in seen:
+                seen.add(path)
+                recent.append(entry)
+        return recent
 
     def _make_header(self, title: str) -> QTreeWidgetItem:
         """A group row: a label, and nothing that can be selected or acted on."""
