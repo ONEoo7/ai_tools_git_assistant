@@ -59,8 +59,13 @@ _BRANCH_ON_LIGHT = QColor("#1a7f4b")
 _BRANCH_ON_DARK = QColor("#5fd39a")
 
 
-def _branch_colour(palette: QPalette) -> QColor:
-    """Whichever green reads on the colour this list is drawn on.
+def branch_colour(
+    palette: QPalette, background: QPalette.ColorRole = QPalette.ColorRole.Base
+) -> QColor:
+    """Whichever green reads on ``background``: a list's base by default.
+
+    Public because a branch is named in green wherever it is named -- the bar
+    above the tabs names one on the window's own background.
 
     The list's own background, and not the selected row's -- which sounds like
     the thing that would catch out a colour chosen for the list, and is not.
@@ -69,8 +74,8 @@ def _branch_colour(palette: QPalette) -> QColor:
     the palette's highlight colour. A row's selection moves its background by
     about four percent, so it does not come into this.
     """
-    background = palette.color(QPalette.ColorRole.Base)
-    return _BRANCH_ON_DARK if background.lightness() < 128 else _BRANCH_ON_LIGHT
+    lightness = palette.color(background).lightness()
+    return _BRANCH_ON_DARK if lightness < 128 else _BRANCH_ON_LIGHT
 
 
 class _BranchDelegate(QStyledItemDelegate):
@@ -130,7 +135,7 @@ class _BranchDelegate(QStyledItemDelegate):
             # standing in for one -- the tooltip still has it in full.
             return
         painter.save()
-        painter.setPen(_branch_colour(opt.palette))
+        painter.setPen(branch_colour(opt.palette))
         painter.drawText(
             area,
             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
@@ -143,6 +148,11 @@ class RepoPicker(QWidget):
     """A filter box above a tree of repositories and their submodules."""
 
     repoChanged = pyqtSignal(str)  # emitted with the newly selected path
+
+    #: The branch beside each repository was read again, after a checkout. For
+    #: anything else on screen that names a branch: `repoChanged` does not fire,
+    #: because which repository is selected has not changed.
+    branchesChanged = pyqtSignal()  # noqa: N815 - Qt signal naming
 
     def __init__(self, settings: Settings, parent=None) -> None:
         super().__init__(parent)
@@ -159,9 +169,13 @@ class RepoPicker(QWidget):
         self.repo_list.setItemDelegate(_BranchDelegate(self.repo_list))
         self.repo_list.currentItemChanged.connect(self._on_selected)
 
+        #: Hidden by a host that already titles the list -- the folding
+        #: Repository pane does, on its strip.
+        self.title_label = QLabel("Repository")
+
         box = QVBoxLayout(self)
         box.setContentsMargins(0, 0, 0, 0)
-        box.addWidget(QLabel("Repository"))
+        box.addWidget(self.title_label)
         box.addWidget(self.filter_edit)
         box.addWidget(self.repo_list, 1)
 
@@ -212,6 +226,7 @@ class RepoPicker(QWidget):
             path = item.data(0, Qt.ItemDataRole.UserRole)
             if path:
                 self._label_branch(item, path)
+        self.branchesChanged.emit()
 
     @staticmethod
     def _label_branch(item: QTreeWidgetItem, path: str) -> None:

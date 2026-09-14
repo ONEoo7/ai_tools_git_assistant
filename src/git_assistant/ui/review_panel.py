@@ -1,6 +1,6 @@
 """Code Review tab: check the marked files against a table of rules.
 
-Same shape as Generate Commit Message -- repository on the far left, the work
+Same shape as the Commit tab -- repository on the far left, the work
 in the middle, every call to the model on the right -- because both tabs run the
 configured provider over the current diff, and a reader should not have to learn
 two layouts to follow one run.
@@ -63,6 +63,7 @@ from git_assistant.ui.leaderboard_tab import LeaderboardTab
 from git_assistant.ui import profile_tab as profile_tab_mod
 from git_assistant.ui.profile_tab import ProfileTab
 from git_assistant.ui.rule_sets_tab import RuleSetsTab
+from git_assistant.ui.repo_pane import RepoPane
 from git_assistant.ui.repo_picker import RepoPicker
 from git_assistant.ui import side_panel as side_panel_mod
 from git_assistant.ui.side_panel import SidePanel
@@ -186,20 +187,23 @@ class ReviewPanel(QWidget):
         self.status.setWordWrap(True)
         self.status.setStyleSheet(INFO_COLOUR)
 
+        self.repo_pane = RepoPane(self.repo_picker, margins=(0, 0, SECTION_GAP, 0))
+
         splitter = QSplitter(Qt.Orientation.Horizontal)
-        splitter.addWidget(self._build_picker_pane())
+        splitter.addWidget(self.repo_pane)
+        splitter.addWidget(self._build_run_pane())
         splitter.addWidget(self._build_files_pane())
         splitter.addWidget(self._build_results_pane())
         splitter.addWidget(self._build_side_pane())
-        splitter.setStretchFactor(0, 1)
-        splitter.setStretchFactor(1, 2)
-        splitter.setStretchFactor(2, 4)
-        splitter.setStretchFactor(3, 3)
-        # The side pane starts folded, so its width goes to the results it sits
-        # beside; `attach` keeps the two in step from here on.
-        side_panel_mod.attach(
-            splitter, self.side_panel, open_sizes=[210, 320, 700, side_panel_mod.OPEN_WIDTH]
-        )
+        splitter.setStretchFactor(1, 1)
+        splitter.setStretchFactor(2, 2)
+        splitter.setStretchFactor(3, 4)
+        splitter.setStretchFactor(4, 3)
+        # Both folding panes start folded, so their width goes to the panes
+        # beside them; `attach` keeps them in step from here on.
+        open_sizes = [240, 210, 320, 700, side_panel_mod.OPEN_WIDTH]
+        side_panel_mod.attach(splitter, self.repo_pane, open_sizes=open_sizes)
+        side_panel_mod.attach(splitter, self.side_panel, open_sizes=open_sizes)
 
         layout = QVBoxLayout(self)
         layout.addWidget(splitter, 1)
@@ -209,12 +213,15 @@ class ReviewPanel(QWidget):
         self.refresh_repos()
 
     # ---- panes ---------------------------------------------------------------
-    def _build_picker_pane(self) -> QWidget:
+    def _build_run_pane(self) -> QWidget:
+        """What a review runs with: its rules, its judge and its provider.
+
+        Beside the repository list rather than under it, so that folding the
+        list leaves these on screen.
+        """
         pane = QWidget()
         box = QVBoxLayout(pane)
-        box.setContentsMargins(0, 0, SECTION_GAP, 0)
-        box.addWidget(self.repo_picker, 1)
-        box.addSpacing(SECTION_GAP)
+        box.setContentsMargins(SECTION_GAP, 0, SECTION_GAP, 0)
         box.addWidget(QLabel("Rules profile:"))
         box.addWidget(self.profile_combo)
         box.addWidget(self.rules_note)
@@ -225,6 +232,7 @@ class ReviewPanel(QWidget):
         box.addWidget(QLabel("Inference Providers:"))
         box.addWidget(self.provider_combo)
         box.addWidget(self.provider_label)
+        box.addStretch(1)
         return pane
 
     def _build_files_pane(self) -> QWidget:

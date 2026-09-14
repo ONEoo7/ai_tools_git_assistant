@@ -16,7 +16,9 @@ from is the Identities tab's business; which one is in force is this row's.
 from __future__ import annotations
 
 from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtGui import QPalette
 from PyQt6.QtWidgets import (
+    QApplication,
     QComboBox,
     QHBoxLayout,
     QLabel,
@@ -25,8 +27,10 @@ from PyQt6.QtWidgets import (
 )
 
 from git_assistant import git_ops, repo_config
-from git_assistant.config import Settings
+from git_assistant.config import RepoEntry, Settings
 from git_assistant.identities import IdentityStore
+from git_assistant.ui import theme
+from git_assistant.ui.repo_picker import branch_colour
 
 #: Combo entry that opens the Identities tab instead of selecting anything.
 MANAGE = "__manage__"
@@ -94,6 +98,14 @@ class IdentityBar(QWidget):
         self.tier_warning = QLabel("")
         self.tier_warning.setStyleSheet(WARN_STYLE)
 
+        # Which repository every tab is working on, and the branch it is on.
+        # Here because the repository list folds away, and this is what it was
+        # mostly being read for -- so the list only has to be opened to switch.
+        self.repo_name = QLabel("")
+        self.repo_branch = QLabel("")
+        self._restyle_branch()
+        theme.on_change(self._restyle_branch)
+
         box = QHBoxLayout(self)
         box.setContentsMargins(0, 0, 0, 0)
         box.addWidget(QLabel("Commit as:"))
@@ -103,6 +115,10 @@ class IdentityBar(QWidget):
         box.addWidget(QLabel("Active Settings:"))
         box.addWidget(self.tier_combo)
         box.addWidget(self.tier_warning)
+        box.addSpacing(16)
+        box.addWidget(QLabel("Active Repository:"))
+        box.addWidget(self.repo_name)
+        box.addWidget(self.repo_branch)
         box.addStretch(1)
         box.addWidget(self.auth_status)
 
@@ -113,12 +129,44 @@ class IdentityBar(QWidget):
         self._repo = path or ""
         self.refresh()
 
+    def show_active_repository(self) -> None:
+        """Name the active repository and the branch it is on.
+
+        Cheap enough to call on every checkout: the branch is read out of .git
+        rather than asked of git, and none of the identity is looked up again.
+        """
+        repo = self._repo or self.settings.active_repo
+        if not repo:
+            self.repo_name.setText("(none)")
+            self.repo_name.setToolTip("")
+            self.repo_branch.setText("")
+            self.repo_branch.setToolTip("")
+            return
+        entry = next((r for r in self.settings.repos if r.path == repo), None)
+        # As the repository list names it, label and all.
+        self.repo_name.setText((entry or RepoEntry(path=repo)).display())
+        self.repo_name.setToolTip(repo)
+        branch = git_ops.head_branch(repo)
+        self.repo_branch.setText(branch)
+        self.repo_branch.setToolTip(f"On branch {branch}" if branch else "")
+
+    def _restyle_branch(self) -> None:
+        """The same green the repository list gives a branch, for this theme.
+
+        Worked out from the application's palette rather than this widget's, as
+        the cards do: a stylesheet pins a palette on the widget it is set on,
+        and a pinned palette stops following the theme.
+        """
+        colour = branch_colour(QApplication.palette(), QPalette.ColorRole.Window)
+        self.repo_branch.setStyleSheet(f"color: {colour.name()};")
+
     def refresh(self) -> None:
         """Rebuild from the active repository's *current* git identity."""
         self._loading = True  # repopulating must not look like a user choice
         try:
             self.combo.clear()
             repo = self._repo or self.settings.active_repo
+            self.show_active_repository()
             self._show_tier(repo)
             if not repo:
                 self.combo.setEnabled(False)

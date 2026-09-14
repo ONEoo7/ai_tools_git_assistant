@@ -48,7 +48,9 @@ from git_assistant.diff_strategy import (
 )
 from git_assistant.providers import PROVIDERS
 from git_assistant.ui.estimate_dialog import confirm
+from git_assistant.ui.repo_pane import RepoPane
 from git_assistant.ui.repo_picker import RepoPicker
+from git_assistant.ui.staging_dialog import StagingDialog
 from git_assistant.ui import side_panel as side_panel_mod
 from git_assistant.ui.side_panel import SidePanel
 from git_assistant.ui.workers import (
@@ -188,6 +190,9 @@ class CommitPanel(QWidget):
         self._push_worker = None
         self._coverage: list[FileCoverage] = []
         self._branches: list[str] = []  # local branches of the selected repo
+        #: Changed files in the selected repo, staged or not; what the staging
+        #: window has to offer. Kept because `_set_busy` re-enables its button.
+        self._changed = 0
         #: The recorded run the editor is showing, so "has this been edited?"
         #: has an answer before a stored message replaces it.
         self._shown_run = None
@@ -275,19 +280,24 @@ class CommitPanel(QWidget):
         self.btn_row.addWidget(self.commit_btn)
         self.btn_row.addWidget(self.push_btn)
 
-        # ---- far-left pane: pick the repository ---------------------------
-        repos_pane = QWidget()
-        repos_box = QVBoxLayout(repos_pane)
-        repos_box.setContentsMargins(0, 0, SECTION_GAP, 0)
-        repos_box.addWidget(self.repo_picker, 1)
-        repos_box.addSpacing(SECTION_GAP)
-        repos_box.addWidget(QLabel("Branch:"))
-        repos_box.addWidget(self.branch_combo)
-        repos_box.addWidget(QLabel("Template:"))
-        repos_box.addWidget(self.template_combo)
-        repos_box.addWidget(QLabel("Inference Providers:"))
-        repos_box.addWidget(self.provider_combo)
-        repos_box.addWidget(self.provider_label)
+        # ---- far left: the repository, folded until it is wanted ----------
+        self.repo_pane = RepoPane(self.repo_picker, margins=(0, 0, SECTION_GAP, 0))
+
+        # ---- then what a generation runs with ------------------------------
+        # A column of its own rather than under the list, so that folding the
+        # list does not fold these away with it: they are read on every run,
+        # and the list only when switching.
+        run_pane = QWidget()
+        run_box = QVBoxLayout(run_pane)
+        run_box.setContentsMargins(SECTION_GAP, 0, SECTION_GAP, 0)
+        run_box.addWidget(QLabel("Branch:"))
+        run_box.addWidget(self.branch_combo)
+        run_box.addWidget(QLabel("Template:"))
+        run_box.addWidget(self.template_combo)
+        run_box.addWidget(QLabel("Inference Providers:"))
+        run_box.addWidget(self.provider_combo)
+        run_box.addWidget(self.provider_label)
+        run_box.addStretch(1)
 
         # ---- left pane: the commit message -------------------------------
         left = QWidget()
@@ -313,7 +323,18 @@ class CommitPanel(QWidget):
         # which reads as a misalignment rather than as a margin.
         right_box.setContentsMargins(SECTION_GAP, 0, SECTION_GAP, 0)
         self.files_label = QLabel("Staged files")
-        right_box.addWidget(self.files_label)
+        # What is not staged yet is a count here and nothing more: looking at it
+        # and choosing what to stage is the staging window's job.
+        self.unstaged_btn = QPushButton("Unstaged Changes (0/0)")
+        self.unstaged_btn.setToolTip(
+            "Unstaged changes, of every changed file. Opens the staging window, "
+            "to look at each change and stage the ones you want."
+        )
+        self.unstaged_btn.clicked.connect(self._on_open_staging)
+        files_heading = QHBoxLayout()
+        files_heading.addWidget(self.files_label, 1)
+        files_heading.addWidget(self.unstaged_btn)
+        right_box.addLayout(files_heading)
 
         self.file_list = QTreeWidget()
         self.file_list.setMaximumHeight(150)
@@ -360,17 +381,19 @@ class CommitPanel(QWidget):
         right_box.addWidget(self.diff_view, 1)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
-        splitter.addWidget(repos_pane)
+        splitter.addWidget(self.repo_pane)
+        splitter.addWidget(run_pane)
         splitter.addWidget(left)
         splitter.addWidget(right)
         splitter.addWidget(self._build_side_pane())
-        splitter.setStretchFactor(0, 1)  # repo picker stays narrow
-        splitter.setStretchFactor(1, 3)
-        splitter.setStretchFactor(2, 4)
-        splitter.setStretchFactor(3, 3)
-        side_panel_mod.attach(
-            splitter, self.side_panel, open_sizes=[200, 400, 560, side_panel_mod.OPEN_WIDTH]
-        )
+        splitter.setStretchFactor(1, 1)  # the run settings stay narrow
+        splitter.setStretchFactor(2, 3)
+        splitter.setStretchFactor(3, 4)
+        splitter.setStretchFactor(4, 3)
+        # One declared open layout for both folding panes; see `attach`.
+        open_sizes = [240, 200, 400, 560, side_panel_mod.OPEN_WIDTH]
+        side_panel_mod.attach(splitter, self.repo_pane, open_sizes=open_sizes)
+        side_panel_mod.attach(splitter, self.side_panel, open_sizes=open_sizes)
 
         # Default margins, matching the other tabs. PreviewDialog zeroes its own
         # layout instead, so the standalone window keeps a single set of margins.
@@ -500,6 +523,7 @@ class CommitPanel(QWidget):
         worker meant a thread could outlive the panel that owns it - which
         aborts the process rather than merely failing.
         """
+        self._refresh_unstaged()
         repo = self._current_repo_path()
         if not repo:
             self._show_staged([])
@@ -523,6 +547,29 @@ class CommitPanel(QWidget):
         self._populate_files(coverage, staged=True)
         if not coverage:
             self.files_label.setText("Staged files - nothing staged")
+
+    # ---- what is not staged yet ---------------------------------------------
+    def _refresh_unstaged(self) -> None:
+        """Count the unstaged changes, of every changed file, for the button."""
+        repo = self._current_repo_path()
+        try:
+            entries = git_ops.status_entries(repo) if repo else []
+        except git_ops.GitError:
+            entries = []  # a repo git cannot read; the staged list says as much
+        unstaged, self._changed = git_ops.unstaged_counts(entries)
+        self.unstaged_btn.setText(f"Unstaged Changes ({unstaged}/{self._changed})")
+        # Opens on staged changes alone too: the window is where they come back out.
+        self.unstaged_btn.setEnabled(bool(self._changed))
+
+    def _on_open_staging(self) -> None:
+        repo = self._current_repo_path()
+        if not repo:
+            return
+        entry = next((r for r in self.settings.repos if r.path == repo), None)
+        dialog = StagingDialog(repo, name=entry.display() if entry else "", parent=self)
+        dialog.exec()
+        # What is staged is what the next message is written from.
+        self._load_staged_files()
 
     # ---- branch ------------------------------------------------------------
     def _refresh_branches(self) -> None:
@@ -1160,6 +1207,8 @@ class CommitPanel(QWidget):
         # Refresh clears the very widgets a running generation is about to
         # fill, so it waits with the rest.
         self.refresh_btn.setEnabled(not busy)
+        # The staging window changes what is staged under a generation reading it.
+        self.unstaged_btn.setEnabled(not busy and bool(self._changed))
         self.copy_btn.setEnabled(not busy)
         self.commit_btn.setEnabled(not busy)
         # Switching branch mid-run changes the diff the worker is describing.

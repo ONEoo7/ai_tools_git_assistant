@@ -6,11 +6,15 @@ with `git -C <path> ...` and suppress the console-window flash on Windows.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import re
+import shutil
 import subprocess
 import sys
-from dataclasses import dataclass
+import tempfile
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
 from pathlib import Path
 
 # Directories that never contain a project repo worth listing; pruned while
@@ -704,6 +708,565 @@ def list_tracked_files(repo: str | Path) -> list[str]:
     if not res.ok:
         raise GitError(res.stderr.strip() or "git ls-files failed")
     return [p for p in res.stdout.split("\0") if p]
+
+
+# ---- the working tree, a file at a time --------------------------------------
+@dataclass
+class GitBytes:
+    """A `GitResult` whose output was kept as git wrote it. See `_run_bytes`."""
+
+    ok: bool
+    stdout: bytes
+    stderr: str
+    returncode: int
+
+    def as_result(self) -> GitResult:
+        return GitResult(
+            ok=self.ok,
+            stdout=self.stdout.decode("utf-8", errors="replace"),
+            stderr=self.stderr,
+            returncode=self.returncode,
+        )
+
+
+def _run_bytes(
+    repo: str | Path, args: list[str], *, stdin: bytes | None = None
+) -> GitBytes:
+    """`_run`, without decoding what comes back.
+
+    `_run` reads in text mode, which quietly turns every CRLF into LF on the way
+    in. Harmless for a branch name; fatal for line endings. A diff read that way
+    cannot show a change that is only line endings, and a patch built from it no
+    longer matches the file it came from, so git refuses to apply it. Anything
+    that shows or reproduces file content comes through here instead.
+    """
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(repo), *args],
+            input=stdin,
+            capture_output=True,
+            creationflags=_NO_WINDOW,
+        )
+    except OSError as exc:
+        failed = _cannot_run(exc)
+        return GitBytes(False, b"", failed.stderr, failed.returncode)
+    return GitBytes(
+        ok=proc.returncode == 0,
+        stdout=proc.stdout or b"",
+        stderr=(proc.stderr or b"").decode("utf-8", errors="replace"),
+        returncode=proc.returncode,
+    )
+
+
+def _nul_joined(paths: list[str]) -> bytes:
+    """Names for a ``-z`` stdin: no command-line length to overflow, and no
+    character in a name that needs quoting."""
+    return b"".join(path.encode("utf-8") + b"\0" for path in paths)
+
+
+def _path(raw: bytes) -> str:
+    return raw.decode("utf-8", errors="replace")
+
+
+@dataclass(frozen=True)
+class StatusEntry:
+    """One changed path, as `git status` reports it.
+
+    ``index`` and ``worktree`` are git's two status letters -- HEAD against the
+    index, then the index against the file on disk -- with "." for unchanged.
+    """
+
+    path: str
+    index: str = "."
+    worktree: str = "."
+    #: Where a staged rename or copy came from.
+    orig_path: str = ""
+    untracked: bool = False
+    submodule: bool = False
+    #: In conflict, mid-merge: git wants it resolved and then staged.
+    unmerged: bool = False
+
+    @property
+    def staged(self) -> bool:
+        """Some of this path's change is in the index."""
+        return not (self.untracked or self.unmerged) and self.index != "."
+
+    @property
+    def unstaged(self) -> bool:
+        """Some of this path's change is on disk and not in the index."""
+        return self.untracked or self.unmerged or self.worktree != "."
+
+    @property
+    def paths(self) -> list[str]:
+        """Every path an action on this entry has to name: both ends of a rename."""
+        return [self.path, self.orig_path] if self.orig_path else [self.path]
+
+
+def status_entries(repo: str | Path) -> list[StatusEntry]:
+    """Every changed path: staged, unstaged, untracked and in conflict.
+
+    Porcelain v2 with ``-z``: the one form that says which entries are
+    submodules, and that never quotes a name. Untracked directories are listed a
+    file at a time, because a file is what gets staged.
+
+    Raises GitError when git refuses, e.g. over dubious ownership.
+    """
+    res = _run_bytes(repo, ["status", "--porcelain=v2", "-z", "--untracked-files=all"])
+    if not res.ok:
+        raise GitError(res.stderr.strip() or "git status failed")
+    records = iter(res.stdout.split(b"\0"))
+    entries: list[StatusEntry] = []
+    for record in records:
+        kind = record[:1]
+        if kind == b"?":
+            entries.append(StatusEntry(_path(record[2:]), untracked=True))
+        elif kind == b"1":  # 1 XY sub mH mI mW hH hI path
+            fields = record.split(b" ", 8)
+            entries.append(_changed(fields[1], fields[2], fields[8]))
+        elif kind == b"2":  # 2 XY sub mH mI mW hH hI Xscore path, then origPath
+            fields = record.split(b" ", 9)
+            orig = next(records, b"")
+            entries.append(_changed(fields[1], fields[2], fields[9], orig=orig))
+        elif kind == b"u":  # u XY sub m1 m2 m3 mW h1 h2 h3 path
+            fields = record.split(b" ", 10)
+            entries.append(_changed(fields[1], fields[2], fields[10], unmerged=True))
+    return entries
+
+
+def _changed(
+    xy: bytes, sub: bytes, path: bytes, *, orig: bytes = b"", unmerged: bool = False
+) -> StatusEntry:
+    letters = xy.decode("ascii", errors="replace")
+    return StatusEntry(
+        path=_path(path),
+        index=letters[:1] or ".",
+        worktree=letters[1:2] or ".",
+        orig_path=_path(orig),
+        submodule=sub.startswith(b"S"),
+        unmerged=unmerged,
+    )
+
+
+def unstaged_counts(entries: list[StatusEntry]) -> tuple[int, int]:
+    """``(unstaged, changed)``: paths with work not yet staged, of all changed.
+
+    A file staged in part is one changed path with some of it still unstaged,
+    so it counts once in each.
+    """
+    return sum(1 for entry in entries if entry.unstaged), len(entries)
+
+
+def has_head(repo: str | Path) -> bool:
+    """Whether there is a commit yet. Before the first one there is not."""
+    return _run(repo, ["rev-parse", "--verify", "--quiet", "HEAD"]).ok
+
+
+#: Names given to add, restore and rm arrive on stdin, so no number of them
+#: overflows a command line -- and, with --literal-pathspecs, literally, so a
+#: file called ``*.txt`` is that file rather than a pattern.
+_NAMES_ON_STDIN = ["--pathspec-from-file=-", "--pathspec-file-nul"]
+
+
+def stage_paths(repo: str | Path, paths: list[str]) -> GitResult:
+    """Stage everything about ``paths``: edits, new files and deletions alike."""
+    if not paths:
+        return GitResult(ok=True, stdout="", stderr="", returncode=0)
+    return _run_bytes(
+        repo,
+        ["--literal-pathspecs", "add", "-A", *_NAMES_ON_STDIN],
+        stdin=_nul_joined(paths),
+    ).as_result()
+
+
+def unstage_paths(repo: str | Path, paths: list[str]) -> GitResult:
+    """Take ``paths`` back out of the index, leaving the files on disk alone.
+
+    Before the first commit there is no HEAD to restore an entry from, so the
+    entry is removed instead -- which is what unstaging a new file amounts to.
+    """
+    if not paths:
+        return GitResult(ok=True, stdout="", stderr="", returncode=0)
+    if has_head(repo):
+        how = ["restore", "--staged"]
+    else:
+        how = ["rm", "--cached", "-r", "-q", "--ignore-unmatch"]
+    return _run_bytes(
+        repo,
+        ["--literal-pathspecs", *how, *_NAMES_ON_STDIN],
+        stdin=_nul_joined(paths),
+    ).as_result()
+
+
+#: Every diff here is read by `git apply` as well as by a person, so the config
+#: that makes a diff nicer to read and impossible to apply is overridden:
+#: colour, external diff tools, text conversion, and prefixes other than a/ b/.
+_PATCH_ARGS = [
+    "--no-color",
+    "--no-ext-diff",
+    "--no-textconv",
+    "--src-prefix=a/",
+    "--dst-prefix=b/",
+]
+
+
+def file_diff(
+    repo: str | Path, path: str, *, staged: bool = False, untracked: bool = False
+) -> bytes:
+    """One file's diff, exactly as git wrote it, carriage returns and all.
+
+    ``staged`` compares the index with HEAD; otherwise the file on disk with the
+    index. An untracked file has no index entry, so it is compared with nothing
+    and comes back as a file of added lines.
+
+    Raises GitError when git refuses.
+    """
+    # Names as they are rather than octal-escaped, and blank context lines as a
+    # space rather than nothing -- a line with no prefix is not a diff line.
+    readable = ["-c", "core.quotepath=false", "-c", "diff.suppressBlankEmpty=false"]
+    if untracked:
+        res = _run_bytes(
+            repo,
+            [*readable, "diff", "--no-index", *_PATCH_ARGS, "--", "/dev/null", path],
+        )
+        # --no-index exits 1 for "they differ", which a new file always does.
+        if res.returncode not in (0, 1):
+            raise GitError(res.stderr.strip() or "git diff failed")
+        return res.stdout
+    which = ["--cached"] if staged else []
+    res = _run_bytes(
+        repo,
+        [*readable, "--literal-pathspecs", "diff", *which, *_PATCH_ARGS, "--", path],
+    )
+    if not res.ok:
+        raise GitError(res.stderr.strip() or "git diff failed")
+    return res.stdout
+
+
+def apply_to_index(
+    repo: str | Path, patch: bytes, *, reverse: bool = False
+) -> GitResult:
+    """Apply ``patch`` to the index alone; the file on disk is not touched.
+
+    How part of a file is staged, or with ``reverse``, unstaged. ``--recount``
+    has git count each hunk's lines itself rather than trust its header: a hunk
+    with lines left out is a hunk whose header was written for other lines.
+    """
+    args = ["apply", "--cached", "--recount", "--whitespace=nowarn"]
+    if reverse:
+        args.append("--reverse")
+    return _run_bytes(repo, [*args, "-"], stdin=patch).as_result()
+
+
+#: One line of `git ls-files --eol`: "i/lf    w/crlf  attr/text eol=lf      ".
+_EOL_INFO_RE = re.compile(r"^i/(\S*)\s+w/(\S*)\s+attr/(.*?)\s*$")
+
+
+@dataclass(frozen=True)
+class LineEndings:
+    """How one file's lines end, in the index and on disk, and what is declared.
+
+    ``index`` and ``worktree`` are git's own words: "lf", "crlf", "mixed",
+    "none" for a file with no line break in it, "-text" for one git takes to be
+    binary -- or "" where that copy does not exist: no index entry for a new
+    file, no file on disk for a deleted one. ``attributes`` is what
+    .gitattributes sets for the path, as git spells it ("text eol=lf"), or "".
+    """
+
+    index: str
+    worktree: str
+    attributes: str
+
+    @property
+    def declared(self) -> str:
+        """The line ending .gitattributes names outright: "lf", "crlf" or ""."""
+        for part in self.attributes.split():
+            if part in ("eol=lf", "eol=crlf"):
+                return part[len("eol=") :]
+        return ""
+
+
+def line_endings(repo: str | Path, path: str) -> LineEndings | None:
+    """What ``path`` ends its lines with, as git sees it; None if git has no idea.
+
+    Git's own reading rather than a count of bytes here, so a file git calls
+    binary is binary here too, by the same test.
+    """
+    return line_endings_of(repo, [path]).get(path)
+
+
+#: How much of a command line the names passed to one `git ls-files` may take.
+#: Windows stops a command line at 32767 characters, and ls-files takes names
+#: only as arguments.
+_ARGUMENTS_BUDGET = 16_000
+
+
+def line_endings_of(repo: str | Path, paths: list[str]) -> dict[str, LineEndings]:
+    """`line_endings` for many paths at once, leaving out any git has no idea about."""
+    found: dict[str, LineEndings] = {}
+    wanted = set(paths)
+    batch: list[str] = []
+    size = 0
+    for path in paths:
+        if batch and size + len(path) + 1 > _ARGUMENTS_BUDGET:
+            found.update(_ls_files_eol(repo, batch, wanted))
+            batch, size = [], 0
+        batch.append(path)
+        size += len(path) + 1
+    if batch:
+        found.update(_ls_files_eol(repo, batch, wanted))
+    return found
+
+
+def _ls_files_eol(repo: str | Path, paths: list[str], wanted: set[str]) -> dict:
+    res = _run_bytes(
+        repo,
+        [
+            "--literal-pathspecs",
+            "ls-files", "--eol", "-z", "--cached", "--others", "--", *paths,
+        ],
+    )
+    if not res.ok:
+        raise GitError(res.stderr.strip() or "git ls-files failed")
+    found: dict[str, LineEndings] = {}
+    for record in res.stdout.split(b"\0"):
+        info, _tab, name = record.partition(b"\t")
+        path = _path(name)
+        match = _EOL_INFO_RE.match(info.decode("ascii", errors="replace"))
+        if path in wanted and match:
+            found[path] = LineEndings(*match.groups())
+    return found
+
+
+@dataclass
+class Normalized:
+    """What `normalize_line_endings` did with each path it was given."""
+
+    changed: list[str] = field(default_factory=list)
+    unchanged: list[str] = field(default_factory=list)
+    #: No line-ending rule, a filter owns the file, or there is no file to rewrite.
+    skipped: list[str] = field(default_factory=list)
+    failed: list[tuple[str, str]] = field(default_factory=list)
+
+
+def line_ending_rules(repo: str | Path, paths: list[str]) -> set[str]:
+    """The ``paths`` whose line endings .gitattributes decides.
+
+    A path with a ``text`` or ``eol`` rule and no ``filter``. ``-text`` -- the
+    ``binary`` macro included -- is a rule that says never convert, so it does
+    not count; and a filter such as Git LFS owns the file's bytes outright, so
+    rewriting them underneath it would break it.
+
+    Asked of git rather than read out of the file, so every .gitattributes in
+    the tree, the order they apply in, and macros are all accounted for.
+    """
+    if not paths:
+        return set()
+    res = _run_bytes(
+        repo,
+        ["check-attr", "-z", "--stdin", "text", "eol", "filter"],
+        stdin=_nul_joined(paths),
+    )
+    if not res.ok:
+        raise GitError(res.stderr.strip() or "git check-attr failed")
+    fields = res.stdout.split(b"\0")
+    found: dict[str, dict[str, str]] = {}
+    for at in range(0, len(fields) - 2, 3):
+        path, name, value = (_path(part) for part in fields[at : at + 3])
+        found.setdefault(path, {})[name] = value
+    ruled: set[str] = set()
+    for path, attributes in found.items():
+        text = attributes.get("text", "unspecified")
+        eol = attributes.get("eol", "unspecified")
+        filter_ = attributes.get("filter", "unspecified")
+        filtered = filter_ not in ("unspecified", "unset")
+        if filtered or text == "unset":
+            continue
+        if text in ("set", "auto") or eol in ("lf", "crlf"):
+            ruled.add(path)
+    return ruled
+
+
+def normalize_line_endings(repo: str | Path, paths: list[str]) -> Normalized:
+    """Rewrite ``paths`` on disk with the line endings .gitattributes gives them.
+
+    The conversion is git's own rather than a copy of it: each file is cleaned
+    into a blob the way ``git add`` would clean it, and that blob is written
+    back out the way a checkout would write it. So everything git weighs --
+    patterns, nested .gitattributes files, ``text=auto``'s binary detection, the
+    platform's line ending for ``text`` with no ``eol`` -- is weighed here
+    without being re-derived. The index is never touched.
+
+    Only files with a line-ending rule are considered (see `line_ending_rules`),
+    and a file is written only when that changes its bytes. None of it changes
+    what ``git diff`` shows: git diffs the cleaned form, which is the same
+    before and after.
+
+    Raises GitError when git will not say which rules apply.
+    """
+    done = Normalized()
+    root = Path(repo)
+    on_disk: list[str] = []
+    for path in paths:
+        target = root / path
+        if target.is_file() and not target.is_symlink():
+            on_disk.append(path)
+        else:
+            done.skipped.append(path)  # deleted, a directory, a submodule, a link
+    ruled = line_ending_rules(repo, on_disk)
+    work: list[str] = []
+    for path in on_disk:
+        if path not in ruled:
+            done.skipped.append(path)
+        elif "\n" in path or "\r" in path:
+            done.failed.append((path, "the file name contains a line break"))
+        else:
+            work.append(path)
+    if not work:
+        return done
+
+    for path, form in _checked_out(repo, work).items():
+        if isinstance(form, str):
+            done.failed.append((path, form))
+            continue
+        target = root / path
+        try:
+            if target.read_bytes() == form:
+                done.unchanged.append(path)
+                continue
+            _replace_bytes(target, form)
+        except OSError as exc:
+            done.failed.append((path, str(exc)))
+            continue
+        done.changed.append(path)
+    return done
+
+
+def _checked_out(repo: str | Path, paths: list[str]) -> dict[str, bytes | str]:
+    """Each file as a checkout would write it back: its bytes, or why not.
+
+    Git's own conversion, in two steps: cleaned into a blob the way ``git add``
+    cleans, then smudged back out the way a checkout writes. Writes blobs into
+    the object store -- as ``git add`` does -- and nothing else anywhere.
+    """
+    # Cleaned in one call. safecrlf is off because this conversion is the very
+    # one it exists to warn about, and here it has been asked for.
+    hashed = _run_bytes(
+        repo,
+        ["-c", "core.safecrlf=false", "hash-object", "-w", "--stdin-paths"],
+        stdin=b"".join(path.encode("utf-8") + b"\n" for path in paths),
+    )
+    blobs = hashed.stdout.decode("ascii", errors="replace").split()
+    if not hashed.ok or len(blobs) != len(paths):
+        why = hashed.stderr.strip() or "git hash-object failed"
+        return {path: why for path in paths}
+
+    def checked_out(pair: tuple[str, str]) -> tuple[str, GitBytes]:
+        path, blob = pair
+        return path, _run_bytes(repo, ["cat-file", "--filters", f"--path={path}", blob])
+
+    # Written back one call per file. `cat-file --batch --filters` would do it in
+    # one, but it labels each object with its size *before* conversion, so its
+    # output cannot be split where one file ends and the next begins. Run side
+    # by side instead: the time goes on starting processes, not on work.
+    with ThreadPoolExecutor(max_workers=max(1, min(8, len(paths)))) as pool:
+        outcomes = list(pool.map(checked_out, zip(paths, blobs)))
+    return {
+        path: (
+            result.stdout
+            if result.ok
+            else (result.stderr.strip() or "git cat-file failed")
+        )
+        for path, result in outcomes
+    }
+
+
+@dataclass(frozen=True)
+class EndingChange:
+    """How applying .gitattributes rewrites one file: git's words, before and after."""
+
+    now: str
+    becomes: str
+
+
+def _ending_word(data: bytes) -> str:
+    """"lf", "crlf", "mixed" or "none", by the same names `git ls-files --eol` uses."""
+    crlf = data.count(b"\r\n")
+    lone = data.count(b"\n") - crlf
+    if crlf and lone:
+        return "mixed"
+    if crlf:
+        return "crlf"
+    return "lf" if lone else "none"
+
+
+def line_ending_changes(repo: str | Path, paths: list[str]) -> dict[str, EndingChange]:
+    """The ``paths`` whose line endings applying .gitattributes would rewrite.
+
+    Exactly the files `normalize_line_endings` would change, by running the same
+    conversion without writing the result -- so the two cannot disagree. Git's
+    words for a file cannot settle it alone: a rule that names no ending
+    (``text``, ``text=auto``) leaves the ending to this machine's config, and
+    only the conversion itself says what that comes to.
+
+    Converting is a git call per file, so only the files that could change are
+    converted: a text file with a line-ending rule whose endings on disk are not
+    already the ones the rule names. A file that already has them never changes.
+
+    Raises GitError when git will not say which rules apply.
+    """
+    root = Path(repo)
+    endings = line_endings_of(repo, paths)
+    texty = [
+        path
+        for path in paths
+        if (found := endings.get(path)) is not None
+        and found.worktree in ("lf", "crlf", "mixed")
+        and (root / path).is_file()
+        and not (root / path).is_symlink()
+        and "\n" not in path
+        and "\r" not in path
+    ]
+    ruled = line_ending_rules(repo, texty)
+    suspects = []
+    for path in texty:
+        declared = endings[path].declared
+        # With no ending named, the rule leaves it to this machine's config,
+        # which only the conversion itself can answer for.
+        if path in ruled and (not declared or endings[path].worktree != declared):
+            suspects.append(path)
+    if not suspects:
+        return {}
+    changes: dict[str, EndingChange] = {}
+    for path, form in _checked_out(repo, suspects).items():
+        if isinstance(form, str):
+            continue  # git would not convert it; Normalize would say why
+        try:
+            if (root / path).read_bytes() == form:
+                continue
+        except OSError:
+            continue
+        changes[path] = EndingChange(endings[path].worktree, _ending_word(form))
+    return changes
+
+
+def _replace_bytes(target: Path, data: bytes) -> None:
+    """Write ``data`` over ``target`` in one step, keeping its permissions.
+
+    By way of a temporary file beside it and a rename, so a failure part way
+    through never leaves a file half rewritten.
+    """
+    handle, temporary = tempfile.mkstemp(
+        dir=target.parent, prefix=f".{target.name}.", suffix=".tmp"
+    )
+    try:
+        with os.fdopen(handle, "wb") as out:
+            out.write(data)
+        shutil.copymode(target, temporary)
+        os.replace(temporary, target)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(temporary)
+        raise
 
 
 def list_tags(repo: str | Path) -> list[str]:

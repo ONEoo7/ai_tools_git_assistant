@@ -233,7 +233,7 @@ class SettingsDialog(QDialog):
         # Read from their own file, seeded from git on first run.
         self.identity_store = IdentityStore.bootstrap()
 
-        tabs.addTab(self._build_commit_tab(), "Generate Commit Message")
+        tabs.addTab(self._build_commit_tab(), "Commit")
         tabs.addTab(self._build_tags_tab(), "Branches && Tags")
         tabs.addTab(self._build_agents_tab(), "Audit")
         tabs.addTab(self._build_review_tab(), "Code Review")
@@ -256,6 +256,11 @@ class SettingsDialog(QDialog):
             self.review_panel,
         ):
             panel.repo_picker.repoChanged.connect(self.identity_bar.set_repo)
+            # A checkout on any tab moves the branch the bar names, without the
+            # selected repository changing -- so it is its own signal.
+            panel.repo_picker.branchesChanged.connect(
+                self.identity_bar.show_active_repository
+            )
         # Editing the list must re-offer it; picking "Manage identities..."
         # is a request for the tab that owns the list.
         self.identities_panel.identitiesChanged.connect(self.identity_bar.refresh)
@@ -1766,7 +1771,7 @@ class SettingsDialog(QDialog):
         layout.addWidget(
             QLabel(
                 "Prompt templates. Assign one per repository in the "
-                "Generate Commit Message tab.\n"
+                "Commit tab.\n"
                 "Placeholders: {branch}, {diffstat}, {diff}"
             )
         )

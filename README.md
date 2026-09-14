@@ -30,7 +30,7 @@ Top right is the theme picker: follow the system, light, dark, or pink.
 
 ## What it does, tab by tab
 
-### Generate Commit Message
+### Commit
 
 | | |
 |---|---|

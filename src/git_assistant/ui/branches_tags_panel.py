@@ -37,7 +37,9 @@ from git_assistant.ui.branch_cards import (
     PlainBranchCard,
     offered_or_default,
 )
+from git_assistant.ui.repo_pane import RepoPane
 from git_assistant.ui.repo_picker import RepoPicker
+from git_assistant.ui import side_panel as side_panel_mod
 from git_assistant.ui.workers import FunctionWorker, run_worker
 
 CUSTOM = "custom"
@@ -176,23 +178,19 @@ class BranchesTagsPanel(QWidget):
         self.tag_list.itemClicked.connect(self._on_tag_clicked)
         layout.addWidget(self.tag_list, 1)
 
-        # Repository on the left, then the two halves of the tab - the same
-        # shape as every other repo-driven tab.
-        picker_pane = QWidget()
-        picker_box = QVBoxLayout(picker_pane)
-        picker_box.setContentsMargins(0, 0, SECTION_GAP, 0)
-        picker_box.addWidget(self.repo_picker, 1)
+        # Repository on the left, folded until it is wanted, then the two halves
+        # of the tab - the same shape as every other repo-driven tab.
+        self.repo_pane = RepoPane(self.repo_picker, margins=(0, 0, SECTION_GAP, 0))
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
-        splitter.addWidget(picker_pane)
+        splitter.addWidget(self.repo_pane)
         splitter.addWidget(self._build_branches_pane())
         splitter.addWidget(content)
-        splitter.setStretchFactor(0, 1)
         splitter.setStretchFactor(1, 3)
         splitter.setStretchFactor(2, 3)
-        splitter.setSizes([200, 480, 480])
+        side_panel_mod.attach(splitter, self.repo_pane, open_sizes=[240, 480, 480])
 
-        # Default margins, exactly as the Generate Commit Message tab uses, so
+        # Default margins, exactly as the Commit tab uses, so
         # every tab keeps the same gap between its border and its content.
         outer = QVBoxLayout(self)
         outer.addWidget(splitter)

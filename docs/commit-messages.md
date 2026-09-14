@@ -1,6 +1,6 @@
 # Commit messages
 
-The **Generate Commit Message** tab writes a Conventional Commits message for
+The **Commit** tab writes a Conventional Commits message for
 what is staged, shows it beside the files it was written from, and lets you edit
 it before committing.
 

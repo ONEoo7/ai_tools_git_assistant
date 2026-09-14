@@ -57,6 +57,7 @@ from git_assistant.ui.audit_cards import AuditCard
 from git_assistant.ui.estimate_dialog import confirm
 from git_assistant.ui.settings_diff_dialog import SettingsDiffDialog
 from git_assistant.ui.preview_dialog import SECTION_GAP
+from git_assistant.ui.repo_pane import RepoPane
 from git_assistant.ui.repo_picker import RepoPicker
 from git_assistant.ui import side_panel as side_panel_mod
 from git_assistant.ui.side_panel import SidePanel
@@ -261,15 +262,16 @@ class AgentsPanel(QWidget):
 
         # Where a run is aimed: which repository, and through which provider.
         # Both are about the run rather than about any one audit, and both are
-        # shared with other tabs.
-        picker_pane = QWidget()
-        picker_box = QVBoxLayout(picker_pane)
-        picker_box.setContentsMargins(0, 0, SECTION_GAP, 0)
-        picker_box.addWidget(self.repo_picker, 1)
-        picker_box.addSpacing(SECTION_GAP)
-        picker_box.addWidget(QLabel("Inference Providers:"))
-        picker_box.addWidget(self.provider_combo)
-        picker_box.addWidget(self.provider_label)
+        # shared with other tabs. Two columns rather than one, so that folding
+        # the repository list leaves the provider on screen.
+        self.repo_pane = RepoPane(self.repo_picker, margins=(0, 0, SECTION_GAP, 0))
+        run_pane = QWidget()
+        run_box = QVBoxLayout(run_pane)
+        run_box.setContentsMargins(SECTION_GAP, 0, SECTION_GAP, 0)
+        run_box.addWidget(QLabel("Inference Providers:"))
+        run_box.addWidget(self.provider_combo)
+        run_box.addWidget(self.provider_label)
+        run_box.addStretch(1)
 
         self.audits_pane = self._build_audits_pane()
 
@@ -283,17 +285,19 @@ class AgentsPanel(QWidget):
         self.side_panel.calls.noted.connect(self.status.setText)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
-        splitter.addWidget(picker_pane)
+        splitter.addWidget(self.repo_pane)
+        splitter.addWidget(run_pane)
         splitter.addWidget(self.audits_pane)
         splitter.addWidget(content)
         splitter.addWidget(self.side_panel)
-        splitter.setStretchFactor(0, 1)
         splitter.setStretchFactor(1, 1)
-        splitter.setStretchFactor(2, 3)
-        splitter.setStretchFactor(3, 2)
-        side_panel_mod.attach(
-            splitter, self.side_panel, open_sizes=[200, 320, 620, side_panel_mod.OPEN_WIDTH]
-        )
+        splitter.setStretchFactor(2, 1)
+        splitter.setStretchFactor(3, 3)
+        splitter.setStretchFactor(4, 2)
+        # One declared open layout for both folding panes; see `attach`.
+        open_sizes = [240, 180, 320, 620, side_panel_mod.OPEN_WIDTH]
+        side_panel_mod.attach(splitter, self.repo_pane, open_sizes=open_sizes)
+        side_panel_mod.attach(splitter, self.side_panel, open_sizes=open_sizes)
 
         outer = QVBoxLayout(self)
         outer.addWidget(splitter)

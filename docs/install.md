@@ -47,7 +47,7 @@ The installer is deliberately per-user. A Program Files install would make every
 3. **Identities** — add the identities you commit as. See
    [identities](identities.md).
 
-4. Stage something, pick the repository on the **Generate Commit Message** tab,
+4. Stage something, pick the repository on the **Commit** tab,
    and press *Generate*.
 
 ## Updating
