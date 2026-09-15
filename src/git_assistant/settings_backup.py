@@ -52,7 +52,14 @@ CHECKSUM_SUFFIX = ".sha256"
 #: What a restore puts back, and what it leaves alone. These are the user's
 #: work rather than their preferences: the repositories they manage, where they
 #: were found, and which one they were last looking at.
-KEPT = ("repos", "active_repo", "recent_repos", "scan_roots", "watched_roots")
+KEPT = (
+    "repos",
+    "active_repo",
+    "recent_repos",
+    "favorite_repos",
+    "scan_roots",
+    "watched_roots",
+)
 
 
 class Integrity(StrEnum):

@@ -187,6 +187,24 @@ def test_create_tag_refuses_a_name_that_exists(ctx, repo):
     assert result["isError"] is True
 
 
+def test_push_with_no_remote_named_goes_where_the_branch_tracks(ctx, repo, tmp_path):
+    """"Its remote", as the tool says: the one chosen for the branch, not origin."""
+    branch = _git(repo, "branch", "--show-current").stdout.strip()
+    bares = {}
+    for name in ("origin", "backup"):
+        bares[name] = tmp_path.parent / f"{tmp_path.name}-{name}.git"
+        _git(tmp_path.parent, "init", "-q", "--bare", str(bares[name]))
+        _git(repo, "remote", "add", name, str(bares[name]))
+    _git(repo, "config", f"branch.{branch}.remote", "backup")
+    _git(repo, "config", f"branch.{branch}.merge", f"refs/heads/{branch}")
+
+    result = call("push", ctx)
+
+    assert result["isError"] is False, body(result)
+    assert _git(bares["backup"], "branch", "--format=%(refname:short)").stdout.split() == [branch]
+    assert _git(bares["origin"], "branch", "--format=%(refname:short)").stdout.split() == []
+
+
 def test_a_failing_git_command_is_reported_not_raised(ctx):
     result = call("push", ctx)  # no remote in a fresh repo
     assert result["isError"] is True

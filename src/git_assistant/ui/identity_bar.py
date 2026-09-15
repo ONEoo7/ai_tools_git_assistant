@@ -276,7 +276,7 @@ class IdentityBar(QWidget):
         box.addWidget(self.inference_name)
         box.addWidget(self.inference_model)
         box.addWidget(_Divider())
-        box.addWidget(QLabel("Push to:"))
+        box.addWidget(QLabel("Remote:"))
         box.addWidget(self.auth_status)
         box.addWidget(_Divider())
         # The slack goes after all of it: the groups read as one run from the
@@ -489,17 +489,31 @@ class IdentityBar(QWidget):
         self.status.setToolTip(f"{tip}\n\n{warn}" if warn else tip)
         self.status.setStyleSheet(WARN_STYLE if warn else INFO_STYLE)
 
+    def show_remote(self) -> None:
+        """Name the remote a push goes to again, and what logs in to it.
+
+        For after the branch or its remotes change, neither of which changes
+        the identity -- so the rest of the bar is not looked up again.
+        """
+        repo = self._repo or self.settings.active_repo
+        if repo:
+            self._describe_auth(repo)
+
     def _describe_auth(self, repo: str) -> None:
         """Say what will authenticate a push, which the identity does not decide."""
         auth = git_ops.describe_push_auth(repo)
         warning = auth.warning()
-        self.auth_status.setText(auth.destination())
+        # By name as well: two remotes on the same host read the same otherwise,
+        # and choosing the other one would change nothing on screen.
+        where = auth.destination()
+        self.auth_status.setText(f"{auth.remote} ({where})" if auth.remote else where)
         self.auth_status.setStyleSheet(WARN_STYLE if warning else INFO_STYLE)
         self.auth_status.setToolTip(
             warning
             or (
-                "The credential that will be used for a push. Set separately "
-                "from the committer identity."
+                "The remote a push of this branch goes to -- the one it tracks -- "
+                "and the credential it will use. Set separately from the "
+                "committer identity."
             )
         )
 

@@ -135,6 +135,7 @@ FIELD_COMMENTS = {
     "repos": "The repositories this application manages.",
     "active_repo": "Path of the repository the window is working in.",
     "recent_repos": "Recently used repository paths, most recent first.",
+    "favorite_repos": "Repository paths kept at the top of every repository list.",
     "scan_roots": "Folders scanned for repositories.",
     "watched_roots": "Folders watched, so a repository added there is noticed.",
     "mcp_allow_writes": (
@@ -392,6 +393,7 @@ class Settings:
     repos: list[RepoEntry] = field(default_factory=list)
     active_repo: str = ""  # path of the active RepoEntry
     recent_repos: list[str] = field(default_factory=list)  # paths, most-recent first
+    favorite_repos: list[str] = field(default_factory=list)  # paths, as they were added
     scan_roots: list[str] = field(default_factory=list)  # folders scanned for repos
     watched_roots: list[str] = field(default_factory=list)  # roots auto-watched for new repos
     # Committer identities live in committer_identities.json, not here -- see
@@ -720,6 +722,22 @@ class Settings:
             rec.insert(0, path)
         self.recent_repos = rec
 
+    # ---- favorites ----------------------------------------------------------
+    def is_favorite(self, path: str) -> bool:
+        return bool(path) and path in self.favorite_repos
+
+    def set_favorite(self, path: str, favorite: bool) -> None:
+        """Add ``path`` to the favorites, or take it off. There is no limit.
+
+        Pruned of repositories no longer managed on the way, as the recent ones
+        are, so the file does not keep naming folders nobody can pick.
+        """
+        valid = {r.path for r in self.repos}
+        kept = [p for p in self.favorite_repos if p != path and p in valid]
+        if favorite and path in valid:
+            kept.append(path)
+        self.favorite_repos = kept
+
     # ---- (de)serialization -------------------------------------------------
     def to_dict(self) -> dict:
         data = asdict(self)
@@ -745,6 +763,15 @@ class Settings:
             )
         clean["provider_temperatures"] = _temperatures_from(
             clean.get("provider_temperatures")
+        )
+        # Hand-edited, this can hold anything: only paths come back, once each.
+        favorites = clean.get("favorite_repos")
+        clean["favorite_repos"] = list(
+            dict.fromkeys(
+                p
+                for p in (favorites if isinstance(favorites, list) else [])
+                if isinstance(p, str) and p
+            )
         )
         repos = clean.get("repos") or []
         clean["repos"] = [

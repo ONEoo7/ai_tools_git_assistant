@@ -54,6 +54,7 @@ CLASSIFIED = {
     "repos": "workspace",
     "active_repo": "workspace",
     "recent_repos": "workspace",
+    "favorite_repos": "workspace",
     "scan_roots": "workspace",
     "watched_roots": "workspace",
     "theme": "selection",

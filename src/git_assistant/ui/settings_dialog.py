@@ -269,6 +269,11 @@ class SettingsDialog(QDialog):
             panel.repo_picker.branchesChanged.connect(
                 self.identity_bar.show_active_repository
             )
+            # And the remote a push goes to, which is the branch's to track.
+            panel.repo_picker.branchesChanged.connect(self.identity_bar.show_remote)
+        self.commit_panel.remotes_page.remotesChanged.connect(
+            self.identity_bar.show_remote
+        )
         # The provider is application-wide, so a change on any tab that offers
         # one is named in the bar straight away.
         for panel in (self.commit_panel, self.agents_panel, self.review_panel):

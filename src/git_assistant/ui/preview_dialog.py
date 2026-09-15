@@ -48,6 +48,7 @@ from git_assistant.diff_strategy import (
 )
 from git_assistant.providers import PROVIDERS
 from git_assistant.ui.branch_picker import BRANCH_TAB, BranchPicker
+from git_assistant.ui.remotes_page import REMOTES_TAB, RemotesPage
 from git_assistant.ui.estimate_dialog import confirm
 from git_assistant.ui.repo_pane import INFERENCE_TAB, RepoPane, inference_page
 from git_assistant.ui.repo_picker import RepoPicker
@@ -277,6 +278,11 @@ class CommitPanel(QWidget):
         self.branch_picker = BranchPicker()
         self.branch_picker.branchChosen.connect(self._on_branch_chosen)
 
+        # Where the branch is pushed: the repository's remotes, and which one the
+        # branch tracks. Its own git calls, because nothing here depends on them
+        # -- the bar above the tabs is told, through `remotesChanged`.
+        self.remotes_page = RemotesPage()
+
         # Each project can use its own prompt template; picking one here is what
         # assigns it to the selected repository.
         self.template_combo = QComboBox()
@@ -346,12 +352,14 @@ class CommitPanel(QWidget):
         self.btn_row.addWidget(self.commit_btn)
         self.btn_row.addWidget(self.push_btn)
 
-        # ---- far left: repository, branch and inference, folded until wanted -
-        # All three behind the repository's own strip: each is chosen when
+        # ---- far left: repository, branch, remotes and inference, folded -----
+        # All four behind the repository's own strip: each is chosen when
         # switching and only looked at otherwise, and the bar above the tabs
-        # names every one of them.
+        # names every one of them. The remotes beside the branch, which is what
+        # tracks one; the model last, as on every tab that runs one.
         self.repo_pane = RepoPane(self.repo_picker, margins=(0, 0, SECTION_GAP, 0))
         self.repo_pane.add_page(self.branch_picker, BRANCH_TAB)
+        self.repo_pane.add_page(self.remotes_page, REMOTES_TAB)
         self.repo_pane.add_page(
             inference_page(self.provider_combo, self.provider_label), INFERENCE_TAB
         )
@@ -647,6 +655,9 @@ class CommitPanel(QWidget):
         current = git_ops.current_branch(repo) if repo else ""
         self.branch_picker.set_branches(self._branches, current)
         self.branch_picker.setEnabled(bool(self._branches))
+        # Which remote is tracked is the checked-out branch's, so it is read again
+        # whenever that could have changed -- which is whenever this is.
+        self.remotes_page.show_repo(repo)
 
     def _on_branch_chosen(self, target: str) -> None:
         repo = self._current_repo_path()
@@ -1290,7 +1301,10 @@ class CommitPanel(QWidget):
                 return
             count = f"{ahead} commit(s)" if ahead is not None else "commits"
         else:
-            target = "a new upstream branch on 'origin'"
+            # Where `git_ops.push` sends a first push: the remote the branch was
+            # set to track, and origin when it tracks none.
+            remote = git_ops.tracking_remote(repo.path, branch) or "origin"
+            target = f"a new upstream branch on '{remote}'"
             count = "this branch"
 
         confirm = QMessageBox.question(

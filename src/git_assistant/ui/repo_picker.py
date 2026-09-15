@@ -5,13 +5,17 @@ repository here is what sets the active repository and records it as recent.
 Submodules are shown nested under the repository that contains them, and are
 selectable in their own right -- a submodule is a repo you commit in.
 
-Two groups rather than one sorted list. Recency used to be handled by ordering
+Groups rather than one sorted list. Recency used to be handled by ordering
 -- the active repository first, then the recently used -- which meant the list
 silently rearranged itself under you and never said where the recent ones
 stopped. So the recent ones have a group of their own, and **All** is the
 stable, alphabetical list you can scan by eye. A repository appears in both:
 All means all, and a repository that vanished from its usual place whenever it
 was used would be worse than a duplicated row.
+
+Above them both, **Favorites**: the repositories the user chose to keep at hand,
+by name, added and taken off from any row's right-click menu. Chosen rather than
+worked out, so -- unlike recency -- it stays put until the user moves it.
 
 Each row names the branch that repository is on, after the name and in its own
 colour. It is the fact you need before you act on a repository and the one this
@@ -28,6 +32,7 @@ from PyQt6.QtWidgets import (
     QApplication,
     QLabel,
     QLineEdit,
+    QMenu,
     QStyle,
     QStyledItemDelegate,
     QStyleOptionViewItem,
@@ -40,8 +45,20 @@ from PyQt6.QtWidgets import (
 from git_assistant import git_ops
 from git_assistant.config import RepoEntry, RepoNode, Settings, build_repo_tree
 
+FAVORITES_GROUP = "Favorites"
 RECENT_GROUP = "Recently Used"
 ALL_GROUP = "All"
+
+ADD_FAVORITE = "Add to Favorites"
+REMOVE_FAVORITE = "Remove from Favorites"
+
+#: On every group's title, because a right-click is not something a list says
+#: it answers to.
+_GROUP_TIPS = {
+    FAVORITES_GROUP: "Right-click a repository to take it off Favorites.",
+    RECENT_GROUP: "Right-click a repository to add it to Favorites.",
+    ALL_GROUP: "Right-click a repository to add it to Favorites.",
+}
 
 #: Where a row keeps the branch it is on. Beside the text rather than in it, so
 #: the branch can be painted in its own colour -- and so the filter box goes on
@@ -144,6 +161,27 @@ class _BranchDelegate(QStyledItemDelegate):
         painter.restore()
 
 
+class _RepoTree(QTreeWidget):
+    """The list, where a right-click opens a menu and selects nothing.
+
+    Qt's item views move the current row on any mouse button. Here the current
+    row is the active repository -- every tab reloads for it -- so a right-click
+    to add a repository to Favorites would also switch to it.
+    """
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        if event.button() == Qt.MouseButton.RightButton:
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        if event.button() == Qt.MouseButton.RightButton:
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+
 class RepoPicker(QWidget):
     """A filter box above a tree of repositories and their submodules."""
 
@@ -163,11 +201,13 @@ class RepoPicker(QWidget):
         self.filter_edit.setClearButtonEnabled(True)
         self.filter_edit.textChanged.connect(self._apply_filter)
 
-        self.repo_list = QTreeWidget()
+        self.repo_list = _RepoTree()
         self.repo_list.setHeaderHidden(True)
         self.repo_list.setRootIsDecorated(True)
         self.repo_list.setItemDelegate(_BranchDelegate(self.repo_list))
         self.repo_list.currentItemChanged.connect(self._on_selected)
+        self.repo_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.repo_list.customContextMenuRequested.connect(self._on_menu)
 
         #: Hidden by a host that already titles the list -- the folding
         #: Repository pane does, on its strip.
@@ -196,9 +236,9 @@ class RepoPicker(QWidget):
     def count(self) -> int:
         """Number of selectable repositories, submodules included.
 
-        Distinct repositories, not rows: the recently used are listed twice on
-        purpose, and a count that grew when one was used would be counting the
-        shortcut rather than the repository.
+        Distinct repositories, not rows: favorites and the recently used are
+        listed twice on purpose, and a count that grew when one was used would
+        be counting the shortcut rather than the repository.
         """
         return len(
             {
@@ -240,9 +280,9 @@ class RepoPicker(QWidget):
         For after a checkout, which moves one label and nothing else: `refresh`
         would rebuild the list and take the scroll position and whatever the
         user had folded open with it. Every row rather than the one that was
-        checked out, because a repository can be listed twice -- once under
-        **Recently Used** and once under **All** -- and half an answer on
-        screen is worse than the stale one it replaced.
+        checked out, because a repository can be listed more than once -- under
+        **Favorites** and **Recently Used** as well as under **All** -- and half
+        an answer on screen is worse than the stale one it replaced.
         """
         for item in self._items():
             path = item.data(0, Qt.ItemDataRole.UserRole)
@@ -263,6 +303,11 @@ class RepoPicker(QWidget):
         """Reload from settings (call after repositories are added or removed)."""
         self.repo_list.blockSignals(True)
         self.repo_list.clear()
+
+        favorites = self._favorites_group()
+        if favorites is not None:
+            self.repo_list.addTopLevelItem(favorites)
+            favorites.setExpanded(True)
 
         recent = self._recent_entries()
         if recent:
@@ -294,6 +339,77 @@ class RepoPicker(QWidget):
         """Every repository, by name. `build_repo_tree` sorts the nested ones."""
         return sorted(self.settings.repos, key=lambda e: e.display().casefold())
 
+    # ---- favorites ---------------------------------------------------------
+    def set_favorite(self, path: str, favorite: bool) -> None:
+        """Add ``path`` to Favorites or take it off, saved, and on screen at once.
+
+        Only the Favorites group is rebuilt. The rest of the list keeps its rows
+        and whatever was folded open, as after a checkout.
+        """
+        self.settings.set_favorite(path, favorite)
+        self.settings.save()
+        self.repo_list.blockSignals(True)
+        try:
+            first = self.repo_list.topLevelItem(0)
+            if first is not None and first.text(0) == FAVORITES_GROUP:
+                self.repo_list.takeTopLevelItem(0)
+            group = self._favorites_group()
+            if group is not None:
+                self.repo_list.insertTopLevelItem(0, group)
+                group.setExpanded(True)
+            # The selected row may have been one of the favorites just replaced.
+            # Qt moves the selection to a neighbour of its own choosing, and the
+            # active repository is the one that has to stay selected.
+            if self.current_path() != self.settings.active_repo:
+                everything = next(
+                    (g for g in self._groups() if g.text(0) == ALL_GROUP), None
+                )
+                if everything is not None:
+                    target = self._find(everything, self.settings.active_repo)
+                    if target is not None:
+                        self.repo_list.setCurrentItem(target)
+        finally:
+            self.repo_list.blockSignals(False)
+        # Only while there is something typed. With the box empty nothing is
+        # hidden, and filtering folds every row -- including the ones opened by
+        # hand, which this was careful to leave open.
+        if self.filter_edit.text().strip():
+            self._apply_filter(self.filter_edit.text())
+
+    def _groups(self):
+        return [
+            self.repo_list.topLevelItem(i)
+            for i in range(self.repo_list.topLevelItemCount())
+        ]
+
+    def _favorites_group(self) -> QTreeWidgetItem | None:
+        """The Favorites group, by name, or None while there are none."""
+        by_path = {r.path: r for r in self.settings.repos}
+        entries = sorted(
+            (by_path[p] for p in self.settings.favorite_repos if p in by_path),
+            key=lambda e: e.display().casefold(),
+        )
+        if not entries:
+            return None
+        header = self._make_header(FAVORITES_GROUP)
+        for entry in entries:
+            # Flat, as the recent ones are: a favorite submodule is a row of its
+            # own here rather than a reason to show its parent too.
+            header.addChild(self._make_item(RepoNode(entry)))
+        return header
+
+    def _on_menu(self, point) -> None:
+        item = self.repo_list.itemAt(point)
+        path = item.data(0, Qt.ItemDataRole.UserRole) if item is not None else ""
+        if not path:
+            return  # a group's title, or the space below the last row
+        menu = QMenu(self)
+        if self.settings.is_favorite(path):
+            menu.addAction(REMOVE_FAVORITE, lambda: self.set_favorite(path, False))
+        else:
+            menu.addAction(ADD_FAVORITE, lambda: self.set_favorite(path, True))
+        menu.exec(self.repo_list.viewport().mapToGlobal(point))
+
     def _recent_entries(self) -> list[RepoEntry]:
         """Every repository used, most recent first, skipping any since removed.
 
@@ -315,6 +431,7 @@ class RepoPicker(QWidget):
         """A group row: a label, and nothing that can be selected or acted on."""
         item = QTreeWidgetItem([title])
         item.setData(0, Qt.ItemDataRole.UserRole, "")
+        item.setToolTip(0, _GROUP_TIPS.get(title, ""))
         item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsSelectable)
         font = item.font(0)
         font.setBold(True)

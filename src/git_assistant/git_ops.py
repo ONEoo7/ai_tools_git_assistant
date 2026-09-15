@@ -378,6 +378,93 @@ def get_remote_url(repo: str | Path) -> str | None:
     return None
 
 
+# ---- remotes -----------------------------------------------------------------------
+@dataclass(frozen=True)
+class Remote:
+    """A remote as the repository has it configured: a name, and where it fetches."""
+
+    name: str
+    url: str
+
+
+def list_remotes(repo: str | Path) -> list[Remote]:
+    """The repository's remotes, by name, each with its fetch URL.
+
+    One `git remote -v` rather than a `get-url` per remote. Its lines are
+    ``name<TAB>url (fetch)``: a name cannot hold whitespace, and a URL -- a
+    folder on disk, say -- can, so the line is split at the tab and the kind is
+    taken off the end.
+    """
+    res = _run(repo, ["remote", "-v"])
+    if not res.ok:
+        return []
+    found: dict[str, str] = {}
+    for line in res.stdout.splitlines():
+        name, tab, rest = line.partition("\t")
+        if not tab or not rest.endswith(" (fetch)"):
+            continue
+        found.setdefault(name, rest[: -len(" (fetch)")])
+    return [Remote(name, found[name]) for name in sorted(found, key=str.casefold)]
+
+
+def valid_remote_name(repo: str | Path, name: str) -> bool:
+    """Whether git will take ``name`` for a remote: it has to stand in a refspec."""
+    if not name or name.startswith("-"):
+        return False
+    return _run(repo, ["check-ref-format", f"refs/remotes/{name}/HEAD"]).ok
+
+
+def add_remote(repo: str | Path, name: str, url: str) -> GitResult:
+    """Add a remote. Nothing is fetched: that is a network call nobody asked for."""
+    return _run(repo, ["remote", "add", "--", name, url])
+
+
+def remove_remote(repo: str | Path, name: str) -> GitResult:
+    """Remove a remote, with its remote-tracking branches and whatever tracked it.
+
+    Only this repository's record of it. Nothing on the server is touched.
+    """
+    return _run(repo, ["remote", "remove", "--", name])
+
+
+def tracking_remote(repo: str | Path, branch: str) -> str:
+    """The remote ``branch`` is set to track, or ``""`` when it tracks none."""
+    if not branch:
+        return ""
+    res = _run(repo, ["config", "--get", f"branch.{branch}.remote"])
+    return res.stdout.strip() if res.ok else ""
+
+
+def set_tracking_remote(repo: str | Path, branch: str, remote: str) -> GitResult:
+    """Make ``branch`` track ``remote``: where it is pulled from and pushed to.
+
+    Written to the configuration rather than done with ``--set-upstream-to``,
+    which refuses a remote holding no copy of the branch yet -- and a branch that
+    has never been pushed is exactly the one whose remote needs choosing. The
+    branch it tracks there keeps its name, as a first push would give it.
+    """
+    res = _run(repo, ["config", f"branch.{branch}.remote", remote])
+    if not res.ok:
+        return res
+    merge = _run(repo, ["config", "--get", f"branch.{branch}.merge"])
+    if merge.ok and merge.stdout.strip():
+        return res
+    return _run(repo, ["config", f"branch.{branch}.merge", f"refs/heads/{branch}"])
+
+
+def push_remote(repo: str | Path) -> str:
+    """The remote a push of the checked-out branch goes to, or ``""`` for none.
+
+    The one it tracks if it tracks one, then ``origin``, then the first there is.
+    """
+    names = [remote.name for remote in list_remotes(repo)]
+    tracked = tracking_remote(repo, head_branch(repo))
+    for name in (tracked, "origin"):
+        if name and name in names:
+            return name
+    return names[0] if names else ""
+
+
 def blocked_by_ownership(repo: str | Path) -> bool:
     """True when git refuses to work in ``repo`` because of who owns it.
 
@@ -541,6 +628,11 @@ _CANONICAL_HOSTS = {
 }
 
 
+#: Where a push goes when the remote is a path rather than a server. It needs no
+#: credential, and "no remote" -- which is what it used to be called -- is wrong.
+LOCAL_REMOTE = "a folder on this computer"
+
+
 @dataclass
 class PushAuth:
     """What will authenticate a push -- as distinct from what signs a commit.
@@ -558,11 +650,14 @@ class PushAuth:
     kind: str = ""  # "ssh" | "https" | "" when there is no remote
     host: str = ""
     account: str = ""  # username pinned in config; "" when not determinable
+    remote: str = ""  # which remote this is about; "" when there is none
     shared: bool = False  # one credential serves every account on this host
 
     def summary(self) -> str:
         if not self.kind:
             return "no remote"
+        if self.kind == "local":
+            return f"push: {LOCAL_REMOTE}"
         if self.kind == "ssh":
             via = "default key" if self.shared else "key from SSH config"
             return f"push: SSH to {self.host} ({via})"
@@ -571,9 +666,11 @@ class PushAuth:
         return f"push: {self.host}"
 
     def destination(self) -> str:
-        """`summary` for a readout that is already captioned "Push to:"."""
+        """`summary` for a readout already captioned, beside the remote's name."""
         if not self.kind:
             return "no remote"
+        if self.kind == "local":
+            return LOCAL_REMOTE
         if self.kind == "ssh":
             via = "default key" if self.shared else "key from SSH config"
             return f"{self.host} over SSH ({via})"
@@ -631,19 +728,30 @@ def _config_first(repo: str | Path, keys: list[str]) -> str:
 
 
 def describe_push_auth(repo: str | Path) -> PushAuth:
-    """Work out what will authenticate a push from ``repo``."""
-    kind, host, user = _split_remote(get_remote_url(repo) or "")
+    """Work out what will authenticate a push from ``repo``.
+
+    Of the remote a push of the checked-out branch goes to -- see `push_remote`
+    -- so choosing another remote for the branch to track changes the answer.
+    """
+    remote = push_remote(repo)
+    url = _run(repo, ["remote", "get-url", "--", remote]) if remote else None
+    address = url.stdout.strip() if url and url.ok else ""
+    kind, host, user = _split_remote(address)
     if not kind or not host:
-        return PushAuth()
+        # A path, or a file:// URL: a remote all the same, and one that needs
+        # no credential to push to.
+        return PushAuth(kind="local", remote=remote) if address else PushAuth()
 
     if kind == "ssh":
         # The "git@" in git@github.com is the protocol's user, not an account.
         # What actually picks a key is the host, so a non-canonical host means
         # an alias in ~/.ssh/config -- which is how keys get separated.
-        return PushAuth(kind="ssh", host=host, shared=host in _CANONICAL_HOSTS)
+        return PushAuth(
+            kind="ssh", host=host, shared=host in _CANONICAL_HOSTS, remote=remote
+        )
 
     if kind != "https":
-        return PushAuth(kind=kind, host=host)
+        return PushAuth(kind=kind, host=host, remote=remote)
 
     account = user or _config_first(
         repo,
@@ -657,7 +765,11 @@ def describe_push_auth(repo: str | Path) -> PushAuth:
     )
     scoped = per_path.strip().lower() in ("true", "yes", "on", "1")
     return PushAuth(
-        kind="https", host=host, account=account, shared=not account and not scoped
+        kind="https",
+        host=host,
+        account=account,
+        shared=not account and not scoped,
+        remote=remote,
     )
 
 
@@ -1380,15 +1492,20 @@ def unpushed_count(repo: str | Path) -> int | None:
         return None
 
 
-def push(repo: str | Path, remote: str = "origin") -> GitResult:
+def push(repo: str | Path, remote: str = "") -> GitResult:
     """Push the current branch, setting upstream on first push.
+
+    A first push goes to ``remote`` if one is named, and otherwise to the remote
+    the branch was set to track before it was ever pushed -- which is the whole
+    point of choosing one -- and to ``origin`` when it tracks none.
 
     Never force-pushes; a rejected non-fast-forward is reported to the caller.
     """
     if get_upstream(repo) is not None:
         return _run(repo, ["push"])
     branch = current_branch(repo)
-    return _run(repo, ["push", "--set-upstream", remote, branch])
+    target = remote or tracking_remote(repo, branch) or "origin"
+    return _run(repo, ["push", "--set-upstream", target, branch])
 
 
 # ---- branches --------------------------------------------------------------------

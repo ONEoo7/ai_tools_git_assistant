@@ -178,6 +178,42 @@ def test_a_card_that_is_gone_does_not_keep_the_theme_alive(app, settings):
     app.processEvents()
 
 
+def test_a_window_freed_mid_restyle_does_not_take_the_application_down(app):
+    """Qt restyles every widget in turn, and Python runs while it does. The
+    collector running then could free a window nothing referred to any more --
+    one closed a while ago -- and Qt went on to restyle the widget it had just
+    freed: an access violation, not an exception, and the whole process with it.
+    """
+    import gc
+
+    from PyQt6.QtCore import QEvent
+    from PyQt6.QtWidgets import QWidget
+
+    class Collecting(QWidget):
+        """Sets the collector off mid-restyle, as any allocation there can."""
+
+        def event(self, event):
+            if event.type() in (QEvent.Type.StyleChange, QEvent.Type.PaletteChange):
+                gc.collect()
+            return super().event(event)
+
+    # Several of them, because Qt's walk is in no particular order: the first one
+    # it reaches has to come before some of the windows for it to matter.
+    busy = [Collecting() for _ in range(10)]
+    for widget in busy:
+        widget.ensurePolished()
+    for key in (theme.PONY, theme.DARK, theme.PONY):
+        for _ in range(100):
+            closed = QWidget()
+            closed.ensurePolished()
+            closed.keep = closed  # a cycle, so only the collector frees it
+        del closed
+
+        theme.apply(app, key)
+
+    assert all(widget.isWindow() for widget in busy)  # and still here to say so
+
+
 def test_a_theme_nobody_recognises_is_not_a_reason_to_refuse_to_start(app):
     """Hand-edited, or written by a newer build."""
     assert theme.apply(app, "spooky") == theme.SYSTEM

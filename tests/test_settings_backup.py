@@ -155,6 +155,16 @@ def test_restoring_puts_the_settings_back_and_keeps_the_repositories():
     assert current.scan_roots == ["/x"]
 
 
+def test_restoring_keeps_the_favorites():
+    """They are the user's choice of repositories, not a preference to reset."""
+    settings_backup.ensure_defaults()
+    current = _lived_in(favorite_repos=["/x/two"])
+
+    assert settings_backup.apply_over(current) == ""
+
+    assert current.favorite_repos == ["/x/two"]
+
+
 def test_the_app_level_settings_are_the_ones_that_come_back():
     """Theme, Langfuse, MCP and the provider endpoints live in user settings."""
     settings_backup.ensure_defaults()

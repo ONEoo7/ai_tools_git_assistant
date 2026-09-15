@@ -336,7 +336,9 @@ def _commit(ctx: ToolContext, args: dict, **_kw) -> dict:
 def _push(ctx: ToolContext, args: dict, **_kw) -> dict:
     settings = ctx.settings()
     repo = ctx.resolve(settings, args.get("repo"))
-    return _result_of(git_ops.push(repo, args.get("remote") or "origin"), "Pushed")
+    # Unnamed, the remote is the one the branch tracks -- "its remote" -- and
+    # origin only when it tracks none.
+    return _result_of(git_ops.push(repo, args.get("remote") or ""), "Pushed")
 
 
 def _create_tag(ctx: ToolContext, args: dict, **_kw) -> dict:

@@ -17,6 +17,7 @@ picker changes it. See ``git_assistant.ui.theme_picker``.
 
 from __future__ import annotations
 
+import gc
 import weakref
 from dataclasses import dataclass
 
@@ -282,19 +283,32 @@ def apply(app, key: str) -> str:
     reason to refuse to start.
     """
     theme = get(key)
-    app.styleHints().setColorScheme(_SCHEMES[theme.key])
-    if theme.key == PONY:
-        app.setPalette(_pony_palette())
-        app.setStyleSheet(_pony_stylesheet())
-    else:
-        app.setStyleSheet("")
-        # A default-constructed palette, which is how an application palette is
-        # *unset*: Qt then resolves every role from the scheme just chosen.
-        #
-        # Not `style().standardPalette()`, which looks like the obvious answer
-        # and is not one -- it hands back the grey-and-black palette of Windows
-        # 95 regardless of the scheme, and the window comes up as black text on
-        # #d4d0c8 with dark-mode chrome drawn over it.
-        app.setPalette(QPalette())
+    # Qt restyles every widget in turn, and Python runs while it does. The
+    # garbage collector must not: it can free a window nothing refers to any
+    # more -- one closed a while ago -- and Qt goes on to restyle the widget it
+    # has just freed, which is an access violation rather than an exception. So
+    # whatever can be freed is freed first, while nothing is being walked, and
+    # the collector waits until the walk is done.
+    gc.collect()
+    was_enabled = gc.isenabled()
+    gc.disable()
+    try:
+        app.styleHints().setColorScheme(_SCHEMES[theme.key])
+        if theme.key == PONY:
+            app.setPalette(_pony_palette())
+            app.setStyleSheet(_pony_stylesheet())
+        else:
+            app.setStyleSheet("")
+            # A default-constructed palette, which is how an application palette
+            # is *unset*: Qt then resolves every role from the scheme just chosen.
+            #
+            # Not `style().standardPalette()`, which looks like the obvious
+            # answer and is not one -- it hands back the grey-and-black palette
+            # of Windows 95 regardless of the scheme, and the window comes up as
+            # black text on #d4d0c8 with dark-mode chrome drawn over it.
+            app.setPalette(QPalette())
+    finally:
+        if was_enabled:
+            gc.enable()
     _announce()
     return theme.key

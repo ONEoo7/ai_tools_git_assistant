@@ -596,7 +596,7 @@ def test_the_branches_are_behind_their_own_title_beside_the_repository(
     pane = panel.repo_pane
 
     titles = [pane.tabs.tabText(i) for i in range(pane.tabs.count())]
-    assert titles == ["Repository", "Branch", "Inference"]
+    assert titles == ["Repository", "Branch", "Remotes", "Inference"]
     assert pane.widget(1) is panel.branch_picker
     assert not hasattr(panel, "branch_combo")
     assert set(panel.findChildren(QComboBox)) == {
@@ -610,7 +610,9 @@ def test_the_provider_and_its_model_are_behind_the_inference_title(
 ):
     """Folded with the repository and the branch; the template stays out."""
     panel = _panel_for(settings, _repo_with_branches(tmp_path))
-    inference = panel.repo_pane.widget(2)
+    pane = panel.repo_pane
+    titles = [pane.tabs.tabText(i) for i in range(pane.tabs.count())]
+    inference = pane.widget(titles.index("Inference"))
 
     assert inference.isAncestorOf(panel.provider_combo)
     assert inference.isAncestorOf(panel.provider_label)
