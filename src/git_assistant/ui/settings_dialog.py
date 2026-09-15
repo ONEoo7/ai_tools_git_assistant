@@ -383,8 +383,8 @@ class SettingsDialog(QDialog):
         self._version_row = version_row
         self._buttons_row = buttons_row
 
-        # The identity bar takes the slack, so "Push to: ..." stays hard against
-        # the theme picker and the picker stays hard against the window's edge.
+        # The identity bar takes the slack, so the theme picker stays hard
+        # against the window's edge.
         top = QHBoxLayout()
         top.addWidget(self.identity_bar, 1)
         top.addWidget(self.theme_picker)

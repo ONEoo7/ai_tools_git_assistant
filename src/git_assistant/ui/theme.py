@@ -76,6 +76,10 @@ def get(key: str) -> Theme:
 _INK = "#4a1033"
 _HOT = "#ff4fb5"
 
+#: The corner of a button in the pink stylesheet. Public because a button that
+#: draws over its own frame has to know where that frame's corners are.
+BUTTON_RADIUS = 6
+
 #: A rainbow, in the order everyone draws one. Used for the accents that are
 #: allowed to be a gradient -- a tab that is selected, a bar that is filling --
 #: and nowhere text has to be read on top of it.
@@ -189,7 +193,7 @@ QProgressBar::chunk {{
 }}
 QPushButton {{
     border: 1px solid #e79cc4;
-    border-radius: 6px;
+    border-radius: {BUTTON_RADIUS}px;
     padding: 4px 10px;
 }}
 QPushButton:hover:enabled {{

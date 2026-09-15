@@ -63,7 +63,7 @@ from git_assistant.ui.leaderboard_tab import LeaderboardTab
 from git_assistant.ui import profile_tab as profile_tab_mod
 from git_assistant.ui.profile_tab import ProfileTab
 from git_assistant.ui.rule_sets_tab import RuleSetsTab
-from git_assistant.ui.repo_pane import RepoPane
+from git_assistant.ui.repo_pane import INFERENCE_TAB, RepoPane, inference_page
 from git_assistant.ui.repo_picker import RepoPicker
 from git_assistant.ui import side_panel as side_panel_mod
 from git_assistant.ui.side_panel import SidePanel
@@ -192,6 +192,11 @@ class ReviewPanel(QWidget):
         self.status.setStyleSheet(INFO_COLOUR)
 
         self.repo_pane = RepoPane(self.repo_picker, margins=(0, 0, SECTION_GAP, 0))
+        # Behind the strip with the repository, as on the Commit and Audit tabs:
+        # both are chosen when switching, and both are named in the bar above.
+        self.repo_pane.add_page(
+            inference_page(self.provider_combo, self.provider_label), INFERENCE_TAB
+        )
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.addWidget(self.repo_pane)
@@ -218,10 +223,11 @@ class ReviewPanel(QWidget):
 
     # ---- panes ---------------------------------------------------------------
     def _build_run_pane(self) -> QWidget:
-        """What a review runs with: its rules, its judge and its provider.
+        """What a review runs with: its rules and its judge.
 
         Beside the repository list rather than under it, so that folding the
-        list leaves these on screen.
+        list leaves these on screen. The provider folds away with the list,
+        behind its own title there.
         """
         pane = QWidget()
         box = QVBoxLayout(pane)
@@ -232,10 +238,6 @@ class ReviewPanel(QWidget):
         box.addSpacing(SECTION_GAP)
         box.addWidget(self.judge_check)
         box.addWidget(self.judge_note)
-        box.addSpacing(SECTION_GAP)
-        box.addWidget(QLabel("Inference Providers:"))
-        box.addWidget(self.provider_combo)
-        box.addWidget(self.provider_label)
         box.addStretch(1)
         return pane
 

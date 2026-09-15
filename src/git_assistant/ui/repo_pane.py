@@ -9,17 +9,38 @@ down to a strip with its title on it, which stays on screen folded.
 It is the right-hand pane's mechanism mirrored rather than a second one; see
 `side_panel.FoldingPane`. The title runs up the left edge because that is the
 edge it folds against. A tab can put more behind the same strip -- the Commit tab
-puts the selected repository's branches there, under a title of their own.
+puts the selected repository's branches there, under a title of their own, and
+every tab that runs a model puts the provider there, under `INFERENCE_TAB`.
 """
 
 from __future__ import annotations
 
-from PyQt6.QtWidgets import QWidget
+from PyQt6.QtWidgets import QLabel, QVBoxLayout, QWidget
 
 from git_assistant.ui.repo_picker import RepoPicker
 from git_assistant.ui.side_panel import Edge, FoldingPane
 
 REPO_TAB = "Repository"
+
+#: The title the provider and its model fold behind, on every tab that has one.
+INFERENCE_TAB = "Inference"
+
+
+def inference_page(provider_combo: QWidget, model_label: QWidget) -> QWidget:
+    """A tab's provider, with the model it runs named under it.
+
+    The same page, in the same place, on each tab that offers the choice: it is
+    made when switching and read the rest of the time -- as the repository is,
+    and like the repository it is named in the bar above the tabs.
+    """
+    page = QWidget()
+    box = QVBoxLayout(page)
+    box.setContentsMargins(0, 0, 0, 0)
+    box.addWidget(QLabel("Provider:"))
+    box.addWidget(provider_combo)
+    box.addWidget(model_label)
+    box.addStretch(1)
+    return page
 
 
 class RepoPane(FoldingPane):

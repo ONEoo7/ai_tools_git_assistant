@@ -89,7 +89,7 @@ class _Shrinking(QLabel):
 
 
 class _Divider(QWidget):
-    """The upright line between one group on the bar and the next."""
+    """The upright line that ends each group on the bar."""
 
     #: The line and the room either side of it.
     WIDTH = 9
@@ -275,13 +275,13 @@ class IdentityBar(QWidget):
         box.addWidget(QLabel("Active Inference:"))
         box.addWidget(self.inference_name)
         box.addWidget(self.inference_model)
-        # The slack goes here, so where a push goes stays over at the right,
-        # against the theme picker -- and the line after it divides it from that.
-        box.addStretch(1)
         box.addWidget(_Divider())
         box.addWidget(QLabel("Push to:"))
         box.addWidget(self.auth_status)
         box.addWidget(_Divider())
+        # The slack goes after all of it: the groups read as one run from the
+        # left, and the theme picker has the window's far edge to itself.
+        box.addStretch(1)
         # What a window too narrow for all of it cuts short first: the readouts
         # that explain -- each has its tooltip -- before the names that say what
         # is in use. The captions, the combos and the provider stay whole for as

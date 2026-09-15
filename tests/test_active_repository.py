@@ -248,21 +248,25 @@ def test_push_to_is_a_caption_in_the_colour_of_the_others(bar):
 
 
 def test_each_line_stands_as_far_from_the_group_before_it_as_the_one_after(qapp, bar):
+    """Push to: included -- it follows Active Inference, and the room to spare
+    comes after the last line rather than before any group."""
     from git_assistant.ui.identity_bar import _Divider
 
+    spare = 300
+    bar.resize(bar.sizeHint().width() + spare, bar.sizeHint().height())
     bar.show()
     qapp.processEvents()
     drawn = _drawn(bar)
     dividers = [w for w in drawn if isinstance(w, _Divider)]
 
-    # The three before the slack: the fourth has it on its left, and the last
-    # ends the bar.
-    for divider in dividers[:3]:
+    for divider in dividers[:-1]:
         i = drawn.index(divider)
         before, after = drawn[i - 1].geometry(), drawn[i + 1].geometry()
         gap_before = divider.geometry().left() - before.right()
         gap_after = after.left() - divider.geometry().right()
         assert gap_before == gap_after, (drawn[i - 1], drawn[i + 1])
+    assert drawn[0].geometry().left() == 0
+    assert bar.width() - 1 - dividers[-1].geometry().right() >= spare
     bar.close()
 
 

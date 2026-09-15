@@ -10,8 +10,8 @@ from __future__ import annotations
 import html
 from pathlib import Path
 
-from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QFontDatabase, QGuiApplication
+from PyQt6.QtCore import QRectF, Qt, pyqtSignal
+from PyQt6.QtGui import QColor, QFontDatabase, QGuiApplication, QPainter, QPen
 from PyQt6.QtWidgets import (
     QComboBox,
     QDialog,
@@ -49,10 +49,11 @@ from git_assistant.diff_strategy import (
 from git_assistant.providers import PROVIDERS
 from git_assistant.ui.branch_picker import BRANCH_TAB, BranchPicker
 from git_assistant.ui.estimate_dialog import confirm
-from git_assistant.ui.repo_pane import RepoPane
+from git_assistant.ui.repo_pane import INFERENCE_TAB, RepoPane, inference_page
 from git_assistant.ui.repo_picker import RepoPicker
-from git_assistant.ui.staging_dialog import StagingDialog
+from git_assistant.ui.staging_dialog import StagingDialog, diff_colours
 from git_assistant.ui import side_panel as side_panel_mod
+from git_assistant.ui import theme
 from git_assistant.ui.side_panel import SidePanel
 from git_assistant.ui.workers import (
     FunctionWorker,
@@ -79,8 +80,71 @@ SECTION_GAP = 12
 # generation result shown in the same label is not wiped by a refresh.
 NO_REPOS_MESSAGE = "No repositories configured - add one in Repositories."
 
-#: The title the provider and its model fold behind, beside Repository and Branch.
-INFERENCE_TAB = "Inference"
+
+class _UnstagedButton(QPushButton):
+    """"Unstaged Changes (n/m)", with a frame that says whether n is nought.
+
+    Red while anything is left unstaged and green once nothing is, in the
+    staging window's own red and green -- it is the window this opens. Neither
+    while there is no count to go on: no repository, or one git cannot read.
+
+    The colour is drawn over the frame the style has just drawn, not set with a
+    stylesheet. A stylesheet border takes the rest of the native button with it
+    -- its fill, and how it looks hovered and pressed -- and this one would stop
+    looking like the buttons beside it.
+    """
+
+    def __init__(self) -> None:
+        super().__init__("Unstaged Changes (0/0)")
+        #: The unstaged count, or None when there is none to go on.
+        self._unstaged: int | None = None
+        theme.on_change(self._repaint)
+
+    def show_counts(self, unstaged: int, changed: int, *, known: bool = True) -> None:
+        self._unstaged = unstaged if known else None
+        self.setText(f"Unstaged Changes ({unstaged}/{changed})")
+        self.update()
+
+    def border_colour(self) -> QColor | None:
+        """The frame's colour for the theme in force, or None for the style's own."""
+        if self._unstaged is None:
+            return None
+        return QColor(diff_colours()["-" if self._unstaged else "+"])
+
+    def paintEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        super().paintEvent(event)
+        colour = self.border_colour()
+        if colour is None:
+            return
+        inset, radius = self._frame()
+        # Half a pixel in, so a one-pixel line lands on one row of pixels.
+        edge = inset + 0.5
+        painter = QPainter(self)
+        try:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            painter.setPen(QPen(colour, 1))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRoundedRect(
+                QRectF(self.rect()).adjusted(edge, edge, -edge, -edge), radius, radius
+            )
+        finally:
+            painter.end()
+
+    def _frame(self) -> tuple[int, float]:
+        """``(inset, corner radius)`` of the frame the style draws.
+
+        Measured, not asked: no style says where its frame is. The Windows 11
+        style draws it two pixels in with a four-pixel corner; the pink theme's
+        stylesheet draws it on the edge with a six-pixel one.
+        """
+        if self.style().metaObject().className() == "QStyleSheetStyle":
+            return 0, theme.BUTTON_RADIUS
+        if self.style().name() == "windows11":
+            return 2, 4
+        return 0, 2
+
+    def _repaint(self) -> None:
+        self.update()
 
 
 def _history_note(repo: str, runs: list, limit: int) -> str:
@@ -239,8 +303,8 @@ class CommitPanel(QWidget):
         self.provider_label = QLabel("")
         self.provider_label.setWordWrap(True)
         self.provider_label.setStyleSheet("color: #888;")
-        # Ignored, not Preferred: a long model id must not widen the pane it
-        # sits in, which is the narrowest of the three.
+        # Ignored, not Preferred: a long model id must not widen the folding
+        # pane it sits in.
         self.provider_label.setSizePolicy(
             QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
         )
@@ -288,25 +352,9 @@ class CommitPanel(QWidget):
         # names every one of them.
         self.repo_pane = RepoPane(self.repo_picker, margins=(0, 0, SECTION_GAP, 0))
         self.repo_pane.add_page(self.branch_picker, BRANCH_TAB)
-        inference = QWidget()
-        inference_box = QVBoxLayout(inference)
-        inference_box.setContentsMargins(0, 0, 0, 0)
-        inference_box.addWidget(QLabel("Provider:"))
-        inference_box.addWidget(self.provider_combo)
-        inference_box.addWidget(self.provider_label)
-        inference_box.addStretch(1)
-        self.repo_pane.add_page(inference, INFERENCE_TAB)
-
-        # ---- then what a generation runs with ------------------------------
-        # A column of its own rather than under the list, so that folding the
-        # list does not fold it away with it: it is read on every run, and the
-        # list only when switching.
-        run_pane = QWidget()
-        run_box = QVBoxLayout(run_pane)
-        run_box.setContentsMargins(SECTION_GAP, 0, SECTION_GAP, 0)
-        run_box.addWidget(QLabel("Template:"))
-        run_box.addWidget(self.template_combo)
-        run_box.addStretch(1)
+        self.repo_pane.add_page(
+            inference_page(self.provider_combo, self.provider_label), INFERENCE_TAB
+        )
 
         # ---- left pane: the commit message -------------------------------
         left = QWidget()
@@ -315,7 +363,14 @@ class CommitPanel(QWidget):
         # boxes sit flush against the divider. This pane has a handle on BOTH
         # sides, so it needs the gap on both.
         left_box.setContentsMargins(SECTION_GAP, 0, SECTION_GAP, 0)
-        left_box.addWidget(QLabel("Commit message"))
+        # The template on the heading of the message it shapes, over at the
+        # right as the staged files' button is on theirs. Not folded with the
+        # repository: it is read on every run, and the list only when switching.
+        message_heading = QHBoxLayout()
+        message_heading.addWidget(QLabel("Commit message"), 1)
+        message_heading.addWidget(QLabel("Template:"))
+        message_heading.addWidget(self.template_combo)
+        left_box.addLayout(message_heading)
         left_box.addWidget(self.editor)
         # Under the editor and live, not only after a generation: the message
         # is editable, and a length rule that only judged the model would be
@@ -334,7 +389,7 @@ class CommitPanel(QWidget):
         self.files_label = QLabel("Staged files")
         # What is not staged yet is a count here and nothing more: looking at it
         # and choosing what to stage is the staging window's job.
-        self.unstaged_btn = QPushButton("Unstaged Changes (0/0)")
+        self.unstaged_btn = _UnstagedButton()
         self.unstaged_btn.setToolTip(
             "Unstaged changes, of every changed file. Opens the staging window, "
             "to look at each change and stage the ones you want."
@@ -391,16 +446,14 @@ class CommitPanel(QWidget):
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.addWidget(self.repo_pane)
-        splitter.addWidget(run_pane)
         splitter.addWidget(left)
         splitter.addWidget(right)
         splitter.addWidget(self._build_side_pane())
-        splitter.setStretchFactor(1, 1)  # the run settings stay narrow
-        splitter.setStretchFactor(2, 3)
-        splitter.setStretchFactor(3, 4)
-        splitter.setStretchFactor(4, 3)
+        splitter.setStretchFactor(1, 3)
+        splitter.setStretchFactor(2, 4)
+        splitter.setStretchFactor(3, 3)
         # One declared open layout for both folding panes; see `attach`.
-        open_sizes = [240, 200, 400, 560, side_panel_mod.OPEN_WIDTH]
+        open_sizes = [240, 400, 560, side_panel_mod.OPEN_WIDTH]
         side_panel_mod.attach(splitter, self.repo_pane, open_sizes=open_sizes)
         side_panel_mod.attach(splitter, self.side_panel, open_sizes=open_sizes)
 
@@ -562,11 +615,13 @@ class CommitPanel(QWidget):
         """Count the unstaged changes, of every changed file, for the button."""
         repo = self._current_repo_path()
         try:
-            entries = git_ops.status_entries(repo) if repo else []
+            entries = git_ops.status_entries(repo) if repo else None
         except git_ops.GitError:
-            entries = []  # a repo git cannot read; the staged list says as much
-        unstaged, self._changed = git_ops.unstaged_counts(entries)
-        self.unstaged_btn.setText(f"Unstaged Changes ({unstaged}/{self._changed})")
+            entries = None  # a repo git cannot read; the staged list says as much
+        unstaged, self._changed = git_ops.unstaged_counts(entries or [])
+        self.unstaged_btn.show_counts(
+            unstaged, self._changed, known=entries is not None
+        )
         # Opens on staged changes alone too: the window is where they come back out.
         self.unstaged_btn.setEnabled(bool(self._changed))
 

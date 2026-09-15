@@ -133,7 +133,7 @@ def test_opening_one_leaves_the_other_folded(qapp):
 
 
 # ---- in the tabs ---------------------------------------------------------------------
-def test_the_commit_tab_keeps_its_run_settings_on_screen_with_the_list_folded(
+def test_the_commit_tab_keeps_its_template_on_screen_with_the_list_folded(
     qapp, settings
 ):
     panel = CommitPanel(settings, auto_start=False)
@@ -142,6 +142,62 @@ def test_the_commit_tab_keeps_its_run_settings_on_screen_with_the_list_folded(
     assert panel.template_combo.isVisibleTo(panel)
     # The provider folds with the repository now, behind "Inference".
     assert not panel.provider_combo.isVisibleTo(panel)
+
+
+def _panel(tab, settings):
+    from git_assistant.ui.agents_panel import AgentsPanel
+    from git_assistant.ui.review_panel import ReviewPanel
+
+    if tab == "CommitPanel":
+        return CommitPanel(settings, auto_start=False)
+    return {"AgentsPanel": AgentsPanel, "ReviewPanel": ReviewPanel}[tab](settings)
+
+
+@pytest.mark.parametrize("tab", ["CommitPanel", "AgentsPanel", "ReviewPanel"])
+def test_every_tab_that_runs_a_model_folds_its_provider_behind_inference(
+    qapp, settings, tab
+):
+    """The same page in the same place on each: last behind the strip, and out of
+    sight while the pane is folded."""
+
+    panel = _panel(tab, settings)
+    pane = panel.repo_pane
+    last = pane.tabs.count() - 1
+
+    assert pane.tabs.tabText(0) == "Repository"
+    assert pane.tabs.tabText(last) == "Inference"
+    page = pane.widget(last)
+    assert page.isAncestorOf(panel.provider_combo)
+    assert page.isAncestorOf(panel.provider_label)
+    assert [label.text() for label in page.findChildren(QLabel)][0] == "Provider:"
+    assert pane.is_open() is False
+    assert not panel.provider_combo.isVisibleTo(panel)
+
+
+@pytest.mark.parametrize("tab", ["AgentsPanel", "ReviewPanel"])
+def test_opening_inference_there_shows_the_provider_and_its_model(qapp, settings, tab):
+    panel = _panel(tab, settings)
+    pane = panel.repo_pane
+
+    pane.tabs.setCurrentIndex(pane.tabs.count() - 1)
+    pane.set_open(True)
+
+    assert panel.provider_combo.isVisibleTo(panel)
+    assert panel.provider_label.text().startswith("Model: ")
+
+
+def test_the_audit_tab_keeps_no_column_for_the_provider(qapp, settings):
+    """It was the only thing in its column, so the column went with it."""
+
+    panel = _panel("AgentsPanel", settings)
+    splitter = next(
+        s for s in panel.findChildren(QSplitter) if s.indexOf(panel.repo_pane) == 0
+    )
+
+    panes = [splitter.widget(i) for i in range(splitter.count())]
+    assert panes[:2] == [panel.repo_pane, panel.audits_pane]
+    assert panes[-1] is panel.side_panel
+    assert len(panes) == 4
 
 
 @pytest.mark.parametrize(

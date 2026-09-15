@@ -589,7 +589,7 @@ def test_branch_selector_lists_branches_and_shows_the_current_one(qapp, settings
 def test_the_branches_are_behind_their_own_title_beside_the_repository(
     qapp, settings, tmp_path
 ):
-    """Not among the run settings any more: folded away with the repository."""
+    """Not a dropdown beside the template any more: folded away with the repository."""
     from PyQt6.QtWidgets import QComboBox
 
     panel = _panel_for(settings, _repo_with_branches(tmp_path))
@@ -608,13 +608,48 @@ def test_the_branches_are_behind_their_own_title_beside_the_repository(
 def test_the_provider_and_its_model_are_behind_the_inference_title(
     qapp, settings, tmp_path
 ):
-    """Folded with the repository and the branch; the run settings keep the template."""
+    """Folded with the repository and the branch; the template stays out."""
     panel = _panel_for(settings, _repo_with_branches(tmp_path))
     inference = panel.repo_pane.widget(2)
 
     assert inference.isAncestorOf(panel.provider_combo)
     assert inference.isAncestorOf(panel.provider_label)
     assert not inference.isAncestorOf(panel.template_combo)
+
+
+def test_the_template_is_chosen_right_of_the_commit_message_heading(
+    qapp, settings, tmp_path
+):
+    """On the heading's own line, captioned, and in no column of its own."""
+    from PyQt6.QtCore import QPoint, Qt
+    from PyQt6.QtWidgets import QLabel, QSplitter
+
+    panel = _panel_for(settings, _repo_with_branches(tmp_path))
+    panel.resize(1400, 700)
+    panel.show()
+    qapp.processEvents()
+
+    def box(widget):
+        return widget.geometry().translated(widget.parentWidget().mapTo(panel, QPoint()))
+
+    labels = {label.text(): box(label) for label in panel.findChildren(QLabel)}
+    heading, caption = labels["Commit message"], labels["Template:"]
+    combo = box(panel.template_combo)
+    assert heading.right() < caption.left() < caption.right() < combo.left()
+    for other in (caption, combo):
+        assert abs(other.center().y() - heading.center().y()) <= 1
+    assert box(panel.editor).top() > combo.bottom()
+
+    splitter = next(
+        s
+        for s in panel.findChildren(QSplitter)
+        if s.orientation() == Qt.Orientation.Horizontal
+    )
+    panes = [splitter.widget(i) for i in range(splitter.count())]
+    holder = next(pane for pane in panes if pane.isAncestorOf(panel.template_combo))
+    assert holder.isAncestorOf(panel.editor)
+    assert panes == [panel.repo_pane, holder, panes[2], panel.side_panel]
+    panel.close()
 
 
 def test_choosing_a_provider_there_says_so(qapp, settings, tmp_path):

@@ -911,16 +911,15 @@ def test_open_comes_back_when_one_review_is_selected(qapp, with_repo, staged):
 
 
 # ---- the judge ---------------------------------------------------------------------
-def test_the_judge_box_sits_between_the_rules_and_the_provider(qapp, with_repo, staged):
-    """Asked for in that position, and it reads as one: which rules, whether to
-    score the answers, and who answers."""
+def test_the_judge_box_sits_under_the_rules(qapp, with_repo, staged):
+    """Asked for in that position: which rules, then whether to score the answers.
+    Who answers has moved behind the Inference title, as on the other tabs."""
     panel = ReviewPanel(with_repo)
     pane = panel.judge_check.parentWidget().layout()
     order = [pane.itemAt(i).widget() for i in range(pane.count())]
 
-    judge = order.index(panel.judge_check)
-    assert order.index(panel.profile_combo) < judge
-    assert order.index(panel.provider_combo) > judge
+    assert order.index(panel.profile_combo) < order.index(panel.judge_check)
+    assert panel.provider_combo not in order
 
 
 def test_the_judge_is_off_until_it_is_asked_for(qapp, with_repo, staged):
