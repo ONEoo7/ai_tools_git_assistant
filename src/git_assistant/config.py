@@ -135,6 +135,7 @@ FIELD_COMMENTS = {
     "repos": "The repositories this application manages.",
     "active_repo": "Path of the repository the window is working in.",
     "recent_repos": "Recently used repository paths, most recent first.",
+    "compare_repo": "Path of the repository the Compare tab sets beside the active one.",
     "favorite_repos": "Repository paths kept at the top of every repository list.",
     "scan_roots": "Folders scanned for repositories.",
     "watched_roots": "Folders watched, so a repository added there is noticed.",
@@ -396,6 +397,9 @@ class Settings:
     selected_model: str = ""
     repos: list[RepoEntry] = field(default_factory=list)
     active_repo: str = ""  # path of the active RepoEntry
+    #: The repository the Compare tab sets beside the active one; see
+    #: ui.repo_picker.OtherRepoPicker. Choosing it changes nothing else.
+    compare_repo: str = ""
     recent_repos: list[str] = field(default_factory=list)  # paths, most-recent first
     favorite_repos: list[str] = field(default_factory=list)  # paths, as they were added
     scan_roots: list[str] = field(default_factory=list)  # folders scanned for repos

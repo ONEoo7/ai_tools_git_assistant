@@ -86,6 +86,7 @@ from git_assistant.ui.preview_dialog import SECTION_GAP, CommitPanel
 from git_assistant.ui.review_panel import ReviewPanel
 from git_assistant.ui.branches_tags_panel import BranchesTagsPanel
 from git_assistant.ui.clone_create_panel import CloneCreatePanel
+from git_assistant.ui.compare_panel import ComparePanel
 from git_assistant.ui.usage_pane import UsagePane
 from git_assistant.review import judge as judge_mod
 from git_assistant.ui.update_prompt import UpdateCheckWorker
@@ -258,6 +259,7 @@ class SettingsDialog(QDialog):
         tabs.addTab(self._build_clone_create_tab(), "Clone && Create")
         tabs.addTab(self._build_commit_tab(), "Commit")
         tabs.addTab(self._build_tags_tab(), "Branches && Tags")
+        tabs.addTab(self._build_compare_tab(), "Compare")
         tabs.addTab(self._build_agents_tab(), "Audit")
         tabs.addTab(self._build_review_tab(), "Code Review")
         tabs.addTab(self._build_connection_tab(), "Connection && Model")
@@ -280,6 +282,7 @@ class SettingsDialog(QDialog):
             self.clone_panel,
             self.commit_panel,
             self.tags_panel,
+            self.compare_panel,
             self.agents_panel,
             self.review_panel,
         ):
@@ -333,6 +336,7 @@ class SettingsDialog(QDialog):
         for panel in (
             self.clone_panel,
             self.commit_panel,
+            self.compare_panel,
             self.agents_panel,
             self.review_panel,
         ):
@@ -685,6 +689,10 @@ class SettingsDialog(QDialog):
     def _build_tags_tab(self) -> QWidget:
         self.tags_panel = BranchesTagsPanel(self.settings, self.identity_store)
         return self.tags_panel
+
+    def _build_compare_tab(self) -> QWidget:
+        self.compare_panel = ComparePanel(self.settings)
+        return self.compare_panel
 
     def _build_agents_tab(self) -> QWidget:
         # `before_run` mirrors the commit tab: a run must use the provider and

@@ -53,6 +53,9 @@ CLASSIFIED = {
     "mcp_scope": "account",
     "repos": "workspace",
     "active_repo": "workspace",
+    # Which repository is set beside the active one: a repository of this
+    # person's, chosen as the active one is.
+    "compare_repo": "workspace",
     "recent_repos": "workspace",
     "favorite_repos": "workspace",
     "scan_roots": "workspace",

@@ -274,6 +274,172 @@ def find_git_repos(
     return [sub for repo in sorted(found) for sub in with_submodules(repo)]
 
 
+# ---- what each submodule is at ------------------------------------------------------
+#: How a commit's date is written where commits are compared: to the minute, in the
+#: time zone it was committed in -- as the tag list writes a tag's.
+COMMIT_DATE_FORMAT = "%Y-%m-%d %H:%M"
+
+#: `git log --format` for a `CommitSummary`: NUL between fields none of which can
+#: hold one, and the tags pointing at the commit last.
+_SUMMARY_FORMAT = "%H%x00%h%x00%s%x00%cd%x00%an%x00%ad%x00%D"
+
+#: Why a submodule has no commit of its own to show: nobody ran
+#: `git submodule update` for it, so there is no checkout to read one from.
+NOT_CHECKED_OUT = "not checked out"
+
+
+@dataclass(frozen=True)
+class CommitSummary:
+    """One commit, as commits are compared: which, what it says, when, and its tags."""
+
+    hash: str
+    short: str  # as git abbreviates it in that repository: long enough to be unique
+    subject: str
+    date: str  # committed, in COMMIT_DATE_FORMAT
+    author: str
+    authored: str  # in COMMIT_DATE_FORMAT
+    tags: tuple[str, ...] = ()
+
+
+def _commit_summary(repo: str | Path, rev: str) -> tuple[CommitSummary | None, str]:
+    """The commit ``rev`` names in ``repo``; or None, and git's reason."""
+    res = _run(
+        repo,
+        [
+            "log",
+            "-1",
+            "--no-show-signature",
+            "--no-color",
+            # Tags only: a branch or HEAD at the commit is not what "tagged" means.
+            "--decorate-refs=refs/tags",
+            f"--date=format:{COMMIT_DATE_FORMAT}",
+            f"--format={_SUMMARY_FORMAT}",
+            rev,
+            "--",
+        ],
+    )
+    fields = res.stdout.rstrip("\n").split("\0")
+    if not res.ok or len(fields) != 7:
+        return None, res.stderr.strip() or f"git could not read {rev}"
+    full, short, subject, date, author, authored, decorations = fields
+    tags = tuple(
+        item[len("tag: ") :] for item in decorations.split(", ") if item.startswith("tag: ")
+    )
+    return CommitSummary(full, short, subject, date, author, authored, tags), ""
+
+
+def commit_summary(repo: str | Path, rev: str) -> CommitSummary | None:
+    """The commit ``rev`` names in ``repo``, or None when it names none there."""
+    return _commit_summary(repo, rev)[0]
+
+
+@dataclass(frozen=True)
+class SubmoduleState:
+    """A submodule, and the commits it is at: the one recorded for it, and the one on disk."""
+
+    #: Where it is from the top of the repository asked about, with forward slashes.
+    path: str
+    name: str  # what .gitmodules calls it
+    url: str
+    #: The commit the repository containing it records at HEAD; "" when HEAD records none.
+    recorded_hash: str
+    #: That commit, when the submodule's checkout has it to read.
+    recorded: CommitSummary | None
+    #: The commit its working tree is on; None when there is none, or it cannot be read.
+    checked_out: CommitSummary | None
+    #: Why there is no commit checked out: `NOT_CHECKED_OUT`, or git's own words.
+    problem: str = ""
+
+
+def _gitmodules(repo: Path) -> list[tuple[str, str, str]]:
+    """``(name, path, url)`` for each submodule ``repo``'s .gitmodules declares."""
+    declared = repo / ".gitmodules"
+    if not declared.is_file():
+        return []
+    # A file rather than a repository, so there is no repository to be checked for.
+    res = _run_global(["config", "--file", str(declared), "--null", "--list"])
+    if not res.ok:
+        return []
+    fields: dict[str, dict[str, str]] = {}
+    for item in res.stdout.split("\0"):
+        key, newline, value = item.partition("\n")
+        section, _dot, rest = key.partition(".")
+        name, dot, variable = rest.rpartition(".")
+        if newline and section == "submodule" and dot and variable in ("path", "url"):
+            fields.setdefault(name, {})[variable] = value
+    return [
+        (name, found["path"].strip("/"), found.get("url", ""))
+        for name, found in fields.items()
+        if found.get("path", "").strip("/")
+    ]
+
+
+def _recorded_commits(repo: Path, paths: list[str]) -> dict[str, str]:
+    """The commit ``repo``'s HEAD records at each of ``paths``, where it records one."""
+    if not paths:
+        return {}
+    res = _run(repo, ["--literal-pathspecs", "ls-tree", "-z", "--full-tree", "HEAD", "--", *paths])
+    recorded: dict[str, str] = {}
+    for entry in res.stdout.split("\0") if res.ok else []:
+        info, tab, path = entry.partition("\t")
+        parts = info.split()
+        if tab and len(parts) == 3 and parts[0] == "160000":
+            recorded[path] = parts[2]
+    return recorded
+
+
+def submodule_states(repo: str | Path, max_depth: int = 4) -> list[SubmoduleState]:
+    """Every submodule of ``repo``, with the commit recorded for it and the one checked out.
+
+    Nested submodules too, up to ``max_depth`` levels, each after the one that
+    contains it and every level in order of path: the order `find_submodules`
+    lists them in. Unlike there, a submodule that was never checked out is
+    listed -- what is recorded for it is worth comparing all the same, and it is
+    the checkout that is missing, not the submodule.
+
+    One git command for each repository's .gitmodules and one for what its HEAD
+    records; then one for each submodule's commit, or two where the one checked
+    out is not the one recorded, run side by side.
+    """
+    found: list[tuple[Path, str, str, str, str]] = []
+    seen: set[str] = set()
+
+    def walk(base: Path, prefix: str, depth: int) -> None:
+        if depth > max_depth:
+            return
+        declared = sorted(_gitmodules(base), key=lambda item: item[1].casefold())
+        recorded = _recorded_commits(base, [path for _name, path, _url in declared])
+        for name, path, url in declared:
+            where = base / path
+            key = os.path.normcase(os.path.normpath(str(where)))
+            if key in seen:
+                continue
+            seen.add(key)
+            found.append((where, prefix + path, name, url, recorded.get(path, "")))
+            if has_git_dir(where):
+                walk(where, f"{prefix}{path}/", depth + 1)
+
+    walk(Path(repo), "", 1)
+
+    def read(item: tuple[Path, str, str, str, str]) -> SubmoduleState:
+        where, path, name, url, recorded_hash = item
+        if not has_git_dir(where):
+            return SubmoduleState(path, name, url, recorded_hash, None, None, NOT_CHECKED_OUT)
+        checked_out, problem = _commit_summary(where, "HEAD")
+        if checked_out is not None and checked_out.hash == recorded_hash:
+            recorded = checked_out
+        elif recorded_hash:
+            recorded = commit_summary(where, recorded_hash)
+        else:
+            recorded = None
+        return SubmoduleState(path, name, url, recorded_hash, recorded, checked_out, problem)
+
+    if not found:
+        return []
+    with ThreadPoolExecutor(max_workers=min(8, len(found))) as pool:
+        return list(pool.map(read, found))
+
+
 def current_branch(repo: str | Path) -> str:
     res = _run(repo, ["rev-parse", "--abbrev-ref", "HEAD"])
     return res.stdout.strip() if res.ok else "(unknown)"
@@ -917,7 +1083,7 @@ SKIP_OWNER_CHECK = "GIT_TEST_ASSUME_DIFFERENT_OWNER"
 _HOOKLESS = frozenset(
     {
         "add", "apply", "branch", "cat-file", "check-attr", "check-ref-format",
-        "config", "diff", "for-each-ref", "hash-object", "log", "ls-files",
+        "config", "diff", "for-each-ref", "hash-object", "log", "ls-files", "ls-tree",
         "remote", "restore", "rev-list", "rev-parse", "rm", "show", "status", "tag",
     }
 )

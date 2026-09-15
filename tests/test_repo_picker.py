@@ -24,6 +24,7 @@ from git_assistant.ui.repo_picker import (  # noqa: E402
     FAVORITES_GROUP,
     RECENT_GROUP,
     REMOVE_FAVORITE,
+    OtherRepoPicker,
     RepoPicker,
 )
 
@@ -496,3 +497,44 @@ def test_a_favorite_added_on_one_tab_is_there_on_the_next(qapp):
     dlg.tabs.setCurrentWidget(dlg.agents_panel)
 
     assert _groups(dlg.agents_panel.repo_picker)[0] == (FAVORITES_GROUP, ["x\\beta"])
+
+
+# ---- a second repository, set beside the active one ------------------------------------
+def test_choosing_the_repository_to_set_beside_the_active_one_changes_nothing_else(qapp):
+    """The Compare tab's other side: comparing with a project does not make it yours."""
+    settings = _plain("alpha", "beta", "gamma", recent=["gamma"])
+    picker = OtherRepoPicker(settings)
+    heard = []
+    picker.repoChanged.connect(heard.append)
+
+    assert picker.select("/x/beta")
+
+    assert settings.compare_repo == "/x/beta"
+    assert settings.active_repo == "/x/alpha"
+    assert settings.recent_repos == ["/x/gamma"]
+    assert heard == ["/x/beta"]
+
+
+def test_nothing_is_set_beside_the_active_repository_until_something_is_chosen(qapp):
+    """Not the first repository, as the active list falls back to: it may be the active one."""
+    settings = _plain("alpha", "beta")
+    assert OtherRepoPicker(settings).current_path() == ""
+
+    settings.compare_repo = "/x/beta"
+    assert OtherRepoPicker(settings).current_path() == "/x/beta"
+
+    settings.compare_repo = "/x/gone"
+    assert OtherRepoPicker(settings).current_path() == ""
+
+
+def test_the_repository_set_beside_stays_selected_when_favorites_change(qapp):
+    settings = _plain("alpha", "beta", favorites=["beta"])
+    settings.compare_repo = "/x/beta"
+    picker = OtherRepoPicker(settings)
+    picker.repo_list.setCurrentItem(_row(picker, FAVORITES_GROUP, "/x/beta"))
+
+    picker.set_favorite("/x/beta", False)
+
+    assert picker.current_path() == "/x/beta" == settings.compare_repo
+    assert picker.repo_list.currentItem().parent().text(0) == ALL_GROUP
+    assert settings.active_repo == "/x/alpha"

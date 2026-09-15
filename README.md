@@ -72,6 +72,15 @@ More: [commit messages](docs/commit-messages.md) · [large diffs](docs/large-dif
 
 More: [branches and tags](docs/branches-and-tags.md)
 
+### Compare
+
+| | |
+|---|---|
+| **Repository / Compare with** | The active repository on the left, and any other on the list on the right. Choosing what to compare with changes nothing else. |
+| **Submodules** | Every submodule of either repository, nested ones too, in a row beside the same one on the other side: its commit, the tag on that commit, when it was committed, and its message. Paired by path — or by where they are fetched from, when two projects keep a library in different places. |
+| **Compare** | The commits checked out, or the ones each repository's HEAD records. A submodule checked out somewhere other than what is recorded shows both. |
+| **Only differences** | Hides the submodules both sides have at the same commit. Right-click a row to copy its commit hash. |
+
 ### Audit
 
 Four read-only audits of the selected repository. Git measures; the provider

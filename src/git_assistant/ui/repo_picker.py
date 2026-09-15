@@ -328,12 +328,21 @@ class RepoPicker(QWidget):
         # Selected after the rows exist: setCurrentItem does nothing for an item
         # that is not in the tree yet. Under All rather than the shortcut, so
         # the selection does not move about as recency changes.
-        active = self.settings.active_repo
-        target = self._find(everything, active) or self._first_repo(everything)
+        target = self._find(everything, self._remembered())
+        if target is None and self.SELECTS_FIRST:
+            target = self._first_repo(everything)
         if target is not None:
             self.repo_list.setCurrentItem(target)
         self.repo_list.blockSignals(False)
         self._apply_filter(self.filter_edit.text())
+
+    #: With nothing remembered, or the remembered one gone from the list, select
+    #: the first repository rather than none.
+    SELECTS_FIRST = True
+
+    def _remembered(self) -> str:
+        """The repository this list selects when it is built: the active one."""
+        return self.settings.active_repo
 
     def _all_entries(self) -> list[RepoEntry]:
         """Every repository, by name. `build_repo_tree` sorts the nested ones."""
@@ -359,13 +368,13 @@ class RepoPicker(QWidget):
                 group.setExpanded(True)
             # The selected row may have been one of the favorites just replaced.
             # Qt moves the selection to a neighbour of its own choosing, and the
-            # active repository is the one that has to stay selected.
-            if self.current_path() != self.settings.active_repo:
+            # remembered repository is the one that has to stay selected.
+            if self.current_path() != self._remembered():
                 everything = next(
                     (g for g in self._groups() if g.text(0) == ALL_GROUP), None
                 )
                 if everything is not None:
-                    target = self._find(everything, self.settings.active_repo)
+                    target = self._find(everything, self._remembered())
                     if target is not None:
                         self.repo_list.setCurrentItem(target)
         finally:
@@ -512,5 +521,28 @@ class RepoPicker(QWidget):
             return
         self.settings.active_repo = path
         self.settings.mark_recent(path)
+        self.settings.save()
+        self.repoChanged.emit(path)
+
+
+class OtherRepoPicker(RepoPicker):
+    """The same list, for a second repository set beside the active one.
+
+    Choosing here makes nothing active, puts nothing among the recently used and
+    changes no other tab: only ``settings.compare_repo`` remembers it. With nothing
+    remembered nothing is selected, since the active repository set beside itself
+    would be a comparison of nothing.
+    """
+
+    SELECTS_FIRST = False
+
+    def _remembered(self) -> str:
+        return self.settings.compare_repo
+
+    def _on_selected(self, _current=None, _previous=None) -> None:
+        path = self.current_path()
+        if not path:
+            return
+        self.settings.compare_repo = path
         self.settings.save()
         self.repoChanged.emit(path)

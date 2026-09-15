@@ -55,6 +55,7 @@ CHECKSUM_SUFFIX = ".sha256"
 KEPT = (
     "repos",
     "active_repo",
+    "compare_repo",
     "recent_repos",
     "favorite_repos",
     "scan_roots",
