@@ -621,6 +621,46 @@ def test_a_built_in_set_shows_the_versions_each_rule_applies_to(qapp, with_repo,
     assert any(one == "" for one in spans)  # a rule true of every version
 
 
+def test_a_second_refresh_of_the_same_repository_does_not_walk_it_again(
+    qapp, settings, staged, tmp_path, monkeypatch
+):
+    """The tab is refreshed every time it is shown, and walking a repository for its
+    manifests was most of what showing it cost."""
+    import os
+    import time
+
+    from git_assistant.review import versions
+
+    repo = tmp_path / "demo"
+    (repo / "src").mkdir(parents=True)
+    (repo / "pyproject.toml").write_text('requires-python = ">=3.12"', encoding="utf-8")
+    past = time.time() - 3600  # nothing changed a moment ago
+    for path in (repo, repo / "src", repo / "pyproject.toml"):
+        os.utime(path, (past, past))
+    settings.repos = [RepoEntry(str(repo))]
+    settings.active_repo = str(repo)
+    versions.forget()
+    listed = []
+    real = versions._Repository._list
+    monkeypatch.setattr(
+        versions._Repository,
+        "_list",
+        lambda self, folder: listed.append(folder) or real(self, folder),
+    )
+    panel = ReviewPanel(settings)
+    assert panel._detected == {"python": "py312"}
+    assert listed
+    listed.clear()
+
+    panel.refresh_repos()
+    panel.refresh_repos()
+
+    assert listed == []
+    assert panel._detected == {"python": "py312"}
+    assert "pyproject.toml" in panel._version_sources["python"]
+    versions.forget()
+
+
 def test_every_built_in_language_is_listed_even_with_no_tables_of_your_own(
     qapp, with_repo, staged
 ):

@@ -14,7 +14,9 @@ rules the code could not have followed.
 
 from __future__ import annotations
 
+import os
 import re
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -30,6 +32,14 @@ _SKIP = {".git", "node_modules", "target", "build", "dist", "venv", ".venv", "__
 #: How deep to look for a manifest. A solution with projects two folders down is
 #: normal; anything deeper is a monorepo, and one answer for it would be wrong.
 _MAX_DEPTH = 3
+
+#: How long ago everything a reading rests on must have changed for the reading
+#: to be kept. Windows stamps a change with its clock as of the last tick, some
+#: sixteen milliseconds, so a second change inside one tick leaves the stamp
+#: where the first one put it: a reading taken between the two cannot tell them
+#: apart by stamps. Two seconds is past any tick, and past a FAT drive's
+#: two-second stamps.
+_SETTLE_NS = 2_000_000_000
 
 
 @dataclass(frozen=True)
@@ -50,28 +60,110 @@ def _read(path: Path) -> str:
         return ""
 
 
-def _find(repo: Path, names: tuple[str, ...], suffix: str = "") -> list[Path]:
+def _stamp(path: str | Path) -> tuple[int, int] | None:
+    """When ``path`` last changed, and its size; None when nothing is there."""
+    try:
+        status = os.stat(path)
+    except OSError:
+        return None
+    return status.st_mtime_ns, status.st_size
+
+
+class _Repository:
+    """One reading of a repository: the files detection may look at, listed once.
+
+    Every folder is stamped before it is listed and every file before it is read,
+    so the reading can be checked against the disk later without being done again.
+    """
+
+    def __init__(self, root: Path) -> None:
+        self.root = root
+        self.started = time.time_ns()
+        self.stamps: dict[str, tuple[int, int] | None] = {}
+        self._files: list[Path] | None = None
+        self._texts: dict[Path, str] = {}
+
+    def read(self, path: Path) -> str:
+        if path not in self._texts:
+            self.stamps[str(path)] = _stamp(path)
+            self._texts[path] = _read(path)
+        return self._texts[path]
+
+    def files(self) -> list[Path]:
+        """Every file a manifest could be, in the order ``Path.rglob("*")`` lists them.
+
+        The order is kept because it decides which of several manifests is read
+        first. That is a folder's own entries; then, folder by folder, the entries
+        of each folder in it; then the folders in the last of those, as rglob's
+        stack takes them, last first.
+
+        What is not listed is what rglob went on to list and every detector then
+        threw away -- everything under .git, node_modules and the rest of
+        ``_SKIP``, and everything deeper than ``_MAX_DEPTH`` -- once for each
+        detector: 11,668 paths walked six times over to find 345, in this
+        application's own repository.
+        """
+        if self._files is None:
+            self._files = self._walk()
+        return self._files
+
+    def _list(self, folder: Path) -> list[os.DirEntry]:
+        self.stamps[str(folder)] = _stamp(folder)
+        try:
+            with os.scandir(folder) as entries:
+                return list(entries)
+        except OSError:
+            return []
+
+    def _walk(self) -> list[Path]:
+        found: list[Path] = []
+
+        def keep(entries: list[os.DirEntry]) -> None:
+            for entry in entries:
+                if entry.name in _SKIP:
+                    continue
+                try:
+                    if entry.is_file():
+                        found.append(Path(entry.path))
+                except OSError:
+                    pass
+
+        top = self._list(self.root)
+        keep(top)
+        # A folder's entries, and how far below the repository they are.
+        stack = [(top, 1)]
+        while stack:
+            entries, depth = stack.pop()
+            for entry in entries:
+                try:
+                    # As rglob decides it: a link to a folder is not followed.
+                    if not entry.is_dir(follow_symlinks=False):
+                        continue
+                except OSError:
+                    continue
+                if entry.name in _SKIP or depth + 1 > _MAX_DEPTH:
+                    continue
+                inside = self._list(Path(entry.path))
+                keep(inside)
+                if depth + 2 <= _MAX_DEPTH:
+                    stack.append((inside, depth + 1))
+        return found
+
+
+def _find(repo: _Repository, names: tuple[str, ...], suffix: str = "") -> list[Path]:
     """Manifests at the top of the repository, or a little way down."""
-    found: list[Path] = []
-    root_depth = len(repo.parts)
-    for path in repo.rglob("*"):
-        if len(path.parts) - root_depth > _MAX_DEPTH:
-            continue
-        if any(part in _SKIP for part in path.parts[root_depth:]):
-            continue
-        if not path.is_file():
-            continue
-        if path.name in names or (suffix and path.name.endswith(suffix)):
-            found.append(path)
-        if len(found) >= 8:  # enough to decide; this is not a survey
-            break
-    return found
+    found = [
+        path
+        for path in repo.files()
+        if path.name in names or (suffix and path.name.endswith(suffix))
+    ]
+    return found[:8]  # enough to decide; this is not a survey
 
 
 # ---- one detector per language -------------------------------------------------------
-def _python(repo: Path) -> Detected | None:
+def _python(repo: _Repository) -> Detected | None:
     for name in ("pyproject.toml", "setup.cfg"):
-        text = _read(repo / name)
+        text = repo.read(repo.root / name)
         match = re.search(r"""(?:requires-python|python_requires)\s*=\s*["']?([^"'\n]+)""", text)
         if match:
             wanted = match.group(1).strip()
@@ -87,7 +179,7 @@ def _python(repo: Path) -> Detected | None:
                 return Detected(version, f"{name}: {wanted}")
             if wanted.startswith("2"):
                 return Detected("py2", f"{name}: {wanted}")
-    text = _read(repo / ".python-version").strip()
+    text = repo.read(repo.root / ".python-version").strip()
     digits = re.match(r"3\.(\d+)", text)
     if digits:
         minor = int(digits.group(1))
@@ -98,8 +190,8 @@ def _python(repo: Path) -> Detected | None:
     return None
 
 
-def _rust(repo: Path) -> Detected | None:
-    text = _read(repo / "Cargo.toml")
+def _rust(repo: _Repository) -> Detected | None:
+    text = repo.read(repo.root / "Cargo.toml")
     match = re.search(r"""^\s*edition\s*=\s*["'](\d{4})["']""", text, re.M)
     if not match:
         return None
@@ -111,9 +203,8 @@ def _rust(repo: Path) -> Detected | None:
     return None
 
 
-def _typescript(repo: Path) -> Detected | None:
+def _typescript(repo: _Repository) -> Detected | None:
     for path in _find(repo, ("tsconfig.json",)):
-        text = _read(path)
         # The compiler's own version is what matters, and package.json is where
         # it is pinned; the tsconfig only proves the project is TypeScript.
         pinned = _package_dep(repo, "typescript")
@@ -126,9 +217,9 @@ def _typescript(repo: Path) -> Detected | None:
     return None
 
 
-def _javascript(repo: Path) -> Detected | None:
+def _javascript(repo: _Repository) -> Detected | None:
     for path in _find(repo, ("tsconfig.json", ".babelrc", "babel.config.json")):
-        target = re.search(r'"target"\s*:\s*"(es\w+)"', _read(path), re.I)
+        target = re.search(r'"target"\s*:\s*"(es\w+)"', repo.read(path), re.I)
         if target:
             wanted = target.group(1).lower()
             lang = languages.get("javascript")
@@ -142,16 +233,16 @@ def _javascript(repo: Path) -> Detected | None:
     return None
 
 
-def _package_dep(repo: Path, name: str) -> str:
+def _package_dep(repo: _Repository, name: str) -> str:
     match = re.search(
-        rf'"{name}"\s*:\s*"([^"]+)"', _read(repo / "package.json")
+        rf'"{name}"\s*:\s*"([^"]+)"', repo.read(repo.root / "package.json")
     )
     return match.group(1) if match else ""
 
 
-def _csharp(repo: Path) -> Detected | None:
+def _csharp(repo: _Repository) -> Detected | None:
     for path in _find(repo, (), suffix=".csproj"):
-        text = _read(path)
+        text = repo.read(path)
         explicit = re.search(r"<LangVersion>\s*([\d.]+)\s*</LangVersion>", text)
         if explicit:
             major = int(float(explicit.group(1)))
@@ -176,9 +267,9 @@ def _cs_version(major: int) -> str:
     return wanted if lang and wanted in lang.versions else "cs13"
 
 
-def _java(repo: Path) -> Detected | None:
+def _java(repo: _Repository) -> Detected | None:
     for path in _find(repo, ("pom.xml", "build.gradle", "build.gradle.kts")):
-        text = _read(path)
+        text = repo.read(path)
         for pattern in (
             r"<maven\.compiler\.(?:release|source|target)>\s*(\d+)",
             r"JavaLanguageVersion\.of\((\d+)\)",
@@ -198,10 +289,10 @@ def _java(repo: Path) -> Detected | None:
     return None
 
 
-def _cpp_std(repo: Path) -> tuple[str, str] | None:
+def _cpp_std(repo: _Repository) -> tuple[str, str] | None:
     """``(standard, source)`` for whichever of C/C++ the build files declare."""
     for path in _find(repo, ("CMakeLists.txt", "Makefile", "meson.build")):
-        text = _read(path)
+        text = repo.read(path)
         match = re.search(r"CMAKE_CXX_STANDARD\s+(\d+)", text) or re.search(
             r"cxx_std_(\d+)", text
         ) or re.search(r"-std=(?:gnu|c)\+\+(\d+)", text) or re.search(
@@ -212,9 +303,9 @@ def _cpp_std(repo: Path) -> tuple[str, str] | None:
     return None
 
 
-def _c_std(repo: Path) -> tuple[str, str] | None:
+def _c_std(repo: _Repository) -> tuple[str, str] | None:
     for path in _find(repo, ("CMakeLists.txt", "Makefile", "meson.build")):
-        text = _read(path)
+        text = repo.read(path)
         match = re.search(r"CMAKE_C_STANDARD\s+(\d+)", text) or re.search(
             r"-std=(?:gnu|c)(\d+)", text
         ) or re.search(r"""\bc_std\s*[:=]\s*['"]c(\d+)""", text)
@@ -228,7 +319,7 @@ def _two_digit(number: str) -> str:
     return number if len(number) <= 2 else number[-2:]
 
 
-def _cpp(repo: Path) -> Detected | None:
+def _cpp(repo: _Repository) -> Detected | None:
     found = _cpp_std(repo)
     if not found:
         return None
@@ -237,7 +328,7 @@ def _cpp(repo: Path) -> Detected | None:
     return Detected(version, source) if lang and version in lang.versions else None
 
 
-def _c(repo: Path) -> Detected | None:
+def _c(repo: _Repository) -> Detected | None:
     found = _c_std(repo)
     if not found:
         return None
@@ -258,27 +349,72 @@ _DETECTORS = {
 }
 
 
+@dataclass
+class _Reading:
+    """What detection found in a repository, and the stamps that answer rests on."""
+
+    found: dict[str, Detected]
+    stamps: dict[str, tuple[int, int] | None]
+    #: Nothing stamped had changed in the `_SETTLE_NS` before the reading began,
+    #: so any change since has moved a stamp.
+    settled: bool
+
+    def still_holds(self) -> bool:
+        return self.settled and all(
+            _stamp(path) == stamp for path, stamp in self.stamps.items()
+        )
+
+
+#: The latest reading of each repository, by folder.
+_readings: dict[str, _Reading] = {}
+
+
+def _read_repository(root: Path) -> _Reading:
+    repository = _Repository(root)
+    found: dict[str, Detected] = {}
+    for language, detector in _DETECTORS.items():
+        try:
+            detected = detector(repository)
+        except OSError:
+            detected = None
+        if detected is not None:
+            found[language] = detected
+    newest = max((stamp[0] for stamp in repository.stamps.values() if stamp), default=0)
+    return _Reading(
+        found, repository.stamps, settled=newest < repository.started - _SETTLE_NS
+    )
+
+
 def detect(repo: str, *, wanted: list[str] | None = None) -> dict[str, Detected]:
     """What each language's version is, for the languages the repository declares.
 
-    Only the languages in ``wanted`` are looked for when it is given -- there is
-    no point reading a `.csproj` for a repository with no C# in it. A language
+    Only the languages in ``wanted`` are returned when it is given. A language
     with nothing to read is simply absent from the result.
+
+    A repository is read once and the answer kept for as long as nothing it was
+    read from has changed: every folder listed and every file read is stamped,
+    and checking those stamps is a few dozen ``stat`` calls where reading again
+    is a walk. A folder's stamp moves when anything in it is added, removed or
+    renamed, which is how a new manifest shows.
     """
     root = Path(repo)
     if not root.is_dir():
         return {}
-    out: dict[str, Detected] = {}
-    for language, detector in _DETECTORS.items():
-        if wanted is not None and language not in wanted:
-            continue
-        try:
-            found = detector(root)
-        except OSError:
-            found = None
-        if found is not None:
-            out[language] = found
-    return out
+    key = os.path.normcase(os.path.abspath(root))
+    reading = _readings.get(key)
+    if reading is None or not reading.still_holds():
+        reading = _read_repository(root)
+        _readings[key] = reading
+    return {
+        language: found
+        for language, found in reading.found.items()
+        if wanted is None or language in wanted
+    }
+
+
+def forget() -> None:
+    """Read every repository afresh the next time it is asked about."""
+    _readings.clear()
 
 
 def from_content(language: str, head: str) -> Detected | None:
