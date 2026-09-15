@@ -37,6 +37,7 @@ from git_assistant.ui.branch_cards import (
     PlainBranchCard,
     offered_or_default,
 )
+from git_assistant.ui.remotes_page import REMOTES_TAB, RemotesPage
 from git_assistant.ui.repo_pane import RepoPane
 from git_assistant.ui.repo_picker import RepoPicker
 from git_assistant.ui import side_panel as side_panel_mod
@@ -181,6 +182,12 @@ class BranchesTagsPanel(QWidget):
         # Repository on the left, folded until it is wanted, then the two halves
         # of the tab - the same shape as every other repo-driven tab.
         self.repo_pane = RepoPane(self.repo_picker, margins=(0, 0, SECTION_GAP, 0))
+        # And behind it the remotes, as on the Commit tab: a branch is pushed to
+        # the one it tracks, and the list beside it says how far off it is -- so
+        # a change here is read back into that list.
+        self.remotes_page = RemotesPage()
+        self.remotes_page.remotesChanged.connect(self._reload_branches)
+        self.repo_pane.add_page(self.remotes_page, REMOTES_TAB)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.addWidget(self.repo_pane)
@@ -301,6 +308,9 @@ class BranchesTagsPanel(QWidget):
 
     def _reload_branches(self) -> None:
         repo = self._repo_path()
+        # Which remote is tracked is the checked-out branch's, and every change
+        # of branch passes through here.
+        self.remotes_page.show_repo(repo)
         self.branch_list.clear()
         if not repo:
             self._on_branch_selection()
@@ -556,6 +566,9 @@ class BranchesTagsPanel(QWidget):
         repo, chosen = self._repo_path(), self._selected_branch()
         if not repo or chosen is None or chosen.current:
             return
+        # Read before the local branch goes: deleting it takes what it tracked
+        # out of the configuration with it.
+        remote, there = git_ops.tracked_branch(repo, chosen.name)
         if (
             QMessageBox.question(
                 self,
@@ -598,18 +611,26 @@ class BranchesTagsPanel(QWidget):
 
         self.branch_status.setText(f"Deleted '{chosen.name}'.")
         self._reload_branches()
-        if chosen.upstream and QMessageBox.question(
+        # On the remote it tracked, and by the name it has there: origin and the
+        # same name were assumed before, and with the tracked remote a choice of
+        # its own, that was a question about one remote and a delete on another.
+        # And only when there is a copy there to delete: a branch set to track a
+        # remote it was never pushed to is not "also on" it.
+        if chosen.upstream and remote and not chosen.gone and QMessageBox.question(
             self,
             "Delete it on the remote too?",
-            f"'{chosen.name}' is also on {chosen.upstream.split('/')[0]}.\n\n"
-            "Delete it there as well? Anyone who has it will keep their copy.",
+            f"'{chosen.name}' is also on {remote}"
+            + (f", as '{there}'" if there != chosen.name else "")
+            + ".\n\nDelete it there as well? Anyone who has it will keep their copy.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
             QMessageBox.StandardButton.Cancel,
         ) == QMessageBox.StandardButton.Yes:
             self._run_off_thread(
-                lambda r=repo, n=chosen.name: git_ops.delete_remote_branch(r, n),
-                busy="Deleting it on the remote...",
-                done=f"Deleted '{chosen.name}' locally and on the remote.",
+                lambda r=repo, n=there, rm=remote: git_ops.delete_remote_branch(
+                    r, n, remote=rm
+                ),
+                busy=f"Deleting it on {remote}...",
+                done=f"Deleted '{chosen.name}' locally and on {remote}.",
                 failed="The branch is gone locally; the remote still has it.",
             )
 
@@ -618,12 +639,14 @@ class BranchesTagsPanel(QWidget):
         if not repo or chosen is None:
             return
         upstream = self._config.branch.push_sets_upstream
+        # Named for the status line only: `push_branch` finds it the same way.
+        remote = git_ops.tracking_remote(repo, chosen.name) or "origin"
         self._run_off_thread(
             lambda r=repo, n=chosen.name, u=upstream: git_ops.push_branch(
                 r, n, set_upstream=u
             ),
-            busy=f"Pushing '{chosen.name}'...",
-            done=f"Pushed '{chosen.name}'.",
+            busy=f"Pushing '{chosen.name}' to {remote}...",
+            done=f"Pushed '{chosen.name}' to {remote}.",
             failed="Push failed.",
         )
 

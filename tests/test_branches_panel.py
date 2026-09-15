@@ -675,3 +675,180 @@ def test_an_identity_saved_without_a_name_does_not_blank_the_user(qapp, repo):
     card.name_edit.setText("thing")
 
     assert "dev/rem/Stefan-Ghitescu/thing" in panel.branch_preview.text()
+
+
+# ---- remotes -------------------------------------------------------------------------
+def _bare(path):
+    subprocess.run(
+        ["git", "init", "-q", "--bare", str(path)],
+        capture_output=True,
+        creationflags=_NO_WINDOW,
+        check=True,
+    )
+    return path
+
+
+def _heads(bare):
+    listed = subprocess.run(
+        ["git", "--git-dir", str(bare), "branch", "--format=%(refname:short)"],
+        capture_output=True,
+        text=True,
+        creationflags=_NO_WINDOW,
+        check=True,
+    )
+    return listed.stdout.split()
+
+
+@pytest.fixture
+def remotes(repo, tmp_path):
+    """origin and work, both local bare repositories, so a push really lands.
+
+    Asked for before `panel` wherever both are, so the tab opens on them.
+    """
+    found = {}
+    for name in ("origin", "work"):
+        found[name] = _bare(tmp_path / f"{name}.git")
+        _git(repo, "remote", "add", name, str(found[name]))
+    return found
+
+
+def _off_thread_now(monkeypatch):
+    monkeypatch.setattr(
+        "git_assistant.ui.branches_tags_panel.run_worker",
+        lambda worker: worker.run(),
+    )
+
+
+def test_the_remotes_are_behind_their_own_title_beside_the_repository(remotes, panel):
+    pane = panel.repo_pane
+    titles = [pane.tabs.tabText(i) for i in range(pane.tabs.count())]
+
+    assert titles == ["Repository", "Remotes"]
+    assert pane.widget(1) is panel.remotes_page
+    assert panel.remotes_page.remotes() == ["origin", "work"]
+
+
+def test_switching_branch_here_shows_what_that_branch_tracks(remotes, panel, repo):
+    git_ops.create_branch(repo, "feature", switch=False)
+    git_ops.set_tracking_remote(repo, "feature", "work")
+    panel._reload_branches()
+    _select(panel, "feature")
+
+    panel._on_switch_branch()
+
+    assert panel.remotes_page.tracking_label.text() == "'feature' tracks work."
+
+
+def test_choosing_what_a_branch_tracks_is_read_back_into_the_branch_list(
+    remotes, panel, repo
+):
+    current = git_ops.current_branch(repo)
+    _select(panel, current)
+    assert panel.branch_list.currentItem().text(1) == "no upstream"
+    page = panel.remotes_page
+    page.remote_list.setCurrentRow(page.remotes().index("work"))
+
+    page.track_btn.click()
+
+    _select(panel, current)
+    assert panel.branch_list.currentItem().text(1) != "no upstream"
+
+
+def test_a_branch_is_pushed_to_the_remote_it_tracks_and_says_so(
+    remotes, panel, repo, monkeypatch
+):
+    git_ops.create_branch(repo, "feature", switch=False)
+    git_ops.set_tracking_remote(repo, "feature", "work")
+    panel._reload_branches()
+    _select(panel, "feature")
+    _off_thread_now(monkeypatch)
+
+    panel._on_push_branch()
+
+    assert _heads(remotes["work"]) == ["feature"]
+    assert _heads(remotes["origin"]) == []
+    assert panel.branch_status.text() == "Pushed 'feature' to work."
+
+
+def test_deleting_it_on_the_remote_too_is_on_the_remote_it_tracked(
+    remotes, panel, repo, monkeypatch
+):
+    """Not on origin: the question names the remote, and so does the delete."""
+    git_ops.create_branch(repo, "spare", switch=False)
+    _git(repo, "push", "-q", "origin", "spare")
+    _git(repo, "push", "-q", "-u", "work", "spare")
+    panel._reload_branches()
+    _select(panel, "spare")
+    asked = []
+    monkeypatch.setattr(
+        QMessageBox,
+        "question",
+        lambda *a, **k: asked.append(a[2]) or QMessageBox.StandardButton.Yes,
+    )
+    _off_thread_now(monkeypatch)
+
+    panel._on_delete_branch()
+
+    assert "'spare' is also on work." in asked[-1]
+    assert _heads(remotes["work"]) == []
+    assert _heads(remotes["origin"]) == ["spare"]
+    assert panel.branch_status.text() == "Deleted 'spare' locally and on work."
+
+
+def test_a_branch_tracking_another_name_is_deleted_there_by_that_name(
+    remotes, panel, repo, monkeypatch
+):
+    git_ops.create_branch(repo, "mine", switch=False)
+    _git(repo, "push", "-q", "work", "mine:theirs")
+    _git(repo, "branch", "-q", "--set-upstream-to=work/theirs", "mine")
+    panel._reload_branches()
+    _select(panel, "mine")
+    asked = []
+    monkeypatch.setattr(
+        QMessageBox,
+        "question",
+        lambda *a, **k: asked.append(a[2]) or QMessageBox.StandardButton.Yes,
+    )
+    _off_thread_now(monkeypatch)
+
+    panel._on_delete_branch()
+
+    assert "'mine' is also on work, as 'theirs'." in asked[-1]
+    assert _heads(remotes["work"]) == []
+
+
+def test_a_branch_never_pushed_where_it_tracks_is_not_offered_a_remote_delete(
+    remotes, panel, repo, monkeypatch
+):
+    """"Also on work" would be untrue, and the delete there would find nothing."""
+    git_ops.create_branch(repo, "spare", switch=False)
+    git_ops.set_tracking_remote(repo, "spare", "work")
+    panel._reload_branches()
+    _select(panel, "spare")
+    asked = []
+    monkeypatch.setattr(
+        QMessageBox,
+        "question",
+        lambda *a, **k: asked.append(a[1]) or QMessageBox.StandardButton.Yes,
+    )
+
+    panel._on_delete_branch()
+
+    assert not git_ops.branch_exists(repo, "spare")
+    assert asked == ["Delete branch"]  # and nothing about the remote
+
+
+def test_choosing_what_a_branch_tracks_here_is_named_in_the_bar(qapp, repo, remotes):
+    from git_assistant.ui.settings_dialog import SettingsDialog
+
+    settings = Settings()
+    settings.save = lambda: None
+    settings.repos = [RepoEntry(str(repo))]
+    settings.active_repo = str(repo)
+    dlg = SettingsDialog(settings)
+    page = dlg.tags_panel.remotes_page
+    page.remote_list.setCurrentRow(page.remotes().index("work"))
+
+    page.track_btn.click()
+
+    assert dlg.identity_bar.auth_status.text().startswith("work (")

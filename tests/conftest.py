@@ -18,6 +18,8 @@ half, and passes. So sleeping is recorded rather than lived.
 
 from __future__ import annotations
 
+import os
+
 import pytest
 
 #: Every store that writes into the user's config directory. A test that runs
@@ -59,6 +61,34 @@ def _config_dir_is_never_the_real_one(tmp_path, monkeypatch):
             monkeypatch.setattr(
                 module, "user_config_dir", lambda *a, **k: str(home)
             )
+
+@pytest.fixture(autouse=True)
+def _global_git_config_is_never_the_real_one(monkeypatch, tmp_path_factory):
+    """Mark nothing safe in the user's own global git config.
+
+    Adding a repository marks it safe there, and settings have that on by
+    default: every test that adds one would leave a safe.directory line in the
+    real ~/.gitconfig. A test that points ``GIT_CONFIG_GLOBAL`` at a file of its
+    own marks for real, in that file; any other marks nothing.
+    """
+    from pathlib import Path
+
+    from git_assistant import git_ops
+
+    real = git_ops.add_safe_lines
+    base = Path(tmp_path_factory.getbasetemp()).resolve()
+
+    def add_safe_lines(lines):
+        target = os.environ.get("GIT_CONFIG_GLOBAL", "")
+        if not target or not Path(target).resolve().is_relative_to(base):
+            return git_ops.Marked()
+        return real(lines)
+
+    monkeypatch.setattr(git_ops, "add_safe_lines", add_safe_lines)
+    git_ops.forget_safe_directories()
+    yield
+    git_ops.forget_safe_directories()
+
 
 @pytest.fixture(autouse=True)
 def slept(monkeypatch):

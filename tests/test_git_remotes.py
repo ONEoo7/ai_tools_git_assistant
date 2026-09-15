@@ -168,6 +168,17 @@ def test_a_push_goes_to_the_tracked_remote_then_origin_then_the_first(repo):
     assert git_ops.push_remote(repo) == "backup"
 
 
+def test_what_a_branch_tracks_is_the_remote_and_its_name_there(repo):
+    git_ops.add_remote(repo, "work", "https://example.com/work.git")
+    assert git_ops.tracked_branch(repo, "main") == ("", "")
+
+    git_ops.set_tracking_remote(repo, "main", "work")
+    assert git_ops.tracked_branch(repo, "main") == ("work", "main")
+
+    _git(repo, "config", "branch.main.merge", "refs/heads/trunk")
+    assert git_ops.tracked_branch(repo, "main") == ("work", "trunk")
+
+
 # ---- where a first push goes ---------------------------------------------------------
 def test_a_first_push_goes_to_the_remote_the_branch_tracks(repo, tmp_path):
     origin, backup = _bare(tmp_path / "origin.git"), _bare(tmp_path / "backup.git")
@@ -204,6 +215,24 @@ def test_a_first_push_of_a_branch_tracking_nothing_still_goes_to_origin(repo, tm
     assert git_ops.push(repo).ok
 
     assert _branches_in(origin) == ["main"]
+
+
+def test_one_branch_is_pushed_to_the_remote_it_tracks_unless_told_otherwise(
+    repo, tmp_path
+):
+    """The Branches & Tags tab pushes the branch selected there, not the checked-out one."""
+    origin, backup = _bare(tmp_path / "origin.git"), _bare(tmp_path / "backup.git")
+    git_ops.add_remote(repo, "origin", str(origin))
+    git_ops.add_remote(repo, "backup", str(backup))
+    _git(repo, "branch", "feature")
+    git_ops.set_tracking_remote(repo, "feature", "backup")
+
+    assert git_ops.push_branch(repo, "feature").ok
+    assert _branches_in(backup) == ["feature"]
+    assert _branches_in(origin) == []
+
+    assert git_ops.push_branch(repo, "feature", remote="origin").ok
+    assert _branches_in(origin) == ["feature"]
 
 
 # ---- what authenticates it -----------------------------------------------------------

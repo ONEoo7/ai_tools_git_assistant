@@ -365,3 +365,228 @@ def test_a_new_repository_survives_the_next_save_and_stays_active(
 
     assert [entry.path for entry in empty_settings.repos] == [stored]
     assert empty_settings.active_repo == stored
+
+
+# ---- marked safe for git as they are added ---------------------------------------------
+@pytest.fixture
+def own_git_config(tmp_path, monkeypatch):
+    """A global git config of the test's own, and what safe.directory says in it."""
+    config = tmp_path / "global.gitconfig"
+    config.write_text("", encoding="utf-8")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(config))
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+
+    def safe_lines():
+        listed = subprocess.run(
+            ["git", "config", "--file", str(config), "--get-all", "safe.directory"],
+            capture_output=True,
+            text=True,
+            creationflags=_NO_WINDOW,
+        )
+        return listed.stdout.splitlines()
+
+    return safe_lines
+
+
+def _as_git_spells(path):
+    return Path(os.path.realpath(path)).as_posix()
+
+
+def test_marking_is_on_until_turned_off_and_stays_off(qapp, empty_settings):
+    dlg = SettingsDialog(empty_settings)
+    assert dlg.mark_safe_check.isChecked()
+
+    dlg.mark_safe_check.setChecked(False)
+
+    assert empty_settings.mark_repos_safe is False
+    assert Settings.from_dict(empty_settings.to_dict()).mark_repos_safe is False
+    assert SettingsDialog(empty_settings).mark_safe_check.isChecked() is False
+
+
+def test_a_scanned_folder_is_one_line_written_before_the_scan_asks_git(
+    qapp, empty_settings, tmp_path, monkeypatch, slot_errors, own_git_config
+):
+    folder = tmp_path / "Work"
+    _real_repo(folder / "alpha")
+    _real_repo(folder / "beta")
+    asked = []
+    monkeypatch.setattr(
+        git_ops,
+        "blocked_by_ownership",
+        lambda path: asked.append(git_ops.is_safe_directory(path)) or False,
+    )
+    dlg = SettingsDialog(empty_settings)
+
+    _scan(qapp, dlg, folder, slot_errors)
+
+    line = _as_git_spells(folder) + "/*"
+    assert own_git_config() == [line]
+    assert asked == [True, True]
+    assert dlg.scan_status.text() == (
+        f"Found 2 repo(s) in {folder}; added 2 new. Marked safe for git: {line}."
+    )
+
+
+def test_scanning_again_writes_nothing_more(
+    qapp, empty_settings, tmp_path, slot_errors, own_git_config
+):
+    _real_repo(tmp_path / "alpha")
+    dlg = SettingsDialog(empty_settings)
+    _scan(qapp, dlg, tmp_path, slot_errors)
+
+    _scan(qapp, dlg, tmp_path, slot_errors)
+
+    assert own_git_config() == [_as_git_spells(tmp_path) + "/*"]
+    assert dlg.scan_status.text() == f"Found 1 repo(s) in {tmp_path}; added 0 new."
+
+
+def test_with_marking_off_a_scan_writes_nothing(
+    qapp, empty_settings, tmp_path, slot_errors, own_git_config
+):
+    _real_repo(tmp_path / "alpha")
+    empty_settings.mark_repos_safe = False
+    dlg = SettingsDialog(empty_settings)
+
+    _scan(qapp, dlg, tmp_path, slot_errors)
+
+    assert own_git_config() == []
+    assert _listed(dlg) == ["alpha"]
+
+
+def test_a_repository_added_on_its_own_is_marked_with_its_submodules(
+    qapp, empty_settings, tmp_path, own_git_config
+):
+    repo = _real_repo(tmp_path / "alpha")
+    _real_repo(repo / "libs" / "inner")
+    (repo / ".gitmodules").write_text(
+        '[submodule "inner"]\n\tpath = libs/inner\n\turl = https://example.invalid/i.git\n',
+        encoding="utf-8",
+    )
+    dlg = SettingsDialog(empty_settings)
+
+    dlg.add_repository(str(repo))
+
+    lines = [_as_git_spells(repo), _as_git_spells(repo / "libs" / "inner")]
+    assert own_git_config() == lines
+    assert dlg.scan_status.text() == f"Marked safe for git: {lines[0]}, {lines[1]}."
+
+
+def test_a_repository_git_trusts_already_is_not_news(
+    qapp, empty_settings, tmp_path, slot_errors, own_git_config
+):
+    _real_repo(tmp_path / "alpha")
+    dlg = SettingsDialog(empty_settings)
+    _scan(qapp, dlg, tmp_path, slot_errors)
+    said = dlg.scan_status.text()
+    beta = _real_repo(tmp_path / "beta")
+
+    dlg.add_repository(str(beta))
+
+    assert own_git_config() == [_as_git_spells(tmp_path) + "/*"]
+    assert dlg.scan_status.text() == said
+
+
+def test_with_marking_off_adding_a_repository_writes_nothing(
+    qapp, empty_settings, tmp_path, own_git_config
+):
+    repo = _real_repo(tmp_path / "alpha")
+    empty_settings.mark_repos_safe = False
+    dlg = SettingsDialog(empty_settings)
+
+    dlg.add_repository(str(repo))
+
+    assert own_git_config() == []
+
+
+def _listing(tmp_path):
+    """Two folders of repositories, listed before marking them was something adding did."""
+    work = [_real_repo(tmp_path / "Work" / name) for name in ("alpha", "beta")]
+    loose = _real_repo(tmp_path / "Loose" / "gamma")
+    s = Settings()
+    s.save = lambda: None
+    s.scan_roots = [str(tmp_path / "Work")]
+    s.repos = [RepoEntry(str(path)) for path in (*work, loose)]
+    return s, loose
+
+
+def test_listed_repositories_are_marked_after_the_lines_are_shown(
+    qapp, tmp_path, monkeypatch, own_git_config
+):
+    settings, _loose = _listing(tmp_path)
+    shown = []
+    monkeypatch.setattr(
+        dialog_module.QMessageBox,
+        "question",
+        staticmethod(
+            lambda parent, title, text, *a: shown.append(text)
+            or dialog_module.QMessageBox.StandardButton.Yes
+        ),
+    )
+    dlg = SettingsDialog(settings)
+
+    dlg.mark_listed_btn.click()
+
+    lines = [_as_git_spells(tmp_path / "Work") + "/*", _as_git_spells(tmp_path / "Loose") + "/*"]
+    assert own_git_config() == lines
+    assert len(shown) == 1 and all(f"    {line}" in shown[0] for line in lines)
+    assert "Add 2 line(s)" in shown[0]
+    assert dlg.scan_status.text() == f"Marked safe for git: {lines[0]}, {lines[1]}."
+
+
+def test_a_folder_whose_repositories_git_trusts_one_by_one_gets_no_line(
+    qapp, tmp_path, monkeypatch, own_git_config
+):
+    """Adding a repository lists it alone; its folder is not a folder anybody chose."""
+    settings, loose = _listing(tmp_path)
+    for line in (_as_git_spells(loose), _as_git_spells(tmp_path / "Work" / "alpha")):
+        subprocess.run(
+            ["git", "config", "--global", "--add", "safe.directory", line],
+            creationflags=_NO_WINDOW,
+            check=True,
+            cwd=tmp_path,
+        )
+    monkeypatch.setattr(
+        dialog_module.QMessageBox,
+        "question",
+        staticmethod(lambda *a, **k: dialog_module.QMessageBox.StandardButton.Yes),
+    )
+    dlg = SettingsDialog(settings)
+
+    dlg.mark_listed_btn.click()
+
+    assert own_git_config()[2:] == [_as_git_spells(tmp_path / "Work") + "/*"]
+
+
+def test_listed_repositories_are_not_marked_when_that_is_cancelled(
+    qapp, tmp_path, monkeypatch, own_git_config
+):
+    settings, _loose = _listing(tmp_path)
+    monkeypatch.setattr(
+        dialog_module.QMessageBox,
+        "question",
+        staticmethod(lambda *a, **k: dialog_module.QMessageBox.StandardButton.Cancel),
+    )
+    dlg = SettingsDialog(settings)
+
+    dlg.mark_listed_btn.click()
+
+    assert own_git_config() == []
+
+
+def test_nothing_is_asked_when_git_trusts_everything_listed(
+    qapp, tmp_path, own_git_config
+):
+    """conftest fails a test that opens a question nobody answers."""
+    settings, _loose = _listing(tmp_path)
+    subprocess.run(
+        ["git", "config", "--global", "--add", "safe.directory", "*"],
+        creationflags=_NO_WINDOW,
+        check=True,
+        cwd=tmp_path,
+    )
+    dlg = SettingsDialog(settings)
+
+    dlg.mark_listed_btn.click()
+
+    assert dlg.scan_status.text() == "Git already trusts every repository listed here."
+    assert own_git_config() == ["*"]

@@ -458,6 +458,32 @@ def test_adding_files_waits_for_a_repository_and_names_it(qapp, settings, existi
     assert panel.add_btn.text() == "Add to existing"
 
 
+def test_the_holder_is_asked_of_git_once_for_each_repository(
+    qapp, settings, existing, tmp_path, monkeypatch
+):
+    """The tab is refreshed every time it is shown; the repository has not changed."""
+    asked = []
+    real = git_ops.get_identity
+    monkeypatch.setattr(git_ops, "get_identity", lambda repo: asked.append(repo) or real(repo))
+    panel = CloneCreatePanel(settings)
+    panel.show()
+    assert panel.holder.text() == "Test"
+
+    for _ in range(3):
+        panel.refresh_repos()
+
+    assert asked == [str(existing)]
+    other = _repo(tmp_path / "work" / "other")
+    _git(other, "config", "user.name", "Someone Else")
+    settings.repos.append(RepoEntry(str(other)))
+    panel.repo_picker.refresh()
+    panel.repo_picker.select(str(other))
+    panel.refresh_repos()
+    assert panel.holder.text() == "Someone Else"
+    assert asked == [str(existing), str(other)]
+    panel.close()
+
+
 def test_the_preview_shows_the_file_on_the_open_tab(qapp, settings, existing):
     panel = CloneCreatePanel(settings)
     panel.file_tabs.setCurrentIndex(panel_module.FILES.index(".gitattributes"))

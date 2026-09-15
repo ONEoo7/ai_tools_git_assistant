@@ -128,8 +128,10 @@ class RemotesPage(QWidget):
         chosen = select or self.selected_remote()
         self._repo = repo or ""
         self._branch = git_ops.head_branch(repo) if repo else ""
-        remotes = git_ops.list_remotes(repo) if repo else []
-        self._tracked = git_ops.tracking_remote(repo, self._branch) if repo else ""
+        # The remotes and the one the branch tracks, in one git command.
+        config = git_ops.read_config(repo) if repo else git_ops.GitConfig()
+        remotes = config.remotes()
+        self._tracked = config.tracking_remote(self._branch)
 
         self.remote_list.blockSignals(True)
         self.remote_list.clear()

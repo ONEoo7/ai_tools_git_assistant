@@ -372,7 +372,10 @@ class IdentityBar(QWidget):
                 return
 
             self.combo.setEnabled(True)
-            _name, email = git_ops.get_identity(repo)
+            # Everything below is one answer from git, not one git command for
+            # each thing the bar says: this runs whenever the window is shown.
+            config = git_ops.read_config(repo)
+            _name, email = config.identity()
             saved = self.store.identities
 
             for i, ident in enumerate(saved):
@@ -401,8 +404,8 @@ class IdentityBar(QWidget):
             self.combo.insertSeparator(self.combo.count())
             self.combo.addItem("Manage identities...", MANAGE)
 
-            self._describe_scope(repo, email)
-            self._describe_auth(repo)
+            self._describe_scope(email, config)
+            self._describe_auth(repo, config)
         finally:
             self._loading = False
 
@@ -452,9 +455,9 @@ class IdentityBar(QWidget):
         self._show_tier(repo)
         self.settingsTierChanged.emit()
 
-    def _describe_scope(self, repo: str, email: str) -> None:
+    def _describe_scope(self, email: str, config: git_ops.GitConfig) -> None:
         """Say where the identity came from -- pinned here, or inherited."""
-        local_name, local_email = git_ops.get_local_identity(repo)
+        local_name, local_email = config.local_identity()
         if local_email:
             text = "set for this repository"
             tip = (
@@ -479,7 +482,7 @@ class IdentityBar(QWidget):
         # identity produces commits every forge marks unverified, and nothing
         # in git says so at commit time.
         warn = ""
-        if git_ops.signing_enabled(repo) and not git_ops.get_signingkey(repo):
+        if config.get_bool("commit.gpgsign") and not config.get("user.signingkey"):
             warn = (
                 "commit.gpgsign is on but no user.signingkey resolves here, so "
                 "commits will fail to sign. Give this identity a signing key on "
@@ -499,9 +502,11 @@ class IdentityBar(QWidget):
         if repo:
             self._describe_auth(repo)
 
-    def _describe_auth(self, repo: str) -> None:
+    def _describe_auth(self, repo: str, config: git_ops.GitConfig | None = None) -> None:
         """Say what will authenticate a push, which the identity does not decide."""
-        auth = git_ops.describe_push_auth(repo)
+        if config is None:
+            config = git_ops.read_config(repo)
+        auth = git_ops.push_auth_from(config, git_ops.head_branch(repo))
         warning = auth.warning()
         # By name as well: two remotes on the same host read the same otherwise,
         # and choosing the other one would change nothing on screen.

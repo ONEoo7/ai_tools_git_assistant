@@ -76,6 +76,25 @@ def _heard(page):
 
 
 # ---- what it shows -------------------------------------------------------------------
+# ---- what it shows -------------------------------------------------------------------
+def test_showing_a_repository_is_one_git_command(page, repo, monkeypatch):
+    """The remotes and the one tracked come from one read; it runs on every tab switch."""
+    launched = []
+    real = subprocess.run
+
+    def run(argv, *args, **kwargs):
+        if "-C" in argv:
+            launched.append(argv[argv.index("-C") + 2 :])
+        return real(argv, *args, **kwargs)
+
+    monkeypatch.setattr(git_ops.subprocess, "run", run)
+
+    page.show_repo(str(repo))
+
+    assert launched == [["config", "--list", "-z", "--show-scope"]]
+    assert page.tracked_remote() == "origin"
+
+
 def test_it_lists_the_remotes_with_the_tracked_one_marked(page):
     assert page.remotes() == ["origin", "work"]
     assert _rows(page) == [f"origin  ({TRACKED_MARK})", "work"]

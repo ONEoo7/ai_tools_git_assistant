@@ -138,6 +138,10 @@ FIELD_COMMENTS = {
     "favorite_repos": "Repository paths kept at the top of every repository list.",
     "scan_roots": "Folders scanned for repositories.",
     "watched_roots": "Folders watched, so a repository added there is noticed.",
+    "mark_repos_safe": (
+        "Whether adding a repository, or a folder of them, lists it in git's "
+        "safe.directory too, so git works in it whichever account owns it."
+    ),
     "mcp_allow_writes": (
         "Whether the command registered with a client offers the write tools. "
         "The flag lives in that command line; this only remembers what the "
@@ -396,6 +400,9 @@ class Settings:
     favorite_repos: list[str] = field(default_factory=list)  # paths, as they were added
     scan_roots: list[str] = field(default_factory=list)  # folders scanned for repos
     watched_roots: list[str] = field(default_factory=list)  # roots auto-watched for new repos
+    #: Whether adding a repository, or a folder of them, adds it to git's
+    #: safe.directory list as well. See git_ops.mark_safe.
+    mark_repos_safe: bool = True
     # Committer identities live in committer_identities.json, not here -- see
     # git_assistant.identities. An older build wrote them into this file; that
     # key is migrated and removed on first run.
@@ -764,6 +771,9 @@ class Settings:
         clean["provider_temperatures"] = _temperatures_from(
             clean.get("provider_temperatures")
         )
+        # Off only when said so: marking is what lets git work in a repository
+        # another account owns, and a stray value should not quietly stop it.
+        clean["mark_repos_safe"] = clean.get("mark_repos_safe", True) is not False
         # Hand-edited, this can hold anything: only paths come back, once each.
         favorites = clean.get("favorite_repos")
         clean["favorite_repos"] = list(

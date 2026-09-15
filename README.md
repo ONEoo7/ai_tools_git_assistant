@@ -135,7 +135,8 @@ More: [providers](docs/providers.md)
 | **Add folder (scan for repos)…** | Every repository under a folder, submodules nested under their parent. |
 | **Auto-watch** | Tick a scanned folder and newly cloned repositories are added on their own. |
 | **Rescan / Remove selected** | Keep the list honest. |
-| **Fix blocked repos…** | Repositories git refuses to read, and why. |
+| **Mark added repositories as safe** | Adding a folder lists it in git's `safe.directory` — one `D:/folder/*` line for everything in it — and adding a repository lists it and its submodules. Git then works in repositories another account owns, such as on a drive two machines share. On by default. |
+| **Mark listed repos as safe…** | The same lines for everything already listed, shown before they are written. |
 | **Editing** | Which of the three settings files to show — not which one applies. |
 | **Create / Save / Reload / Reset / Remove** | Edit the file in place, with the JSON coloured. Saving your changes forks them to your own copy rather than editing a file a team shares. |
 | **Compare & merge…** | Any two settings files side by side, key by key, taking either. |

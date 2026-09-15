@@ -182,6 +182,26 @@ def _temperature_note(settings, provider, model: str) -> str:
     return f"Remembered for {model}."
 
 
+#: How many safe.directory lines a confirmation names before it counts the rest.
+_LINES_SHOWN = 12
+
+
+def _marked_sentence(marked: git_ops.Marked) -> str:
+    """What marking wrote to git's config, as a sentence to follow another one.
+
+    "" when it wrote nothing: a repository git already trusts is not news.
+    """
+    text = ""
+    if marked.added:
+        named = ", ".join(marked.added[:3])
+        if len(marked.added) > 3:
+            named += f" and {len(marked.added) - 3} more"
+        text += f" Marked safe for git: {named}."
+    if marked.problem:
+        text += f" Could not mark it safe for git: {marked.problem}"
+    return text
+
+
 def _free_name(base: str, taken: set) -> str:
     """``base``, or ``base (2)``, or the first number after that nobody has."""
     if base not in taken:
@@ -271,9 +291,8 @@ class SettingsDialog(QDialog):
             )
             # And the remote a push goes to, which is the branch's to track.
             panel.repo_picker.branchesChanged.connect(self.identity_bar.show_remote)
-        self.commit_panel.remotes_page.remotesChanged.connect(
-            self.identity_bar.show_remote
-        )
+        for panel in (self.commit_panel, self.tags_panel):
+            panel.remotes_page.remotesChanged.connect(self.identity_bar.show_remote)
         # The provider is application-wide, so a change on any tab that offers
         # one is named in the bar straight away.
         for panel in (self.commit_panel, self.agents_panel, self.review_panel):
@@ -1435,15 +1454,34 @@ class SettingsDialog(QDialog):
         row.addWidget(self.rescan_btn)
         row.addWidget(remove_btn)
         row.addStretch(1)
-        self.trust_btn = QPushButton("Fix blocked repos...")
-        self.trust_btn.setToolTip(
-            "Run: git config --global --add safe.directory '*'\n"
-            "Clears git 'dubious ownership' errors for repos owned by "
-            "another account."
+        self.mark_listed_btn = QPushButton("Mark listed repos as safe...")
+        self.mark_listed_btn.setToolTip(
+            "List the repositories here in safe.directory, in your global git "
+            "config, where git does not trust them yet: a line for each folder "
+            "they are in, and one for each repository in no folder here. The "
+            "lines are shown before anything is written.\n"
+            "Clears git's 'dubious ownership' errors for repositories another "
+            "account owns, without trusting every repository on the machine."
         )
-        self.trust_btn.clicked.connect(self._on_trust_all)
-        row.addWidget(self.trust_btn)
+        self.mark_listed_btn.clicked.connect(self._on_mark_listed)
+        row.addWidget(self.mark_listed_btn)
         layout.addLayout(row)
+
+        self.mark_safe_check = QCheckBox(
+            "Mark added repositories as safe for git (safe.directory)"
+        )
+        self.mark_safe_check.setToolTip(
+            "Adding a folder adds one line for everything in it to your global "
+            "git config -- safe.directory = D:/folder/* -- and adding a repository "
+            "adds a line for it and each of its submodules.\n"
+            "Git will not work in a repository another account owns until it is "
+            "listed there: one copied from another machine, or on a drive two "
+            "machines share. Listed, it is also spared the look-up of that account "
+            "that makes every git command in it slow."
+        )
+        self.mark_safe_check.setChecked(self.settings.mark_repos_safe)
+        self.mark_safe_check.toggled.connect(self._on_mark_safe_toggled)
+        layout.addWidget(self.mark_safe_check)
 
         self.scan_status = QLabel("")
         self.scan_status.setStyleSheet("color: #8ab;")
@@ -3049,6 +3087,9 @@ class SettingsDialog(QDialog):
         is what that save rebuilds them from -- and selecting the repository,
         which records it as recently used, only records paths settings list.
         """
+        if self.mark_safe_check.isChecked():
+            # Listed already or not: adding it is asking for git to work in it.
+            self._say_marked(git_ops.mark_safe(path, folder=False))
         listed = self._repo_items_by_path().get(self._norm(path))
         if listed is not None:
             return listed.data(0, Qt.ItemDataRole.UserRole).path
@@ -3167,18 +3208,29 @@ class SettingsDialog(QDialog):
         self.scan_status.setText(f"Scanning {folder} ...")
         self.scan_btn.setEnabled(False)
         self.rescan_btn.setEnabled(False)
-        worker = FunctionWorker(
-            lambda f=folder: [
+        mark = self.mark_safe_check.isChecked()
+
+        def scan(f: str = folder) -> tuple[git_ops.Marked, list[tuple[str, bool]]]:
+            # Marked before anything is asked of the repositories in it, so the
+            # ownership check below is answered by the line just written.
+            marked = git_ops.mark_safe(f, folder=True) if mark else git_ops.Marked()
+            found = [
                 (p, git_ops.blocked_by_ownership(p)) for p in git_ops.find_git_repos(f)
             ]
-        )
+            return marked, found
+
+        worker = FunctionWorker(scan)
         worker.finished.connect(self._on_scan_done)
         worker.error.connect(self._on_scan_error)
         self._scan_worker = worker
         self._scan_thread = run_worker(worker)
 
-    def _on_scan_done(self, results: list[tuple[str, bool]]) -> None:
-        """Merge ``(path, blocked)`` for each repository the scan found."""
+    def _on_scan_done(
+        self, outcome: tuple[git_ops.Marked, list[tuple[str, bool]]]
+    ) -> None:
+        """Merge ``(path, blocked)`` for each repository the scan found, and say
+        what was marked safe for it."""
+        marked, results = outcome
         self.scan_btn.setEnabled(True)
         self.rescan_btn.setEnabled(True)
         folder = getattr(self, "_scanning_folder", None)
@@ -3212,19 +3264,73 @@ class SettingsDialog(QDialog):
         self._refresh_counts()
 
         if not results and not pruned:
-            self.scan_status.setText(f"No git repositories found in {folder}.")
+            self.scan_status.setText(
+                f"No git repositories found in {folder}.{_marked_sentence(marked)}"
+            )
             return
         msg = f"Found {len(results)} repo(s) in {folder}; added {added} new"
         if pruned:
             msg += f", removed {pruned} missing"
         if blocked:
             msg += (
-                f". {blocked} blocked by git ownership check - run:  "
-                "git config --global --add safe.directory '*'"
+                f". {blocked} blocked by git ownership check - use Mark listed "
+                "repos as safe..."
             )
         else:
             msg += "."
-        self.scan_status.setText(msg)
+        self.scan_status.setText(msg + _marked_sentence(marked))
+
+    def _on_mark_safe_toggled(self, checked: bool) -> None:
+        self.settings.mark_repos_safe = checked
+        self._schedule_save()
+
+    def _say_marked(self, marked: git_ops.Marked) -> None:
+        """Say what adding a repository wrote to git's config, when it wrote anything."""
+        sentence = _marked_sentence(marked).strip()
+        if sentence:
+            self.scan_status.setText(sentence)
+
+    def _on_mark_listed(self) -> None:
+        """List what this tab lists in safe.directory, where it is not listed yet.
+
+        A line for each folder holding a repository git does not trust yet, which
+        covers every repository in it, and one for each such repository in no
+        folder here -- the lines adding them would have written, for repositories
+        added before that happened. A folder whose repositories git trusts
+        already, each on a line of its own, gets no line to trust the rest of it.
+        """
+        repos, roots, _watched = self._collect_repos_and_roots()
+        git_ops.forget_safe_directories()  # as it is now, not as it was last read
+        untrusted = [entry.path for entry in repos if not git_ops.is_safe_directory(entry.path)]
+        folders = [
+            root for root in roots if any(self._root_for(path, [root]) for path in untrusted)
+        ]
+        alone = [path for path in untrusted if self._root_for(path, folders) is None]
+        lines = git_ops.lines_to_mark(folders=folders, repos=alone)
+        if not lines:
+            self.scan_status.setText("Git already trusts every repository listed here.")
+            return
+        shown = "\n".join(f"    {line}" for line in lines[:_LINES_SHOWN])
+        if len(lines) > _LINES_SHOWN:
+            shown += f"\n    ... and {len(lines) - _LINES_SHOWN} more"
+        answer = QMessageBox.question(
+            self,
+            "Mark listed repositories as safe?",
+            f"Add {len(lines)} line(s) to safe.directory in your global git "
+            f"config?\n\n{shown}\n\n"
+            "Git then works in these repositories whichever account owns them -- "
+            "one copied from another machine, or on a drive two machines share. "
+            "Only mark what you trust: a repository's config and hooks can run "
+            "programs.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        marked = git_ops.add_safe_lines(lines)
+        if marked.problem:
+            QMessageBox.critical(self, "Could not update git config", marked.problem)
+        self._say_marked(marked)
 
     def _on_scan_error(self, message: str) -> None:
         self.scan_btn.setEnabled(True)
@@ -3263,43 +3369,6 @@ class SettingsDialog(QDialog):
             text += f"\nChecked at startup and every {CHECK_MINUTES} minutes."
             self.update_source.setStyleSheet("color: #888;")
         self.update_source.setText(text)
-
-    def _on_trust_all(self) -> None:
-        box = QMessageBox(self)
-        box.setIcon(QMessageBox.Icon.Warning)
-        box.setWindowTitle("Trust all git repositories?")
-        box.setText("Fix repositories blocked by git's ownership check?")
-        box.setInformativeText(
-            "This runs:\n"
-            "    git config --global --add safe.directory '*'\n\n"
-            "It tells Git to trust every repository on this machine, regardless "
-            "of which Windows account owns the folder. This clears the "
-            "'dubious ownership' errors that block repos copied or restored from "
-            "another account.\n\n"
-            "Security note: only do this on a machine you trust. It disables a "
-            "safeguard meant to stop untrusted repositories (e.g. on shared or "
-            "network drives) from running code via their git config or hooks.\n\n"
-            "This changes your global git configuration. Proceed?"
-        )
-        box.setStandardButtons(
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel
-        )
-        box.setDefaultButton(QMessageBox.StandardButton.Cancel)
-        if box.exec() != QMessageBox.StandardButton.Yes:
-            return
-
-        result = git_ops.trust_all_repositories()
-        if result.ok:
-            if result.stdout.strip() == "already trusted":
-                self.scan_status.setText("All repositories are already trusted.")
-            else:
-                self.scan_status.setText("Done. All repositories are now trusted.")
-        else:
-            QMessageBox.critical(
-                self,
-                "Could not update git config",
-                result.stderr.strip() or "git config failed.",
-            )
 
     # ---- connection test / model listing -----------------------------------
     def _on_test_connection(self) -> None:

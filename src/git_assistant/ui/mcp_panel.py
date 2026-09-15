@@ -58,6 +58,9 @@ class McpPanel(QWidget):
         self.settings = settings
         self._thread = None
         self._worker = None
+        #: How many times Claude Code has been asked; an answer to an earlier ask
+        #: than the last is out of date by the time it arrives.
+        self._code_asks = 0
 
         layout = QVBoxLayout(self)
         layout.addWidget(
@@ -243,10 +246,33 @@ class McpPanel(QWidget):
             remove.setEnabled(where.present)
 
     def _refresh_code_status(self) -> None:
+        """Ask Claude Code whether the server is registered, off the UI thread.
+
+        `claude mcp get` starts the claude CLI, which takes seconds, and this is
+        asked every time the tab is shown: the window used to stand still for as
+        long. The answer is shown when it comes -- unless the scope changed or a
+        registration went through meanwhile, and a newer question is out.
+        """
         command = self._command()
-        code = clients.code_status(command)
+        self._code_asks += 1
+        asked = self._code_asks
+        if not self.code_status.text():
+            self.code_status.setText("Asking Claude Code...")
+        worker = FunctionWorker(lambda: (asked, command, clients.code_status(command)))
+        worker.finished.connect(self._on_code_status)
+        worker.error.connect(self._on_code_status_failed)
+        run_worker(worker)
+
+    def _on_code_status(self, outcome) -> None:
+        asked, command, code = outcome
+        if asked != self._code_asks:
+            return
         self.code_status.setText(f"{code.describe(command)}  {code.detail}".strip())
         self.code_remove_btn.setEnabled(code.present)
+
+    def _on_code_status_failed(self, message: str) -> None:
+        self.code_status.setText(f"Could not ask Claude Code: {message}")
+        self.code_remove_btn.setEnabled(False)
 
     def _on_writes_toggled(self, checked: bool) -> None:
         self.settings.mcp_allow_writes = checked

@@ -226,21 +226,6 @@ def test_a_failure_for_any_other_reason_is_not_blocked(tmp_path):
     assert git_ops.blocked_by_ownership(plain) is False
 
 
-def test_trust_all_repositories_isolated(tmp_path, monkeypatch):
-    # Redirect the *global* git config to a temp file so the real one is untouched.
-    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(tmp_path / "gitconfig"))
-    assert git_ops.safe_directory_is_all() is False
-
-    first = git_ops.trust_all_repositories()
-    assert first.ok
-    assert first.stdout.strip() != "already trusted"
-    assert git_ops.safe_directory_is_all() is True
-
-    # Idempotent: a second call detects it and does not add a duplicate.
-    second = git_ops.trust_all_repositories()
-    assert second.ok and second.stdout.strip() == "already trusted"
-
-
 def test_render_template_handles_braces():
     tmpl = "branch={branch}\nstat={diffstat}\ndiff={diff}"
     out = render_template(

@@ -125,12 +125,39 @@ def test_a_checkout_is_shown_without_looking_the_identity_up_again(
     """`show_active_repository` is what runs on every checkout, on any tab."""
     asked = []
     monkeypatch.setattr(git_ops, "get_identity", lambda *a: asked.append(a) or ("", ""))
+    monkeypatch.setattr(
+        git_ops, "read_config", lambda *a: asked.append(a) or git_ops.GitConfig()
+    )
     _git(repos["alpha"], "checkout", "-q", "-b", "fix/typo")
 
     bar.show_active_repository()
 
     assert bar.repo_branch.text() == "fix/typo"
     assert asked == []
+
+
+def test_redrawing_the_bar_is_one_git_command(bar, repos, monkeypatch):
+    """Identity, where it is set, signing, the remote and its credential: one read.
+
+    It is redrawn whenever the window is shown, and each thing it says used to be
+    a git command of its own -- a dozen of them, half a second each in a
+    repository another account owns.
+    """
+    _git(repos["alpha"], "remote", "add", "origin", "https://github.com/ONEoo7/alpha.git")
+    launched = []
+    real = subprocess.run
+
+    def run(argv, *args, **kwargs):
+        if "-C" in argv:  # not the safe.directory list, read once for every repository
+            launched.append(argv[argv.index("-C") + 2 :])
+        return real(argv, *args, **kwargs)
+
+    monkeypatch.setattr(git_ops.subprocess, "run", run)
+
+    bar.refresh()
+
+    assert launched == [["config", "--list", "-z", "--show-scope"]]
+    assert bar.auth_status.text() == "origin (github.com)"
 
 
 def test_a_new_bar_names_the_inference_straight_away(qapp, settings):

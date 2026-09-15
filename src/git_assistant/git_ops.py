@@ -87,24 +87,50 @@ def _cannot_run(exc: OSError) -> GitResult:
 
 
 def _run(repo: str | Path, args: list[str], *, stdin: str | None = None) -> GitResult:
-    try:
-        proc = subprocess.run(
-            ["git", "-C", str(repo), *args],
-            input=stdin,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            creationflags=_NO_WINDOW,
+    def launch(env: dict[str, str] | None) -> GitResult:
+        try:
+            proc = subprocess.run(
+                ["git", "-C", str(repo), *args],
+                input=stdin,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                creationflags=_NO_WINDOW,
+                env=env,
+            )
+        except OSError as exc:
+            return _cannot_run(exc)
+        return GitResult(
+            ok=proc.returncode == 0,
+            stdout=proc.stdout or "",
+            stderr=proc.stderr or "",
+            returncode=proc.returncode,
         )
-    except OSError as exc:
-        return _cannot_run(exc)
-    return GitResult(
-        ok=proc.returncode == 0,
-        stdout=proc.stdout or "",
-        stderr=proc.stderr or "",
-        returncode=proc.returncode,
-    )
+
+    return _trusted_or_ordinary(repo, args, launch)
+
+
+def _trusted_or_ordinary(repo: str | Path, args: list[str], launch):
+    """Run ``launch`` without git's ownership check where safe.directory allows it.
+
+    Before every command git looks up who owns the repository, and for an owner
+    this machine cannot name -- an account on another machine, which is what a
+    drive carried between two of them is full of -- the lookup takes half a
+    second, only for safe.directory to let the command through anyway. For a
+    repository that list already covers, the answer is known before git asks.
+
+    If git refuses all the same -- the list was changed behind this application's
+    back, or git reads an entry differently -- the command is run again the
+    ordinary way, which is the one whose answer counts, and so is every command
+    in that repository after it.
+    """
+    env = _env_for(repo, args)
+    result = launch(env)
+    if env is not None and _is_dubious_ownership(result):
+        _refused(repo)
+        result = launch(None)
+    return result
 
 
 def git_available() -> bool:
@@ -390,21 +416,11 @@ class Remote:
 def list_remotes(repo: str | Path) -> list[Remote]:
     """The repository's remotes, by name, each with its fetch URL.
 
-    One `git remote -v` rather than a `get-url` per remote. Its lines are
-    ``name<TAB>url (fetch)``: a name cannot hold whitespace, and a URL -- a
-    folder on disk, say -- can, so the line is split at the tab and the kind is
-    taken off the end.
+    Read out of the configuration, ``insteadOf`` applied as `git remote -v`
+    applies it -- and with the rest of the configuration, for a caller that
+    wants more than the remotes from the same read. See `GitConfig`.
     """
-    res = _run(repo, ["remote", "-v"])
-    if not res.ok:
-        return []
-    found: dict[str, str] = {}
-    for line in res.stdout.splitlines():
-        name, tab, rest = line.partition("\t")
-        if not tab or not rest.endswith(" (fetch)"):
-            continue
-        found.setdefault(name, rest[: -len(" (fetch)")])
-    return [Remote(name, found[name]) for name in sorted(found, key=str.casefold)]
+    return read_config(repo).remotes()
 
 
 def valid_remote_name(repo: str | Path, name: str) -> bool:
@@ -435,6 +451,20 @@ def tracking_remote(repo: str | Path, branch: str) -> str:
     return res.stdout.strip() if res.ok else ""
 
 
+def tracked_branch(repo: str | Path, branch: str) -> tuple[str, str]:
+    """``(remote, its branch there)`` that ``branch`` tracks, or ``("", "")``.
+
+    The branch there is usually the same name, and not always: a local branch can
+    track another one of any name, and it is that one a remote delete is about.
+    """
+    remote = tracking_remote(repo, branch)
+    if not remote:
+        return "", ""
+    merge = _run(repo, ["config", "--get", f"branch.{branch}.merge"])
+    ref = merge.stdout.strip() if merge.ok else ""
+    return remote, ref.removeprefix("refs/heads/") or branch
+
+
 def set_tracking_remote(repo: str | Path, branch: str, remote: str) -> GitResult:
     """Make ``branch`` track ``remote``: where it is pulled from and pushed to.
 
@@ -457,9 +487,12 @@ def push_remote(repo: str | Path) -> str:
 
     The one it tracks if it tracks one, then ``origin``, then the first there is.
     """
-    names = [remote.name for remote in list_remotes(repo)]
-    tracked = tracking_remote(repo, head_branch(repo))
-    for name in (tracked, "origin"):
+    return _push_remote(read_config(repo), head_branch(repo))
+
+
+def _push_remote(config: GitConfig, branch: str) -> str:
+    names = [remote.name for remote in config.remotes()]
+    for name in (config.tracking_remote(branch), "origin"):
         if name and name in names:
             return name
     return names[0] if names else ""
@@ -487,6 +520,11 @@ def _run_global(args: list[str]) -> GitResult:
     Guarded like `_run`, and for the same reason: this is the one that actually
     fired on a clean machine, from the identity bootstrap the settings window
     runs before it draws anything.
+
+    Run from outside any repository. Git looks for one wherever it is started,
+    even for ``--global``, and one found there costs the ownership check of a
+    repository nothing here asked about -- half a second, when it belongs to an
+    account from another machine.
     """
     try:
         proc = subprocess.run(
@@ -496,6 +534,7 @@ def _run_global(args: list[str]) -> GitResult:
             encoding="utf-8",
             errors="replace",
             creationflags=_NO_WINDOW,
+            cwd=tempfile.gettempdir(),
         )
     except OSError as exc:
         return _cannot_run(exc)
@@ -505,6 +544,115 @@ def _run_global(args: list[str]) -> GitResult:
         stderr=proc.stderr or "",
         returncode=proc.returncode,
     )
+
+
+# ---- a repository's configuration, read once ---------------------------------------
+def _config_key(key: str) -> str:
+    """``key`` as git prints it: section and name in lower case, a subsection as is."""
+    section, dot, rest = key.partition(".")
+    if not dot:
+        return key.lower()
+    middle, dot, name = rest.rpartition(".")
+    if not dot:
+        return f"{section.lower()}.{rest.lower()}"
+    return f"{section.lower()}.{middle}.{name.lower()}"
+
+
+@dataclass
+class GitConfig:
+    """Everything git's configuration says in one repository, from one git command.
+
+    The questions this answers -- who commits, is signing on, which remotes, which
+    one a branch tracks, which credential a host uses -- were one git process each,
+    a dozen of them to draw the bar above the tabs. They are all answers to one
+    question git can answer at once, includes and conditional includes followed.
+
+    A key set more than once answers with its last value, as ``git config --get``.
+    """
+
+    #: ``(scope, key, value)`` in the order git reads them; None for a key with no
+    #: value at all, which git reads as true.
+    entries: list[tuple[str, str, str | None]] = field(default_factory=list)
+
+    def _values(self, key: str, scope: str | None = None) -> list[str | None]:
+        wanted = _config_key(key)
+        return [
+            value
+            for where, name, value in self.entries
+            if name == wanted and (scope is None or where == scope)
+        ]
+
+    def get(self, key: str, *, scope: str | None = None) -> str:
+        values = self._values(key, scope)
+        return (values[-1] or "").strip() if values else ""
+
+    def get_bool(self, key: str) -> bool:
+        """As ``--type=bool``: true, yes, on, a number other than 0, or no value."""
+        values = self._values(key)
+        if not values:
+            return False
+        value = values[-1]
+        if value is None:
+            return True
+        word = value.strip().lower()
+        if word in ("true", "yes", "on"):
+            return True
+        try:
+            return int(word) != 0
+        except ValueError:
+            return False
+
+    def first(self, keys: list[str]) -> str:
+        """The first of ``keys`` that is set to something."""
+        return next((value for key in keys if (value := self.get(key))), "")
+
+    def identity(self) -> tuple[str, str]:
+        return self.get("user.name"), self.get("user.email")
+
+    def local_identity(self) -> tuple[str, str]:
+        return self.get("user.name", scope="local"), self.get("user.email", scope="local")
+
+    def remotes(self) -> list[Remote]:
+        """Each remote by name, with the URL it fetches from as git would use it."""
+        urls: dict[str, str] = {}
+        for _where, name, value in self.entries:
+            if name.startswith("remote.") and name.endswith(".url"):
+                remote = name[len("remote.") : -len(".url")]
+                if remote:
+                    urls.setdefault(remote, self._rewritten(value or ""))
+        return [Remote(name, urls[name]) for name in sorted(urls, key=str.casefold)]
+
+    def _rewritten(self, url: str) -> str:
+        """``url`` after ``url.<base>.insteadOf``: the longest match wins, as in git."""
+        best, base = "", None
+        for _where, name, value in self.entries:
+            if (
+                name.startswith("url.")
+                and name.endswith(".insteadof")
+                and value
+                and url.startswith(value)
+                and len(value) > len(best)
+            ):
+                best, base = value, name[len("url.") : -len(".insteadof")]
+        return base + url[len(best) :] if base is not None else url
+
+    def tracking_remote(self, branch: str) -> str:
+        return self.get(f"branch.{branch}.remote") if branch else ""
+
+
+def read_config(repo: str | Path) -> GitConfig:
+    """Every configuration value that applies in ``repo``, with where it came from."""
+    res = _run_bytes(repo, ["config", "--list", "-z", "--show-scope"])
+    if not res.ok:
+        return GitConfig()
+    tokens = res.stdout.split(b"\0")
+    entries: list[tuple[str, str, str | None]] = []
+    for where, item in zip(tokens[0::2], tokens[1::2]):
+        text = item.decode("utf-8", errors="replace")
+        key, newline, value = text.partition("\n")
+        if key:
+            entries.append((where.decode("utf-8", errors="replace"), key, value if newline else None))
+    return GitConfig(entries)
 
 
 # ---- committer identity ----------------------------------------------------
@@ -517,12 +665,7 @@ def get_identity(repo: str | Path) -> tuple[str, str]:
     rather than only the repo-local one matters: a repo with no local identity
     still commits as somebody, and showing nothing there would be a lie.
     """
-    name = _run(repo, ["config", "--get", "user.name"])
-    email = _run(repo, ["config", "--get", "user.email"])
-    return (
-        name.stdout.strip() if name.ok else "",
-        email.stdout.strip() if email.ok else "",
-    )
+    return read_config(repo).identity()
 
 
 def get_local_identity(repo: str | Path) -> tuple[str, str]:
@@ -531,24 +674,17 @@ def get_local_identity(repo: str | Path) -> tuple[str, str]:
     Distinguishes "this repository pins an identity" from "it inherits one",
     which is what tells the user whether a previous selection is still in force.
     """
-    name = _run(repo, ["config", "--local", "--get", "user.name"])
-    email = _run(repo, ["config", "--local", "--get", "user.email"])
-    return (
-        name.stdout.strip() if name.ok else "",
-        email.stdout.strip() if email.ok else "",
-    )
+    return read_config(repo).local_identity()
 
 
 def get_signingkey(repo: str | Path) -> str:
     """The key git would sign a commit in ``repo`` with ("" if none)."""
-    res = _run(repo, ["config", "--get", "user.signingkey"])
-    return res.stdout.strip() if res.ok else ""
+    return read_config(repo).get("user.signingkey")
 
 
 def signing_enabled(repo: str | Path) -> bool:
     """True when ``commit.gpgsign`` asks for every commit here to be signed."""
-    res = _run(repo, ["config", "--get", "--type=bool", "commit.gpgsign"])
-    return res.ok and res.stdout.strip() == "true"
+    return read_config(repo).get_bool("commit.gpgsign")
 
 
 _OK = GitResult(ok=True, stdout="", stderr="", returncode=0)
@@ -718,24 +854,19 @@ def _split_remote(url: str) -> tuple[str, str, str]:
     return kind, netloc, user
 
 
-def _config_first(repo: str | Path, keys: list[str]) -> str:
-    """First of ``keys`` that is set, as git resolves it (repo, then global)."""
-    for key in keys:
-        res = _run(repo, ["config", "--get", key])
-        if res.ok and res.stdout.strip():
-            return res.stdout.strip()
-    return ""
-
-
 def describe_push_auth(repo: str | Path) -> PushAuth:
     """Work out what will authenticate a push from ``repo``.
 
     Of the remote a push of the checked-out branch goes to -- see `push_remote`
     -- so choosing another remote for the branch to track changes the answer.
     """
-    remote = push_remote(repo)
-    url = _run(repo, ["remote", "get-url", "--", remote]) if remote else None
-    address = url.stdout.strip() if url and url.ok else ""
+    return push_auth_from(read_config(repo), head_branch(repo))
+
+
+def push_auth_from(config: GitConfig, branch: str) -> PushAuth:
+    """`describe_push_auth`, from a configuration already read for ``branch``."""
+    remote = _push_remote(config, branch)
+    address = next((r.url for r in config.remotes() if r.name == remote), "")
     kind, host, user = _split_remote(address)
     if not kind or not host:
         # A path, or a file:// URL: a remote all the same, and one that needs
@@ -753,15 +884,13 @@ def describe_push_auth(repo: str | Path) -> PushAuth:
     if kind != "https":
         return PushAuth(kind=kind, host=host, remote=remote)
 
-    account = user or _config_first(
-        repo,
-        [f"credential.https://{host}.username", "credential.username"],
+    account = user or config.first(
+        [f"credential.https://{host}.username", "credential.username"]
     )
     # Path-scoped credentials give each org its own entry, so one host can
     # serve several accounts without them colliding.
-    per_path = _config_first(
-        repo,
-        [f"credential.https://{host}.useHttpPath", "credential.useHttpPath"],
+    per_path = config.first(
+        [f"credential.https://{host}.useHttpPath", "credential.useHttpPath"]
     )
     scoped = per_path.strip().lower() in ("true", "yes", "on", "1")
     return PushAuth(
@@ -773,20 +902,273 @@ def describe_push_auth(repo: str | Path) -> PushAuth:
     )
 
 
-def safe_directory_is_all() -> bool:
-    """True if the global config already trusts all repos (safe.directory = *)."""
-    res = _run_global(["config", "--global", "--get-all", "safe.directory"])
-    return res.ok and any(line.strip() == "*" for line in res.stdout.splitlines())
+# ---- which repositories git trusts ------------------------------------------------------
+#: Set on a git process, git skips its check of who owns the repository and goes
+#: straight to the safe.directory list. A switch from git's own test suite rather
+#: than a setting, which is why it is only ever set for a repository that list
+#: already covers -- where the check could not change the answer.
+SKIP_OWNER_CHECK = "GIT_TEST_ASSUME_DIFFERENT_OWNER"
+
+#: The commands the check is skipped for: the ones a tab asks every time it is
+#: shown, none of which commits, checks out, merges, pushes or fetches. Whatever
+#: git starts inherits the skip, and a commit hook or a fetch from a folder going
+#: on to work in a repository the list does not cover would be refused there -- as
+#: a failure a hook may well not explain. Those commands keep the check.
+_HOOKLESS = frozenset(
+    {
+        "add", "apply", "branch", "cat-file", "check-attr", "check-ref-format",
+        "config", "diff", "for-each-ref", "hash-object", "log", "ls-files",
+        "remote", "restore", "rev-list", "rev-parse", "rm", "show", "status", "tag",
+    }
+)
+
+#: Where git reads safe.directory from. Nowhere a repository could write it for
+#: itself: a repository vouching for its own safety would be no check at all.
+_PROTECTED_SCOPES = ("system", "global", "command")
 
 
-def trust_all_repositories() -> GitResult:
-    """Add ``safe.directory = *`` to the global git config (idempotent).
+@dataclass
+class _Trust:
+    """The safe.directory list as last read, and what came of it since."""
 
-    Clears 'dubious ownership' errors for repos owned by another account.
+    #: What it was read under: another global config file is another list.
+    environment: tuple
+    entries: list[str]
+    rules: list[tuple[str, str]]
+    #: Repositories git refused all the same. Asked the ordinary way from then on,
+    #: so a list this reading disagrees with costs one process, not one a command.
+    refused: set[str] = field(default_factory=set)
+
+
+_trust: _Trust | None = None
+
+
+def _config_environment() -> tuple:
+    return tuple(
+        sorted(
+            (key, value)
+            for key, value in os.environ.items()
+            if key.startswith("GIT_CONFIG") or key in ("HOME", "USERPROFILE", "XDG_CONFIG_HOME")
+        )
+    )
+
+
+def _trust_now() -> _Trust | None:
+    """The list, read once and kept: every git command this application runs asks.
+
+    None when git could not be asked, which is asked again next time.
     """
-    if safe_directory_is_all():
-        return GitResult(ok=True, stdout="already trusted", stderr="", returncode=0)
-    return _run_global(["config", "--global", "--add", "safe.directory", "*"])
+    global _trust
+    environment = _config_environment()
+    if _trust is not None and _trust.environment == environment:
+        return _trust
+    res = _run_global(["config", "--show-scope", "--get-all", "safe.directory"])
+    if not res.ok and (res.returncode != 1 or res.stderr.strip()):
+        return None
+    entries: list[str] = []
+    for line in res.stdout.splitlines():
+        scope, _tab, value = line.partition("\t")
+        if scope not in _PROTECTED_SCOPES:
+            continue
+        if value:
+            entries.append(value)
+        else:
+            entries.clear()  # an empty value takes back every one before it
+    rules = [rule for rule in map(_rule, entries) if rule is not None]
+    _trust = _Trust(environment, entries, rules)
+    return _trust
+
+
+def safe_directories() -> list[str]:
+    """The safe.directory values git decides by, in the order it reads them."""
+    trust = _trust_now()
+    return list(trust.entries) if trust else []
+
+
+def forget_safe_directories() -> None:
+    """Read the list again next time it is wanted."""
+    global _trust
+    _trust = None
+
+
+def _git_path(path: str | Path) -> str:
+    """``path`` as git names a repository when it checks safe.directory.
+
+    Every link followed and every folder spelt as it is on disk -- the case it
+    has there, and its long name rather than a short one like ``STEFAN~1`` --
+    with forward slashes.
+    """
+    return Path(os.path.realpath(str(path))).as_posix()
+
+
+def _fold(text: str) -> str:
+    return text.casefold() if sys.platform == "win32" else text
+
+
+def _rule(value: str) -> tuple[str, str] | None:
+    """One safe.directory value, as git 2.55 matches it.
+
+    ``*`` is every repository. A path is that repository, spelt any way that
+    reaches it: git resolves the value as it resolves the repository. A path
+    ending in ``/*`` is everything beneath it, compared as written -- case and
+    all, with only ``~`` and Windows' backslashes made good -- which is why
+    `folder_entry` writes the folder as git will spell the repositories in it.
+    """
+    if value == "*":
+        return "all", ""
+    if value.startswith("~"):
+        home = os.environ.get("HOME") or os.path.expanduser("~")
+        value = home + value[1:]
+    if sys.platform == "win32":
+        value = value.replace("\\", "/")
+    if value.endswith("/*"):
+        return "under", value[:-1]
+    if not os.path.isabs(value):
+        return None  # git ignores it, with a warning
+    return "exactly", _fold(_git_path(value))
+
+
+def _covers(rules: list[tuple[str, str]], path: str | Path) -> bool:
+    target = _git_path(path)
+    for kind, text in rules:
+        if kind == "all":
+            return True
+        if kind == "under" and target.startswith(text):
+            return True
+        if kind == "exactly" and _fold(target) == text:
+            return True
+    return False
+
+
+def _rules_of(entries: list[str]) -> list[tuple[str, str]]:
+    return [rule for rule in map(_rule, entries) if rule is not None]
+
+
+def _current_rules() -> list[tuple[str, str]]:
+    trust = _trust_now()
+    return list(trust.rules) if trust else []
+
+
+def _covers_everything_under(rules: list[tuple[str, str]], folder: str | Path) -> bool:
+    beneath = _git_path(folder).rstrip("/") + "/"
+    return any(
+        kind == "all" or (kind == "under" and beneath.startswith(text))
+        for kind, text in rules
+    )
+
+
+def is_safe_directory(path: str | Path, entries: list[str] | None = None) -> bool:
+    """Whether safe.directory lets git work in the repository at ``path``, whoever
+    owns it. Against ``entries`` when given, the global list otherwise."""
+    rules = _current_rules() if entries is None else _rules_of(entries)
+    return _covers(rules, path)
+
+
+def trusts_everything_under(folder: str | Path, entries: list[str] | None = None) -> bool:
+    """Whether safe.directory already covers every repository beneath ``folder``."""
+    rules = _current_rules() if entries is None else _rules_of(entries)
+    return _covers_everything_under(rules, folder)
+
+
+def folder_entry(folder: str | Path) -> str:
+    """The one safe.directory line that covers every repository beneath ``folder``."""
+    return _git_path(folder).rstrip("/") + "/*"
+
+
+def lines_to_mark(
+    *, folders: list[str | Path] = (), repos: list[str | Path] = ()
+) -> list[str]:
+    """The safe.directory lines that would cover ``folders`` and ``repos``, less the
+    ones the global list has already.
+
+    A folder is one line, ``D:/folder/*``, for every repository beneath it now and
+    later -- and a line of its own if the folder is a repository too, which ``/*``
+    does not cover. A repository is a line for itself. Folders come first, so a
+    repository in one of them needs nothing more.
+
+    Decided on the list as it is now rather than as it was last read: it may have
+    been changed by hand since, and a line taken out there is a line to put back.
+    """
+    forget_safe_directories()
+    rules = _current_rules()
+    wanted: list[str] = []
+
+    def want(line: str) -> None:
+        wanted.append(line)
+        rules.extend(_rules_of([line]))
+
+    for folder in folders:
+        if has_git_dir(folder) and not _covers(rules, folder):
+            want(_git_path(folder))
+        if not _covers_everything_under(rules, folder):
+            want(folder_entry(folder))
+    for repo in repos:
+        if not _covers(rules, repo):
+            want(_git_path(repo))
+    return wanted
+
+
+@dataclass
+class Marked:
+    """What marking something safe wrote to the global git config."""
+
+    added: list[str] = field(default_factory=list)
+    problem: str = ""  # why a line could not be written, when one could not
+
+
+def add_safe_lines(lines: list[str]) -> Marked:
+    """Add each of ``lines`` to safe.directory in the global git config, in order,
+    stopping at the first one git will not write."""
+    marked = Marked()
+    for line in lines:
+        res = _run_global(["config", "--global", "--add", "safe.directory", line])
+        if not res.ok:
+            marked.problem = res.stderr.strip() or f"git config refused {line}"
+            break
+        marked.added.append(line)
+    forget_safe_directories()
+    return marked
+
+
+def mark_safe(path: str | Path, *, folder: bool) -> Marked:
+    """Make git trust ``path`` whoever owns it, unless it trusts it already.
+
+    A folder, for every repository beneath it. A repository, with each of its
+    submodules -- which git checks as repositories of their own. See
+    `lines_to_mark` for the lines that takes.
+    """
+    if folder:
+        lines = lines_to_mark(folders=[path])
+    else:
+        lines = lines_to_mark(repos=[path, *find_submodules(path)])
+    return add_safe_lines(lines)
+
+
+def _verb(args: list[str]) -> str:
+    """The git command ``args`` runs: the first word that is not an option to git."""
+    words = iter(args)
+    for word in words:
+        if word in ("-c", "-C"):
+            next(words, None)
+        elif not word.startswith("-"):
+            return word
+    return ""
+
+
+def _env_for(repo: str | Path, args: list[str]) -> dict[str, str] | None:
+    """The environment to run ``args`` in ``repo`` with: None for this process's own,
+    and without the ownership check where safe.directory already covers ``repo``."""
+    if _verb(args) not in _HOOKLESS:
+        return None
+    trust = _trust_now()
+    if trust is None or str(repo) in trust.refused or not _covers(trust.rules, repo):
+        return None
+    return {**os.environ, SKIP_OWNER_CHECK: "1"}
+
+
+def _refused(repo: str | Path) -> None:
+    if _trust is not None:
+        _trust.refused.add(str(repo))
 
 
 def get_diff(repo: str | Path, mode: str) -> str:
@@ -871,22 +1253,26 @@ def _run_bytes(
     longer matches the file it came from, so git refuses to apply it. Anything
     that shows or reproduces file content comes through here instead.
     """
-    try:
-        proc = subprocess.run(
-            ["git", "-C", str(repo), *args],
-            input=stdin,
-            capture_output=True,
-            creationflags=_NO_WINDOW,
+    def launch(env: dict[str, str] | None) -> GitBytes:
+        try:
+            proc = subprocess.run(
+                ["git", "-C", str(repo), *args],
+                input=stdin,
+                capture_output=True,
+                creationflags=_NO_WINDOW,
+                env=env,
+            )
+        except OSError as exc:
+            failed = _cannot_run(exc)
+            return GitBytes(False, b"", failed.stderr, failed.returncode)
+        return GitBytes(
+            ok=proc.returncode == 0,
+            stdout=proc.stdout or b"",
+            stderr=(proc.stderr or b"").decode("utf-8", errors="replace"),
+            returncode=proc.returncode,
         )
-    except OSError as exc:
-        failed = _cannot_run(exc)
-        return GitBytes(False, b"", failed.stderr, failed.returncode)
-    return GitBytes(
-        ok=proc.returncode == 0,
-        stdout=proc.stdout or b"",
-        stderr=(proc.stderr or b"").decode("utf-8", errors="replace"),
-        returncode=proc.returncode,
-    )
+
+    return _trusted_or_ordinary(repo, args, launch)
 
 
 def _nul_joined(paths: list[str]) -> bytes:
@@ -1519,11 +1905,18 @@ class BranchInfo:
     ahead: int = 0  # commits it has that its upstream has not
     behind: int = 0
     subject: str = ""  # the tip commit's summary line
+    #: It tracks a branch this repository has no copy of: never pushed there, or
+    #: deleted there since. git's "[gone]", which has no numbers to compare.
+    gone: bool = False
 
     def tracking_label(self) -> str:
         """What a list shows beside the name. Empty when there is nothing to say."""
         if not self.upstream:
             return "no upstream"
+        if self.gone:
+            # Not "up to date", which is what no numbers used to read as -- and
+            # which a branch that has never been pushed is the opposite of.
+            return "not on the remote"
         parts = []
         if self.ahead:
             parts.append(f"{self.ahead} ahead")
@@ -1617,6 +2010,7 @@ def list_branch_info(repo: str | Path) -> list[BranchInfo]:
                 ahead=int(ahead.group(1)) if ahead else 0,
                 behind=int(behind.group(1)) if behind else 0,
                 subject=subject.strip(),
+                gone=track.strip() == "[gone]",
             )
         )
     return branches
@@ -1676,10 +2070,14 @@ def push_branch(
     repo: str | Path,
     name: str,
     *,
-    remote: str = "origin",
+    remote: str = "",
     set_upstream: bool = True,
 ) -> GitResult:
     """Publish one branch. Never force-pushes.
+
+    To ``remote`` if one is named, and otherwise to the remote the branch was set
+    to track -- as `push` does for the checked-out one -- and origin when it
+    tracks none.
 
     ``set_upstream`` is asked of the configuration rather than assumed, but a
     branch that already tracks something is left tracking it: re-pointing an
@@ -1688,7 +2086,7 @@ def push_branch(
     args = ["push"]
     if set_upstream and not branch_upstream(repo, name):
         args.append("--set-upstream")
-    args += [remote, name]
+    args += [remote or tracking_remote(repo, name) or "origin", name]
     return _run(repo, args)
 
 
@@ -2069,7 +2467,9 @@ def init(path: str | Path, *, initial_branch: str = "") -> GitResult:
     args = ["init"]
     if initial_branch:
         args.append(f"--initial-branch={initial_branch}")
-    return _run_global([*args, "--", str(target)])
+    # Absolute: git starts outside any repository, so a relative path would be
+    # made there rather than where it was meant.
+    return _run_global([*args, "--", os.path.abspath(target)])
 
 
 def default_branch_name() -> str:

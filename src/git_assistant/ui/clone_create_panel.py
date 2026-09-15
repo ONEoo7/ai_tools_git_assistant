@@ -134,6 +134,8 @@ class CloneCreatePanel(QWidget):
         #: Git is asked for defaults (branch, name) when the tab is first shown,
         #: not when the window is built: that costs processes nobody may use.
         self._git_asked = False
+        #: The repository the holder was last filled from: None before it was.
+        self._holder_repo: str | None = None
         self._built = False
 
         self.repo_picker = RepoPicker(settings)
@@ -596,12 +598,21 @@ class CloneCreatePanel(QWidget):
             self._fill_holder()
 
     def _fill_holder(self) -> None:
-        """Whoever git commits as in the selected repository, until one is typed."""
+        """Whoever git commits as in the selected repository, until one is typed.
+
+        Asked again only for another repository: this runs every time the tab is
+        shown, and the answer is a git command.
+        """
         if self._holder_typed or not self._git_asked:
             return
         repo = self.repo_picker.current_path()
-        name = git_ops.get_identity(repo)[0] if repo else ""
-        self.holder.setText(name or git_ops.get_global_identity()[0])
+        if repo == self._holder_repo:
+            return
+        self._holder_repo = repo
+        # A repository's identity falls back to the global one already, so the
+        # global one is only asked for when there is no repository to ask.
+        name = git_ops.get_identity(repo)[0] if repo else git_ops.get_global_identity()[0]
+        self.holder.setText(name)
 
     def _register(self, path: str) -> str:
         """List ``path`` as a repository and select it; the path as it is stored."""
@@ -773,8 +784,8 @@ class CloneCreatePanel(QWidget):
         text = f"Cloned into {stored}."
         if git_ops.blocked_by_ownership(stored):
             text += (
-                " Git will not work in it until it is trusted: use Fix blocked "
-                "repos... on the Repositories & Settings tab."
+                " Git will not work in it until it is trusted: use Mark listed "
+                "repos as safe... on the Repositories & Settings tab."
             )
         self._say(self.clone_status, text)
 

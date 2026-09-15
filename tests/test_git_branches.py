@@ -142,6 +142,16 @@ def test_a_branch_level_with_its_upstream_says_that_rather_than_nothing(remote):
     assert current.tracking_label() == "up to date"
 
 
+def test_a_branch_tracking_a_remote_it_is_not_on_says_so_rather_than_up_to_date(remote):
+    """Set to track a remote before its first push -- which the Remotes section allows."""
+    git_ops.set_tracking_remote(remote, git_ops.current_branch(remote), "origin")
+
+    current = next(b for b in git_ops.list_branch_info(remote) if b.current)
+
+    assert current.gone
+    assert current.tracking_label() == "not on the remote"
+
+
 def test_a_commit_subject_cannot_forge_a_column(repo):
     """The fields are split on a unit separator, so a subject holding one..."""
     _commit(repo, "two\n", "feat: a | b \x1f c")

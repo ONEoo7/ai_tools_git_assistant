@@ -147,6 +147,68 @@ def test_building_the_tab_asks_claude_code_nothing(qapp, settings, monkeypatch):
     assert called == []
 
 
+def _until(qapp, done, timeout=10.0):
+    import time
+
+    deadline = time.monotonic() + timeout
+    while not done():
+        assert time.monotonic() < deadline, "never happened"
+        qapp.processEvents()
+        time.sleep(0.01)
+
+
+def test_showing_the_tab_does_not_wait_for_claude_code(qapp, settings, monkeypatch):
+    """`claude mcp get` takes seconds, and the tab is shown far more often than that."""
+    import threading
+
+    answer = threading.Event()
+
+    def slow(command):
+        assert answer.wait(10)
+        return clients.Registration(present=True, detail="found it")
+
+    monkeypatch.setattr(clients, "code_status", slow)
+    panel = McpPanel(settings)
+
+    panel.show()  # returns while Claude Code is still being asked
+
+    assert panel.code_status.text() == "Asking Claude Code..."
+    answer.set()
+    _until(qapp, lambda: "found it" in panel.code_status.text())
+    assert panel.code_remove_btn.isEnabled()
+    panel.close()
+
+
+def test_an_answer_overtaken_by_a_newer_question_is_dropped(qapp, settings, monkeypatch):
+    import threading
+
+    first_asked, release_first = threading.Event(), threading.Event()
+    answers = iter(["first", "second"])
+
+    def status(command):
+        detail = next(answers)
+        if detail == "first":
+            first_asked.set()
+            assert release_first.wait(10)
+        return clients.Registration(present=detail == "second", detail=detail)
+
+    monkeypatch.setattr(clients, "code_status", status)
+    panel = McpPanel(settings)
+    panel._refresh_code_status()
+    assert first_asked.wait(10)
+
+    panel._refresh_code_status()
+    _until(qapp, lambda: "second" in panel.code_status.text())
+    release_first.set()
+    for _ in range(50):
+        qapp.processEvents()
+        import time
+
+        time.sleep(0.01)
+
+    assert "second" in panel.code_status.text()
+
+
 def test_declining_the_confirmation_registers_nothing(qapp, settings, monkeypatch):
     from PyQt6.QtWidgets import QMessageBox
 

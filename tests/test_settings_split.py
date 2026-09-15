@@ -57,6 +57,8 @@ CLASSIFIED = {
     "favorite_repos": "workspace",
     "scan_roots": "workspace",
     "watched_roots": "workspace",
+    # How repositories are added on this machine, not what a run does with one.
+    "mark_repos_safe": "workspace",
     "theme": "selection",
     "settings_tiers": "selection",
     "audit_selected": "selection",
