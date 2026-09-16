@@ -650,7 +650,72 @@ def test_the_template_is_chosen_right_of_the_commit_message_heading(
     panes = [splitter.widget(i) for i in range(splitter.count())]
     holder = next(pane for pane in panes if pane.isAncestorOf(panel.template_combo))
     assert holder.isAncestorOf(panel.editor)
-    assert panes == [panel.repo_pane, holder, panes[2], panel.side_panel]
+    assert panes == [panel.repo_pane, panes[1], holder, panel.side_panel]
+    panel.close()
+
+
+def test_the_message_is_under_the_diff_it_is_written_from_and_the_history_where_it_was(
+    qapp, settings, tmp_path
+):
+    from PyQt6.QtCore import QPoint, Qt
+    from PyQt6.QtWidgets import QSplitter
+
+    panel = _panel_for(settings, _repo_with_branches(tmp_path))
+    panel.resize(1400, 800)
+    panel.show()
+    qapp.processEvents()
+
+    def box(widget):
+        return widget.geometry().translated(widget.parentWidget().mapTo(panel, QPoint()))
+
+    splitter = next(
+        s
+        for s in panel.findChildren(QSplitter)
+        if s.orientation() == Qt.Orientation.Horizontal
+    )
+    history, sent_and_message = splitter.widget(1), splitter.widget(2)
+    assert history.isAncestorOf(panel.history)
+    assert not history.isAncestorOf(panel.editor)
+    for widget in (panel.file_list, panel.diff_view, panel.template_combo, panel.editor):
+        assert sent_and_message.isAncestorOf(widget)
+    assert box(panel.template_combo).top() > box(panel.diff_view).bottom()
+    assert box(panel.editor).top() > box(panel.diff_view).bottom()
+    # Apart by a handle, so either can be given the room.
+    assert panel.message_splitter.orientation() == Qt.Orientation.Vertical
+    assert panel.message_splitter.indexOf(panel.editor.parentWidget()) == 1
+    panel.close()
+
+
+def test_a_commit_made_here_is_on_the_history_at_once(qapp, settings, tmp_path, monkeypatch):
+    from PyQt6.QtWidgets import QMessageBox
+
+    from git_assistant.ui import history_pane
+
+    monkeypatch.setattr(history_pane, "run_worker", lambda worker: worker.run())
+    repo = _repo_with_branches(tmp_path)
+    (repo / "b.txt").write_text("b\n", encoding="utf-8")
+    _run_git(repo, "add", "b.txt")
+    panel = _panel_for(settings, repo)
+    panel.show()
+    for _ in range(3):
+        qapp.processEvents()
+    tree = panel.history.tree
+    assert tree.topLevelItem(1).text(history_pane.MESSAGE) == "1 file(s) staged"
+    assert tree.topLevelItemCount() == 3  # what is not committed yet, and "first"
+
+    monkeypatch.setattr(
+        QMessageBox, "question", staticmethod(lambda *a, **k: QMessageBox.StandardButton.Yes)
+    )
+    monkeypatch.setattr(QMessageBox, "information", staticmethod(lambda *a, **k: None))
+    panel.editor.setPlainText("add b")
+    panel._on_commit()
+
+    assert tree.topLevelItemCount() == 4
+    assert tree.topLevelItem(2).text(history_pane.MESSAGE) == "add b"
+    assert tree.topLevelItem(1).text(history_pane.MESSAGE) == "nothing staged"
+    assert panel.history.current_hash() == tree.topLevelItem(2).data(
+        history_pane.MESSAGE, history_pane.COMMIT_ROLE
+    ).hash
     panel.close()
 
 

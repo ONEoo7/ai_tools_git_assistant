@@ -1082,8 +1082,8 @@ SKIP_OWNER_CHECK = "GIT_TEST_ASSUME_DIFFERENT_OWNER"
 #: a failure a hook may well not explain. Those commands keep the check.
 _HOOKLESS = frozenset(
     {
-        "add", "apply", "branch", "cat-file", "check-attr", "check-ref-format",
-        "config", "diff", "for-each-ref", "hash-object", "log", "ls-files", "ls-tree",
+        "add", "apply", "branch", "cat-file", "check-attr", "check-ref-format", "config",
+        "describe", "diff", "for-each-ref", "hash-object", "log", "ls-files", "ls-tree",
         "remote", "restore", "rev-list", "rev-parse", "rm", "show", "status", "tag",
     }
 )
@@ -1950,6 +1950,145 @@ def _replace_bytes(target: Path, data: bytes) -> None:
         with contextlib.suppress(OSError):
             os.unlink(temporary)
         raise
+
+
+# ---- history, for a graph of it ----------------------------------------------------
+#: How many commits a history is read to. Git orders every one of them before it
+#: prints the first, and a graph a thousand commits long is one nobody scrolls to
+#: the end of.
+HISTORY_LIMIT = 1000
+
+#: `git log --format` for a `LoggedCommit`: unit separators between fields, with the
+#: message second to last and the names pointing at the commit last.
+_LOG_FORMAT = "%H%x1f%P%x1f%an%x1f%ae%x1f%at%x1f%s%x1f%B%x1f%D"
+
+REF_BRANCH = "branch"
+REF_REMOTE = "remote"
+REF_TAG = "tag"
+#: HEAD itself, which names a commit on its own only when no branch is checked out.
+REF_HEAD = "head"
+
+
+@dataclass(frozen=True)
+class RefLabel:
+    """A name pointing at a commit, as a history labels the commit with it."""
+
+    name: str  # "master", "origin/master", "v1.0" -- or "HEAD", detached
+    kind: str  # REF_BRANCH, REF_REMOTE, REF_TAG or REF_HEAD
+    #: The branch that is checked out.
+    current: bool = False
+
+
+@dataclass(frozen=True)
+class LoggedCommit:
+    """One commit of a history: who, when, what it says, where it came from."""
+
+    hash: str
+    parents: tuple[str, ...]
+    author: str
+    email: str
+    authored: int  # seconds since the epoch
+    subject: str
+    message: str  # the whole of it, subject and body
+    refs: tuple[RefLabel, ...] = ()
+
+    def is_head(self) -> bool:
+        """Whether HEAD is at this commit: on a branch here, or detached here."""
+        return any(ref.current or ref.kind == REF_HEAD for ref in self.refs)
+
+
+def _ref_labels(decorations: str) -> tuple[RefLabel, ...]:
+    """What ``--decorate=full`` names a commit, as labels. A remote's own HEAD, which
+    only says which of its branches it considers the main one, is left out."""
+    labels: list[RefLabel] = []
+    for item in decorations.split(", "):
+        current = item.startswith("HEAD -> ")
+        name = item[len("HEAD -> ") :] if current else item
+        if name == "HEAD":
+            labels.append(RefLabel("HEAD", REF_HEAD))
+        elif name.startswith("tag: refs/tags/"):
+            labels.append(RefLabel(name[len("tag: refs/tags/") :], REF_TAG))
+        elif name.startswith("refs/heads/"):
+            labels.append(RefLabel(name[len("refs/heads/") :], REF_BRANCH, current))
+        elif name.startswith("refs/remotes/") and not name.endswith("/HEAD"):
+            labels.append(RefLabel(name[len("refs/remotes/") :], REF_REMOTE))
+    return tuple(labels)
+
+
+def commit_log(
+    repo: str | Path, *, limit: int = HISTORY_LIMIT, all_branches: bool = True
+) -> list[LoggedCommit]:
+    """The newest ``limit`` commits, every commit before its parents.
+
+    Of every local branch, remote branch and tag as well as HEAD -- or of HEAD
+    alone. In topological order, which is what keeps a branch's commits together
+    in a graph rather than interleaved with another's by date. [] for a
+    repository with no commit yet, or one git cannot read.
+    """
+    where = ["--branches", "--remotes", "--tags", "HEAD"] if all_branches else ["HEAD"]
+    res = _run(
+        repo,
+        [
+            "log",
+            "-z",
+            "--topo-order",
+            f"--max-count={limit}",
+            "--no-show-signature",
+            "--no-color",
+            "--decorate=full",
+            f"--format={_LOG_FORMAT}",
+            *where,
+            "--",
+        ],
+    )
+    if not res.ok:
+        return []
+    commits: list[LoggedCommit] = []
+    for record in res.stdout.split("\0"):
+        # The message is the one field that could hold a separator of its own, so
+        # it is what is left between the first six fields and the last.
+        fields = record.split("\x1f", 6)
+        if len(fields) != 7:
+            continue
+        full, parents, author, email, authored, subject, rest = fields
+        message, _separator, decorations = rest.rpartition("\x1f")
+        commits.append(
+            LoggedCommit(
+                hash=full.strip(),
+                parents=tuple(parents.split()),
+                author=author,
+                email=email,
+                authored=int(authored) if authored.isdigit() else 0,
+                subject=subject,
+                message=message.rstrip("\n"),
+                refs=_ref_labels(decorations),
+            )
+        )
+    return commits
+
+
+def branches_containing(repo: str | Path, commit: str) -> list[str]:
+    """Every local and remote branch ``commit`` is part of, by name."""
+    res = _run(repo, ["branch", "--all", "--contains", commit, "--format=%(refname)"])
+    names: list[str] = []
+    for line in res.stdout.splitlines() if res.ok else []:
+        if line.startswith("refs/heads/"):
+            names.append(line[len("refs/heads/") :])
+        elif line.startswith("refs/remotes/") and not line.endswith("/HEAD"):
+            names.append(line[len("refs/remotes/") :])
+    return names
+
+
+def tags_containing(repo: str | Path, commit: str) -> list[str]:
+    """Every tag whose history has ``commit`` in it, newest version first."""
+    res = _run(repo, ["tag", "--contains", commit, "--sort=-v:refname"])
+    return [line.strip() for line in res.stdout.splitlines() if line.strip()] if res.ok else []
+
+
+def nearest_tag(repo: str | Path, commit: str) -> str:
+    """The tag ``commit`` derives from: the nearest one behind it, or "" for none."""
+    res = _run(repo, ["describe", "--tags", "--abbrev=0", commit])
+    return res.stdout.strip() if res.ok else ""
 
 
 def list_tags(repo: str | Path) -> list[str]:

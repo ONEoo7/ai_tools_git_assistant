@@ -50,6 +50,7 @@ from git_assistant.providers import PROVIDERS
 from git_assistant.ui.branch_picker import BRANCH_TAB, BranchPicker
 from git_assistant.ui.remotes_page import REMOTES_TAB, RemotesPage
 from git_assistant.ui.estimate_dialog import confirm
+from git_assistant.ui.history_pane import HistoryPane
 from git_assistant.ui.repo_pane import INFERENCE_TAB, RepoPane, inference_page
 from git_assistant.ui.repo_picker import RepoPicker
 from git_assistant.ui.staging_dialog import StagingDialog, diff_colours
@@ -364,36 +365,29 @@ class CommitPanel(QWidget):
             inference_page(self.provider_combo, self.provider_label), INFERENCE_TAB
         )
 
-        # ---- left pane: the commit message -------------------------------
+        # ---- left pane: the history, as a graph -----------------------------
+        # Where the commit is about to land, and what came before it: the graph,
+        # with the work not committed yet drawn above HEAD. See ui.history_pane.
+        self.history = HistoryPane(gap=SECTION_GAP)
         left = QWidget()
         left_box = QVBoxLayout(left)
         # Keep the panes off the splitter handle; without this the labels and
         # boxes sit flush against the divider. This pane has a handle on BOTH
         # sides, so it needs the gap on both.
         left_box.setContentsMargins(SECTION_GAP, 0, SECTION_GAP, 0)
-        # The template on the heading of the message it shapes, over at the
-        # right as the staged files' button is on theirs. Not folded with the
-        # repository: it is read on every run, and the list only when switching.
-        message_heading = QHBoxLayout()
-        message_heading.addWidget(QLabel("Commit message"), 1)
-        message_heading.addWidget(QLabel("Template:"))
-        message_heading.addWidget(self.template_combo)
-        left_box.addLayout(message_heading)
-        left_box.addWidget(self.editor)
-        # Under the editor and live, not only after a generation: the message
-        # is editable, and a length rule that only judged the model would be
-        # silent about the line the user typed over it.
-        left_box.addWidget(self.length_label)
-        self.editor.textChanged.connect(self._refresh_length)
-        self._refresh_length()
+        left_box.addWidget(self.history)
 
-        # ---- right pane: staged files + what was omitted ------------------
+        # ---- right pane: staged files + what was omitted, then the message -----
         right = QWidget()
         right_box = QVBoxLayout(right)
         # A handle on both sides, so a gap on both: with one only, the file list
         # sits flush against the divider on the right and inset on the left,
         # which reads as a misalignment rather than as a margin.
         right_box.setContentsMargins(SECTION_GAP, 0, SECTION_GAP, 0)
+        sent = QWidget()
+        sent_box = QVBoxLayout(sent)
+        # A handle below it, to the message: a gap on that side only.
+        sent_box.setContentsMargins(0, 0, 0, SECTION_GAP)
         self.files_label = QLabel("Staged files")
         # What is not staged yet is a count here and nothing more: looking at it
         # and choosing what to stage is the staging window's job.
@@ -406,7 +400,7 @@ class CommitPanel(QWidget):
         files_heading = QHBoxLayout()
         files_heading.addWidget(self.files_label, 1)
         files_heading.addWidget(self.unstaged_btn)
-        right_box.addLayout(files_heading)
+        sent_box.addLayout(files_heading)
 
         self.file_list = QTreeWidget()
         self.file_list.setMaximumHeight(150)
@@ -430,19 +424,19 @@ class CommitPanel(QWidget):
         self.file_list.currentItemChanged.connect(self._on_file_selected)
         self.file_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.file_list.customContextMenuRequested.connect(self._on_files_menu)
-        right_box.addWidget(self.file_list)
+        sent_box.addWidget(self.file_list)
 
         # The file list and the diff below it are two separate things; without a
         # gap the legend reads as a caption of the list rather than a heading
         # for the diff.
-        right_box.addSpacing(SECTION_GAP)
+        sent_box.addSpacing(SECTION_GAP)
 
         legend = QLabel(
             'Diff sent to the model - <span style="%s">&nbsp;red = omitted '
             "(never reached the model)&nbsp;</span>" % _OMITTED_STYLE
         )
         legend.setTextFormat(Qt.TextFormat.RichText)
-        right_box.addWidget(legend)
+        sent_box.addWidget(legend)
 
         self.diff_view = QTextEdit()
         self.diff_view.setReadOnly(True)
@@ -450,18 +444,49 @@ class CommitPanel(QWidget):
         self.diff_view.setFont(
             QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont)
         )
-        right_box.addWidget(self.diff_view, 1)
+        sent_box.addWidget(self.diff_view, 1)
+
+        # The message under the diff it is written from: read top to bottom, what
+        # is staged, what the model was sent, and what it wrote.
+        message = QWidget()
+        message_box = QVBoxLayout(message)
+        # A handle above it, to the diff: a gap on that side only.
+        message_box.setContentsMargins(0, SECTION_GAP, 0, 0)
+        # The template on the heading of the message it shapes, over at the
+        # right as the staged files' button is on theirs. Not folded with the
+        # repository: it is read on every run, and the list only when switching.
+        message_heading = QHBoxLayout()
+        message_heading.addWidget(QLabel("Commit message"), 1)
+        message_heading.addWidget(QLabel("Template:"))
+        message_heading.addWidget(self.template_combo)
+        message_box.addLayout(message_heading)
+        message_box.addWidget(self.editor, 1)
+        # Under the editor and live, not only after a generation: the message
+        # is editable, and a length rule that only judged the model would be
+        # silent about the line the user typed over it.
+        message_box.addWidget(self.length_label)
+        self.editor.textChanged.connect(self._refresh_length)
+        self._refresh_length()
+
+        self.message_splitter = QSplitter(Qt.Orientation.Vertical)
+        self.message_splitter.addWidget(sent)
+        self.message_splitter.addWidget(message)
+        self.message_splitter.setStretchFactor(0, 3)
+        self.message_splitter.setStretchFactor(1, 2)
+        right_box.addWidget(self.message_splitter)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.addWidget(self.repo_pane)
         splitter.addWidget(left)
         splitter.addWidget(right)
         splitter.addWidget(self._build_side_pane())
-        splitter.setStretchFactor(1, 3)
+        # The graph is the wider of the two: a message, an author, a date and a
+        # hash a row, beside a diff that scrolls sideways anyway.
+        splitter.setStretchFactor(1, 5)
         splitter.setStretchFactor(2, 4)
         splitter.setStretchFactor(3, 3)
         # One declared open layout for both folding panes; see `attach`.
-        open_sizes = [240, 400, 560, side_panel_mod.OPEN_WIDTH]
+        open_sizes = [240, 640, 540, side_panel_mod.OPEN_WIDTH]
         side_panel_mod.attach(splitter, self.repo_pane, open_sizes=open_sizes)
         side_panel_mod.attach(splitter, self.side_panel, open_sizes=open_sizes)
 
@@ -565,6 +590,7 @@ class CommitPanel(QWidget):
         self.refresh_provider()
         self._load_staged_files()
         self._refresh_history()
+        self.history.show_repo(self._current_repo_path())
         self._set_busy(False)
         if self.repo_picker.count() == 0:
             self.status.setText(NO_REPOS_MESSAGE)
@@ -630,6 +656,11 @@ class CommitPanel(QWidget):
         self.unstaged_btn.show_counts(
             unstaged, self._changed, known=entries is not None
         )
+        # The two rows above the graph's commits say the same, and what is staged.
+        if entries is None:
+            self.history.show_worktree(None, None)
+        else:
+            self.history.show_worktree(unstaged, sum(1 for entry in entries if entry.staged))
         # Opens on staged changes alone too: the window is where they come back out.
         self.unstaged_btn.setEnabled(bool(self._changed))
 
@@ -700,6 +731,7 @@ class CommitPanel(QWidget):
         self._refresh_branches()
         self.repo_picker.refresh_branches()
         self._load_staged_files()
+        self.history.show_repo(repo)
         self.status.setText(f"Switched to '{target}'.")
 
     def _refresh_templates(self) -> None:
@@ -794,6 +826,7 @@ class CommitPanel(QWidget):
         # otherwise keep marking the one that was checked out when it was opened.
         self._refresh_branches()
         self._load_staged_files()
+        self.history.show_repo(self._current_repo_path())
 
     def _on_repo_selected(self, path: str = "") -> None:
         """React to the picker's selection (it already updated the settings)."""
@@ -807,6 +840,7 @@ class CommitPanel(QWidget):
         # Show the new repository's staged files right away.
         self._load_staged_files()
         self._refresh_history()
+        self.history.show_repo(path)
 
     # ---- generation --------------------------------------------------------
     def _start(self) -> None:
@@ -1333,6 +1367,8 @@ class CommitPanel(QWidget):
         detail = (result.stderr.strip() or result.stdout.strip() or "").strip()
         if result.ok:
             self.progress.setText("Pushed.")
+            # The remote's branch has moved to where this one is.
+            self.history.show_repo(self._current_repo_path())
             QMessageBox.information(self, "Pushed", detail or "Push complete.")
         else:
             self.progress.setText("Push failed.")
@@ -1370,6 +1406,9 @@ class CommitPanel(QWidget):
             if self._shown_run is not None and message == self._shown_run.message.strip():
                 commit_history.mark_committed(self._shown_run)
                 self._refresh_history(select=self._shown_run)
+            # The new commit on the graph, and nothing staged any more.
+            self._load_staged_files()
+            self.history.show_repo(repo.path)
             QMessageBox.information(
                 self, "Committed", result.stdout.strip() or "Commit created."
             )

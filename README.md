@@ -48,7 +48,8 @@ than rewritten. Nothing is staged or committed.
 
 | | |
 |---|---|
-| **Generate** | Writes a Conventional Commits message for what is staged. Prices the run and asks before spending anything. |
+| **History** | The repository's commits as a graph, as Git Extensions draws them: branches, remote branches and tags labelled on their commits, the author's initials, how long ago, the hash. Above them, what is not committed yet — the working directory and the index — drawn down to HEAD. Select a commit for its whole message, its parents and children to click through, and the branches and tags it is part of; the author's other commits are highlighted. **All branches** off shows the checked-out branch alone. |
+| **Generate** | Writes a Conventional Commits message for what is staged. Prices the run and asks before spending anything. The message and its template sit under the diff sent to the model. |
 | **Copy** / **Commit** / **Push** | Take the message, commit with it, publish it. The message is editable first. |
 | **Prompt template** | Which of your named templates this repository is described with. |
 | **AI Provider** | Which backend answers, switchable without leaving the tab. |

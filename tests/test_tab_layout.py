@@ -84,10 +84,15 @@ def test_every_pane_is_inset_from_the_handles_beside_it(qapp, settings, build):
         assert right == (SECTION_GAP if index < len(panes) - 1 else 0), f"pane {index} right"
 
 
-@pytest.mark.parametrize("build", [ReviewPanel, UsagePane])
+@pytest.mark.parametrize("build", [ReviewPanel, UsagePane, CommitPanel])
 def test_a_pane_stacked_on_another_is_inset_from_the_handle_too(qapp, settings, build):
     """The same rule, turned ninety degrees: a handle above or below is still one."""
-    panel = build() if build is UsagePane else build(settings)
+    if build is UsagePane:
+        panel = build()
+    elif build is CommitPanel:
+        panel = build(settings, auto_start=False)
+    else:
+        panel = build(settings)
     stacked = [
         s
         for s in panel.findChildren(QSplitter)

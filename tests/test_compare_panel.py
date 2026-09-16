@@ -295,12 +295,20 @@ def test_a_commit_hash_can_be_copied_from_either_side(qapp, settings, projects, 
     panel = ComparePanel(settings)
     panel.refresh_repos()
     item = panel.right_tree.topLevelItem(0)
+    # A stand-in: the real clipboard is the whole desktop's, and a copy fails quietly
+    # while another process holds it open -- which the suite, run four at a time, does.
+    copied = []
+    monkeypatch.setattr(
+        QGuiApplication,
+        "clipboard",
+        staticmethod(lambda: type("Clipboard", (), {"setText": lambda _self, text: copied.append(text)})()),
+    )
     monkeypatch.setattr(QMenu, "exec", lambda menu, *a, **k: menu.actions()[0])
 
     panel._on_menu(panel.right_tree, panel.right_tree.visualItemRect(item).center())
 
     full = _git(projects["can"], "rev-parse", "HEAD~1").stdout.strip()
-    assert QGuiApplication.clipboard().text() == full
+    assert copied == [full]
 
 
 # ---- in the window ------------------------------------------------------------------------
