@@ -374,12 +374,16 @@ def test_picker_nests_submodules_under_their_repo(qapp, settings):
     settings.active_repo = "/x/alpha"
     panel = CommitPanel(settings, auto_start=False)
 
-    # Under "All", by name, with the submodule folded into its parent.
+    # Under "All", in the folder they sit in, by name; the submodule under its
+    # repository's Submodules, down the directory it is kept in.
     assert _rows(panel.repo_picker) == [
         ("All", 0),
-        ("x\\alpha", 1),
-        ("libs\\inner", 2),
-        ("x\\beta", 1),
+        ("x", 1),
+        ("alpha", 2),
+        ("Submodules", 3),
+        ("libs", 4),
+        ("inner", 5),
+        ("beta", 2),
     ]
     # A submodule is a repository in its own right, so it counts as one. The
     # group header is not one, and neither is a repeat under Recently Used.
@@ -392,8 +396,8 @@ def test_picker_folds_submodules_away(qapp, settings):
     settings.active_repo = "/x/alpha"
     panel = CommitPanel(settings, auto_start=False)
 
-    alpha = panel.repo_picker.repo_list.topLevelItem(0).child(0)
-    assert alpha.text(0) == "x\\alpha"
+    alpha = panel.repo_picker.repo_list.topLevelItem(0).child(0).child(0)
+    assert alpha.text(0) == "alpha"
     assert not alpha.isExpanded()
 
 
@@ -419,7 +423,9 @@ def test_every_recently_used_repository_is_listed_most_recent_first(
 
     def paths(group):
         role = Qt.ItemDataRole.UserRole
-        return [group.child(i).data(0, role) for i in range(group.childCount())]
+        return [
+            path for item in panel.repo_picker._under(group) if (path := item.data(0, role))
+        ]
 
     assert recent.text(0) == RECENT_GROUP
     assert paths(recent) == [f"/x/r{i}" for i in reversed(range(8))]
@@ -477,7 +483,7 @@ def test_the_selection_is_the_copy_under_all(qapp, settings):
 
     tree = panel.repo_picker.repo_list
     assert panel.repo_picker.current_path() == "/x/beta"
-    assert tree.currentItem().parent().text(0) == "All"
+    assert tree.currentItem().parent().parent().text(0) == "All"  # in folder x, under All
 
 
 def test_picker_can_select_a_submodule(qapp, settings):
@@ -500,19 +506,22 @@ def test_picker_filter_keeps_the_parent_of_a_matching_submodule(qapp, settings):
 
     panel.repo_picker.filter_edit.setText("inner")
 
-    everything = tree.topLevelItem(0)
-    alpha = everything.child(0)
+    folder = tree.topLevelItem(0).child(0)
+    alpha, beta = folder.child(0), folder.child(1)
+    submodules = alpha.child(0)
+    libs = submodules.child(0)
     assert not alpha.isHidden()  # a match must not be stranded out of its tree
-    assert alpha.isExpanded()  # and the tree opens far enough to show it
-    assert not alpha.child(0).isHidden()
-    assert everything.child(1).isHidden()  # beta matches nothing
+    # and the tree opens far enough to show it
+    assert folder.isExpanded() and alpha.isExpanded() and submodules.isExpanded()
+    assert libs.isExpanded() and not libs.child(0).isHidden()
+    assert beta.isHidden()  # beta matches nothing
 
 
 def test_clearing_the_filter_folds_the_submodules_back(qapp, settings):
     settings.repos = [RepoEntry("/x/alpha"), RepoEntry("/x/alpha/libs/inner")]
     settings.active_repo = "/x/alpha"
     panel = CommitPanel(settings, auto_start=False)
-    alpha = panel.repo_picker.repo_list.topLevelItem(0).child(0)
+    alpha = panel.repo_picker.repo_list.topLevelItem(0).child(0).child(0)
 
     panel.repo_picker.filter_edit.setText("inner")
     assert alpha.isExpanded()
@@ -533,7 +542,7 @@ def test_a_group_title_is_not_something_the_filter_matches(qapp, settings):
     # "beta" is the selection, which is always kept visible; the group survives
     # only because of that child, never because its own title read "All".
     everything = tree.topLevelItem(0)
-    assert everything.child(0).text(0) == "x\\beta"
+    assert everything.child(0).child(0).text(0) == "beta"
     assert not everything.isHidden()
 
 

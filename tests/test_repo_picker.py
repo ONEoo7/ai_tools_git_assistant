@@ -168,7 +168,8 @@ def test_the_row_reserves_room_for_the_branch(qapp, settings, repos):
         for i in range(picker.repo_list.topLevelItemCount())
         if picker.repo_list.topLevelItem(i).text(0) == ALL_GROUP
     )
-    index = model.index(0, 0, model.index(group, 0))
+    # All, then the folder the repositories are in, then the first of them.
+    index = model.index(0, 0, model.index(0, 0, model.index(group, 0)))
     option = QStyleOptionViewItem()
     option.initFrom(picker.repo_list)
 
@@ -243,6 +244,7 @@ def _groups(picker):
 
 
 def _row(picker, group_title, path):
+    """The row for ``path`` under a group, however deep: under All it is in a folder."""
     tree = picker.repo_list
     group = next(
         tree.topLevelItem(i)
@@ -250,10 +252,15 @@ def _row(picker, group_title, path):
         if tree.topLevelItem(i).text(0) == group_title
     )
     return next(
-        group.child(i)
-        for i in range(group.childCount())
-        if group.child(i).data(0, Qt.ItemDataRole.UserRole) == path
+        item for item in picker._under(group) if item.data(0, Qt.ItemDataRole.UserRole) == path
     )
+
+
+def _group_of(item):
+    """The group a row is listed under: the title at the top of the rows above it."""
+    while item.parent() is not None:
+        item = item.parent()
+    return item.text(0)
 
 
 def _outside_favorites(picker):
@@ -287,7 +294,7 @@ def test_favorites_come_first_above_recently_used_by_name(qapp):
     assert _groups(picker) == [
         (FAVORITES_GROUP, ["x\\alpha", "x\\gamma"]),
         (RECENT_GROUP, ["x\\beta"]),
-        (ALL_GROUP, ["x\\alpha", "x\\beta", "x\\gamma"]),
+        (ALL_GROUP, ["x"]),  # the folder all three are in
     ]
 
 
@@ -438,7 +445,7 @@ def test_a_selected_favorite_taken_off_stays_selected_under_all(qapp):
     picker.set_favorite("/x/beta", False)
 
     assert picker.current_path() == "/x/beta" == settings.active_repo
-    assert picker.repo_list.currentItem().parent().text(0) == ALL_GROUP
+    assert _group_of(picker.repo_list.currentItem()) == ALL_GROUP
     assert heard == []  # the same repository, so nothing to reload
 
 
@@ -536,5 +543,215 @@ def test_the_repository_set_beside_stays_selected_when_favorites_change(qapp):
     picker.set_favorite("/x/beta", False)
 
     assert picker.current_path() == "/x/beta" == settings.compare_repo
-    assert picker.repo_list.currentItem().parent().text(0) == ALL_GROUP
+    assert _group_of(picker.repo_list.currentItem()) == ALL_GROUP
     assert settings.active_repo == "/x/alpha"
+
+
+# ---- folders, and the submodules of a repository ---------------------------------------
+def _listing(*paths, active=""):
+    """Settings listing ``paths``, which need not exist: these tests are about rows."""
+    s = Settings()
+    s.save = lambda: None  # never touch the real config file
+    s.repos = [RepoEntry(path) for path in paths]
+    s.active_repo = active or paths[0]
+    return s
+
+
+def _all(picker):
+    tree = picker.repo_list
+    return next(
+        tree.topLevelItem(i)
+        for i in range(tree.topLevelItemCount())
+        if tree.topLevelItem(i).text(0) == ALL_GROUP
+    )
+
+
+def _outline(item, depth=0):
+    """``(text, depth, open)`` for every row below ``item``, top to bottom."""
+    rows = []
+    for i in range(item.childCount()):
+        child = item.child(i)
+        rows.append((child.text(0), depth, child.isExpanded()))
+        rows += _outline(child, depth + 1)
+    return rows
+
+
+def test_repositories_are_inside_the_folder_they_sit_in_and_folders_start_folded(qapp):
+    import os
+
+    picker = RepoPicker(
+        _listing(
+            "/work/ONEoo7/beta",
+            "/tools/toolbox/msys2",
+            "/tools/toolbox/python3",
+            "/work/ONEoo7/alpha",
+            active="/work/ONEoo7/alpha",
+        )
+    )
+
+    assert _outline(_all(picker)) == [
+        ("ONEoo7", 0, True),  # open only because the selection is in it
+        ("alpha", 1, False),
+        ("beta", 1, False),
+        ("toolbox", 0, False),
+        ("msys2", 1, False),
+        ("python3", 1, False),
+    ]
+    toolbox = _all(picker).child(1)
+    assert not toolbox.icon(0).isNull()
+    assert toolbox.toolTip(0) == os.path.normpath("/tools/toolbox")
+    assert not (toolbox.flags() & Qt.ItemFlag.ItemIsSelectable)
+    assert picker.count() == 4  # repositories, and not the folders they are in
+
+
+def test_two_folders_of_one_name_say_where_each_is(qapp):
+    picker = RepoPicker(_listing("/a/lib/one", "/b/lib/two"))
+
+    first, second = _all(picker).child(0).text(0), _all(picker).child(1).text(0)
+
+    assert first != second
+    assert first.startswith("lib (") and second.startswith("lib (")
+
+
+def test_submodules_are_under_their_repository_down_the_directories_they_are_kept_in(qapp):
+    picker = RepoPicker(
+        _listing(
+            "/x/top",
+            "/x/top/libs/can",
+            "/x/top/libs/ccp",
+            "/x/top/ADC",
+            "/x/top/libs/can/deep/vendor",
+            "/x/other",
+            active="/x/other",
+        )
+    )
+
+    assert _outline(_all(picker)) == [
+        ("x", 0, True),
+        ("other", 1, False),
+        ("top", 1, False),  # a repository of its own, with submodules: folded
+        ("Submodules", 2, True),  # everything inside a repository starts open
+        ("libs", 3, True),  # directories before the submodules beside them
+        ("can", 4, True),
+        ("Submodules", 5, True),
+        ("deep", 6, True),
+        ("vendor", 7, False),
+        ("ccp", 4, False),
+        ("ADC", 3, False),
+    ]
+    assert picker.count() == 6
+
+
+def test_a_submodule_can_be_chosen_from_inside_its_directories(qapp):
+    settings = _listing("/x/top", "/x/top/libs/can", active="/x/top/libs/can")
+    picker = RepoPicker(settings)
+
+    assert picker.current_path() == "/x/top/libs/can"
+    row = picker.repo_list.currentItem()
+    parent = row.parent()
+    while parent is not None:  # every row above it open, so it can be seen
+        assert parent.isExpanded()
+        parent = parent.parent()
+
+
+def test_clicking_a_folder_opens_or_folds_it_and_chooses_nothing(qapp):
+    """It used to leave the list with no repository selected, while every tab went on
+    with the one it had."""
+    from PyQt6.QtTest import QTest
+
+    settings = _listing("/work/ONEoo7/alpha", "/tools/toolbox/msys2", active="/work/ONEoo7/alpha")
+    picker = RepoPicker(settings)
+    picker.resize(320, 400)
+    picker.show()
+    QTest.qWaitForWindowExposed(picker)
+    heard = []
+    picker.repoChanged.connect(heard.append)
+    tree = picker.repo_list
+    toolbox = _all(picker).child(1)
+
+    def at(item):
+        # Through the window, as real input arrives: a double click is then a press,
+        # a release and a double click, where sent to the list it is the last alone.
+        return tree.viewport().mapTo(picker, tree.visualItemRect(item).center())
+
+    left, none = Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier
+    QTest.mouseClick(picker.windowHandle(), left, none, at(toolbox))
+    qapp.processEvents()
+    assert toolbox.isExpanded()
+    assert picker.current_path() == "/work/ONEoo7/alpha" == settings.active_repo
+    assert tree.currentItem().data(0, Qt.ItemDataRole.UserRole) == "/work/ONEoo7/alpha"
+
+    QTest.mouseClick(picker.windowHandle(), left, none, at(toolbox))
+    qapp.processEvents()
+    assert not toolbox.isExpanded()
+    # A double click is one press that opens it: not open and shut again.
+    QTest.qWait(QApplication.doubleClickInterval() + 50)
+    QTest.mouseDClick(picker.windowHandle(), left, none, at(toolbox))
+    qapp.processEvents()
+    assert toolbox.isExpanded()
+    assert heard == []
+    picker.close()
+
+
+def test_the_keyboard_on_a_folder_leaves_the_repository_chosen(qapp):
+    picker = RepoPicker(_listing("/work/ONEoo7/alpha", "/tools/toolbox/msys2"))
+    heard = []
+    picker.repoChanged.connect(heard.append)
+
+    picker.repo_list.setCurrentItem(_all(picker).child(1))
+
+    assert picker.current_path() == "/work/ONEoo7/alpha"
+    assert heard == []
+
+
+def test_a_folder_opened_or_folded_by_hand_stays_so_when_the_list_is_built_again(qapp):
+    """Every tab builds its list again whenever it is shown."""
+    picker = RepoPicker(_listing("/work/ONEoo7/alpha", "/tools/toolbox/msys2"))
+    _all(picker).child(1).setExpanded(True)  # toolbox, opened
+    _all(picker).child(0).setExpanded(False)  # ONEoo7, folded though the selection is in it
+
+    picker.refresh()
+
+    assert _all(picker).child(1).isExpanded()
+    assert not _all(picker).child(0).isExpanded()
+    assert picker.current_path() == "/work/ONEoo7/alpha"
+
+
+def test_the_first_repository_is_chosen_when_the_active_one_is_gone_not_a_folder(qapp):
+    picker = RepoPicker(_listing("/tools/toolbox/msys2", "/work/ONEoo7/alpha", active="/gone/x"))
+
+    assert picker.current_path() == "/work/ONEoo7/alpha"  # ONEoo7 comes before toolbox
+
+
+def test_a_folder_s_name_finds_everything_in_it(qapp):
+    picker = RepoPicker(
+        _listing("/work/ONEoo7/alpha", "/tools/toolbox/msys2", "/tools/toolbox/python3")
+    )
+
+    picker.filter_edit.setText("toolbox")
+
+    ones, toolbox = _all(picker).child(0), _all(picker).child(1)
+    assert not toolbox.isHidden() and toolbox.isExpanded()
+    assert [toolbox.child(i).isHidden() for i in range(2)] == [False, False]
+    assert not ones.isHidden()  # holds the selection, which is always kept
+
+
+def test_the_submodules_heading_is_not_something_the_filter_matches(qapp):
+    picker = RepoPicker(_listing("/x/other", "/x/top", "/x/top/libs/can"))
+
+    picker.filter_edit.setText("submod")
+
+    top = _all(picker).child(0).child(1)
+    assert top.text(0) == "top" and top.isHidden()
+
+
+def test_clearing_the_filter_leaves_rows_as_they_were_before_it(qapp):
+    picker = RepoPicker(_listing("/work/ONEoo7/alpha", "/tools/toolbox/msys2"))
+    _all(picker).child(1).setExpanded(True)  # opened by hand
+
+    picker.filter_edit.setText("alp")
+    assert _all(picker).child(1).isHidden()
+    picker.filter_edit.setText("")
+
+    assert _all(picker).child(1).isExpanded() and not _all(picker).child(1).isHidden()
+    assert _all(picker).child(0).isExpanded()
