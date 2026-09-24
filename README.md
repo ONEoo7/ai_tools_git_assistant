@@ -15,11 +15,22 @@ uv run git-assistant
 The tray icon opens the window. Its right-click menu is three items — **Git
 Assistant**, **About**, **Exit** — because everything else belongs in the window.
 
-Every tab that acts on a repository picks one from the same list: **Recently
-Used** at the top, most recent first, and **All** below it in alphabetical order
-with each repository's submodules folded away until you open them. A repository you
-have just used appears in both — All means all, so nothing ever moves out of the
-place you expect to find it.
+Every tab that acts on a repository picks one from the same list: **Favorites**
+(right-click a repository to add it), **Recently Used**, most recent first, and
+**All**, where each repository sits inside its folder. A repository's submodules are
+in a **Submodules** row beneath it, folded away until you open it. A repository you
+have just used appears in Recently Used and in All — All means all, so nothing ever
+moves out of the place you expect to find it.
+
+Right-click **Submodules** to update every submodule listed there to the latest
+`master`. The window lists them first and does nothing until you press **Update**.
+Then each is fetched, anything changed or untracked in it is stashed there, and it
+is switched to `master` at its remote's newest commit. One whose own `master` has
+commits the remote lacks while the remote has new ones, or whose checked-out commit
+is on no branch, is left exactly as it is, and the window says why. A fetch the
+server turns away — too many connections too fast — is tried again after a growing
+pause, and every fetch after it goes one at a time; **Retry failed** tries again
+any that still failed, at that slower pace.
 
 Above the tabs, on every one of them, sits the bar that says what the *active
 repository* is configured with: **Commit as** (the identity the next commit will

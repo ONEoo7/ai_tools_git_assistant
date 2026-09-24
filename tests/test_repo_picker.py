@@ -264,12 +264,9 @@ def _group_of(item):
 
 
 def _outside_favorites(picker):
-    """Every row that is not the Favorites group or in it, as the objects they are."""
-    return [
-        id(row)
-        for row in picker._items()
-        if FAVORITES_GROUP not in (row.text(0), row.parent() and row.parent().text(0))
-    ]
+    """Every row that is not the Favorites group or in it, however deep, as the objects
+    they are."""
+    return [id(row) for row in picker._items() if _group_of(row) != FAVORITES_GROUP]
 
 
 def _choose_from_menu(picker, item, monkeypatch):
@@ -557,13 +554,17 @@ def _listing(*paths, active=""):
     return s
 
 
-def _all(picker):
+def _group(picker, title):
     tree = picker.repo_list
     return next(
         tree.topLevelItem(i)
         for i in range(tree.topLevelItemCount())
-        if tree.topLevelItem(i).text(0) == ALL_GROUP
+        if tree.topLevelItem(i).text(0) == title
     )
+
+
+def _all(picker):
+    return _group(picker, ALL_GROUP)
 
 
 def _outline(item, depth=0):
@@ -755,3 +756,312 @@ def test_clearing_the_filter_leaves_rows_as_they_were_before_it(qapp):
 
     assert _all(picker).child(1).isExpanded() and not _all(picker).child(1).isHidden()
     assert _all(picker).child(0).isExpanded()
+
+
+# ---- the submodules of a favorite, and of a repository used recently ---------------------
+def test_a_favorite_and_a_recent_one_carry_their_submodules_folded_beneath_them(qapp):
+    picker = RepoPicker(
+        _plain(
+            "top",
+            "top/libs/can",
+            "top/ADC",
+            "other",
+            active="other",
+            favorites=["top"],
+            recent=["top/libs/can", "top"],
+        )
+    )
+
+    inside_top = [
+        ("Submodules", 1, True),  # everything inside a repository starts open, as under All
+        ("libs", 2, True),
+        ("can", 3, False),
+        ("ADC", 2, False),
+    ]
+    assert _outline(_group(picker, FAVORITES_GROUP)) == [("x\\top", 0, False), *inside_top]
+    # A submodule used recently is still a row of its own, beside the one it is in.
+    assert _outline(_group(picker, RECENT_GROUP)) == [
+        ("libs\\can", 0, False),
+        ("x\\top", 0, False),
+        *inside_top,
+    ]
+    assert picker.count() == 4  # the same four repositories, however often listed
+
+
+def test_a_submodule_is_chosen_from_under_a_favorite(qapp):
+    settings = _plain("top", "top/libs/can", "other", active="other", favorites=["top"])
+    picker = RepoPicker(settings)
+    heard = []
+    picker.repoChanged.connect(heard.append)
+    favorite = _group(picker, FAVORITES_GROUP).child(0)
+
+    picker.repo_list.setCurrentItem(favorite.child(0).child(0).child(0))  # Submodules, libs, can
+
+    assert picker.current_path() == "/x/top/libs/can" == settings.active_repo
+    assert heard == ["/x/top/libs/can"]
+
+
+def test_a_favorite_opened_or_folded_by_hand_stays_so_and_its_other_rows_stay_as_they_were(
+    qapp,
+):
+    """Opened under Favorites is not opened under Recently Used and All as well: each
+    of those is a screenful of submodules nobody asked for."""
+    picker = RepoPicker(
+        _plain("top", "top/libs/can", "other", active="other", favorites=["top"], recent=["top"])
+    )
+    favorite = _group(picker, FAVORITES_GROUP).child(0)
+    favorite.setExpanded(True)
+    favorite.child(0).child(0).setExpanded(False)  # libs, in its Submodules
+    favorite.child(0).setExpanded(False)  # and Submodules itself
+
+    picker.refresh()
+
+    assert _outline(_group(picker, FAVORITES_GROUP)) == [
+        ("x\\top", 0, True),
+        ("Submodules", 1, False),
+        ("libs", 2, False),
+        ("can", 3, False),
+    ]
+    for other in (_group(picker, RECENT_GROUP).child(0), _row(picker, ALL_GROUP, "/x/top")):
+        assert not other.isExpanded()
+        assert _outline(other) == [("Submodules", 0, True), ("libs", 1, True), ("can", 2, False)]
+
+
+def test_a_favorite_added_comes_folded_and_the_favorites_opened_stay_open(qapp):
+    """Adding one builds Favorites again, out of rows that are new."""
+    picker = RepoPicker(
+        _plain(
+            "top", "top/libs/can", "base", "base/ADC", "other", active="other", favorites=["top"]
+        )
+    )
+    _group(picker, FAVORITES_GROUP).child(0).setExpanded(True)
+
+    picker.set_favorite("/x/base", True)
+
+    assert _outline(_group(picker, FAVORITES_GROUP)) == [
+        ("x\\base", 0, False),
+        ("Submodules", 1, True),
+        ("ADC", 2, False),
+        ("x\\top", 0, True),
+        ("Submodules", 1, True),
+        ("libs", 2, True),
+        ("can", 3, False),
+    ]
+
+
+def test_the_filter_finds_a_favorite_s_submodule_and_folds_the_favorite_again_after(qapp):
+    picker = RepoPicker(_plain("top", "top/libs/can", "other", active="other", favorites=["top"]))
+    favorite = _group(picker, FAVORITES_GROUP).child(0)
+
+    picker.filter_edit.setText("can")
+
+    assert not favorite.child(0).child(0).child(0).isHidden()
+    assert favorite.isExpanded() and not favorite.isHidden()
+    picker.filter_edit.setText("")
+    assert not favorite.isExpanded()
+
+
+def test_each_repository_s_branch_is_read_once_however_often_it_is_listed(qapp, monkeypatch):
+    """A favorite used recently is listed three times, its submodules with it, and every
+    tab builds its list again whenever it is shown."""
+    from git_assistant import git_ops
+
+    read = []
+    monkeypatch.setattr(git_ops, "head_branch", lambda path: read.append(path) or "main")
+    everything = ["/x/other", "/x/top", "/x/top/libs/can"]
+
+    picker = RepoPicker(_plain("top", "top/libs/can", "other", favorites=["top"], recent=["top"]))
+
+    assert sorted(read) == everything
+    assert _branches(picker) == {"can": "main", "other": "main", "top": "main"}
+    for again in (picker.refresh, picker.refresh_branches):
+        read.clear()
+        again()
+        assert sorted(read) == everything  # read again, not remembered: a checkout since
+    read.clear()
+    picker.set_favorite("/x/top/libs/can", True)
+    # Favorites alone built again, where can is listed twice: itself, and inside top.
+    assert sorted(read) == ["/x/top", "/x/top/libs/can"]
+
+
+def test_the_folder_icons_are_fetched_once_not_once_a_row(qapp, monkeypatch):
+    """The style fetches each from the shell, at ten milliseconds a time."""
+    from PyQt6.QtWidgets import QStyle
+
+    from git_assistant.ui import repo_picker
+
+    real, fetched = QApplication.style(), []
+
+    class Counting:
+        def standardIcon(self, pixmap, *args):  # noqa: N802 - Qt naming
+            fetched.append(pixmap)
+            return real.standardIcon(pixmap, *args)
+
+    monkeypatch.setattr(repo_picker, "_ICONS", {})
+    monkeypatch.setattr(RepoPicker, "style", lambda self: Counting())
+    settings = _plain("top", "top/libs/can", "base", "base/ADC", favorites=["top"], recent=["base"])
+
+    RepoPicker(settings).refresh()
+    RepoPicker(settings)
+
+    assert sorted(fetched) == sorted(
+        [QStyle.StandardPixmap.SP_DirIcon, QStyle.StandardPixmap.SP_DirLinkIcon]
+    )
+
+
+# ---- bringing a repository's submodules up to the latest master --------------------------
+class _Window:
+    """Stands in for the window that brings submodules up: notes what it was given."""
+
+    made: list = []
+    runs = True
+
+    def __init__(self, repo, chains, *, rules_for=None, parent=None):
+        self.repo, self.chains, self.rules_for = repo, chains, rules_for
+        self.ran = False
+        _Window.made.append(self)
+
+    def exec(self):
+        self.ran = _Window.runs
+        return 0
+
+    def deleteLater(self):  # noqa: N802 - Qt naming
+        pass
+
+
+@pytest.fixture
+def window(monkeypatch):
+    from git_assistant.ui import submodule_update_dialog
+
+    _Window.made, _Window.runs = [], True
+    monkeypatch.setattr(submodule_update_dialog, "SubmoduleUpdateDialog", _Window)
+    return _Window
+
+
+def _submodules_row(picker, group_title, path):
+    """The Submodules row of the repository ``path``, opened up so it can be clicked."""
+    row = _row(picker, group_title, path)
+    parent = row
+    while parent is not None:
+        parent.setExpanded(True)
+        parent = parent.parent()
+    return row.child(0)
+
+
+def test_a_submodules_row_offers_to_update_them_to_the_latest_master(qapp, monkeypatch, window):
+    from git_assistant.submodule_update import Target
+    from git_assistant.ui.repo_picker import UPDATE_SUBMODULES
+
+    picker = RepoPicker(_plain("top", "top/libs/can", "top/ADC", "other", active="other"))
+    picker.resize(320, 480)
+    picker.show()
+    holder = _submodules_row(picker, ALL_GROUP, "/x/top")
+
+    assert _choose_from_menu(picker, holder, monkeypatch) == UPDATE_SUBMODULES
+
+    (made,) = window.made
+    assert made.repo == "/x/top"
+    assert made.chains == [
+        [Target("/x/top/libs/can", "/x/top")],
+        [Target("/x/top/ADC", "/x/top")],
+    ]
+    assert made.rules_for is not None
+    picker.close()
+
+
+def test_every_submodule_under_the_row_is_in_it_those_inside_another_after_that_one(qapp):
+    from git_assistant.submodule_update import Target
+    from git_assistant.ui.repo_picker import _submodule_chains
+
+    picker = RepoPicker(
+        _plain("top", "top/libs/can", "top/libs/can/deep/vendor", "top/ADC", "top/libs/ccp")
+    )
+    holder = _row(picker, ALL_GROUP, "/x/top").child(0)
+
+    assert _submodule_chains(holder, "/x/top") == [
+        [
+            Target("/x/top/libs/can", "/x/top"),
+            Target("/x/top/libs/can/deep/vendor", "/x/top/libs/can"),
+        ],
+        [Target("/x/top/libs/ccp", "/x/top")],
+        [Target("/x/top/ADC", "/x/top")],
+    ]
+
+
+def test_a_favorite_s_submodules_row_offers_it_too(qapp, monkeypatch, window):
+    from git_assistant.ui.repo_picker import UPDATE_SUBMODULES
+
+    picker = RepoPicker(_plain("top", "top/libs/can", "other", active="other", favorites=["top"]))
+    picker.resize(320, 480)
+    picker.show()
+    holder = _submodules_row(picker, FAVORITES_GROUP, "/x/top")
+
+    assert _choose_from_menu(picker, holder, monkeypatch) == UPDATE_SUBMODULES
+    assert [made.repo for made in window.made] == ["/x/top"]
+    picker.close()
+
+
+def test_after_a_run_the_branches_are_read_again_and_the_tab_is_told(qapp, window):
+    picker = RepoPicker(_plain("top", "top/libs/can", "other", active="other"))
+    heard = []
+    picker.branchesChanged.connect(lambda: heard.append("branches"))
+    picker.submodulesUpdated.connect(lambda repo: heard.append(repo))
+
+    picker._update_submodules(_row(picker, ALL_GROUP, "/x/top").child(0))
+
+    assert heard == ["branches", "/x/top"]
+
+
+def test_closing_the_window_without_updating_changes_nothing(qapp, window):
+    window.runs = False
+    picker = RepoPicker(_plain("top", "top/libs/can", "other", active="other"))
+    rows = [id(row) for row in picker._items()]
+    heard = []
+    picker.branchesChanged.connect(lambda: heard.append("branches"))
+    picker.submodulesUpdated.connect(heard.append)
+
+    picker._update_submodules(_row(picker, ALL_GROUP, "/x/top").child(0))
+
+    assert heard == [] and len(window.made) == 1
+    assert [id(row) for row in picker._items()] == rows
+
+
+def test_a_directory_or_a_folder_has_no_menu(qapp, monkeypatch):
+    from PyQt6.QtWidgets import QMenu
+
+    picker = RepoPicker(_plain("top", "top/libs/can", active="top"))
+    picker.resize(320, 480)
+    picker.show()
+    opened = []
+    monkeypatch.setattr(QMenu, "exec", lambda menu, *a, **k: opened.append(menu))
+    tree = picker.repo_list
+    libs = _submodules_row(picker, ALL_GROUP, "/x/top").child(0)
+    folder = _all(picker).child(0)
+    assert (libs.text(0), folder.text(0)) == ("libs", "x")
+
+    for row in (libs, folder):
+        picker._on_menu(tree.visualItemRect(row).center())
+
+    assert opened == []
+    picker.close()
+
+
+def test_a_submodules_row_says_what_a_right_click_does(qapp):
+    picker = RepoPicker(_plain("top", "top/libs/can"))
+
+    assert "Right-click" in _row(picker, ALL_GROUP, "/x/top").child(0).toolTip(0)
+
+
+def test_the_tab_the_submodules_were_updated_from_reads_everything_again(qapp, monkeypatch):
+    from git_assistant.ui.settings_dialog import SettingsDialog
+
+    dlg = SettingsDialog(_plain("alpha", "beta"))
+    reloaded = []
+    for panel in (dlg.commit_panel, dlg.tags_panel, dlg.compare_panel, dlg.review_panel):
+        monkeypatch.setattr(panel, "refresh_repos", lambda panel=panel: reloaded.append(panel))
+
+    dlg.commit_panel.repo_picker.submodulesUpdated.emit("/x/alpha")
+    dlg.tags_panel.repo_picker.submodulesUpdated.emit("/x/alpha")
+    dlg.compare_panel.other_picker.submodulesUpdated.emit("/x/beta")
+
+    assert reloaded == [dlg.commit_panel, dlg.tags_panel, dlg.compare_panel]

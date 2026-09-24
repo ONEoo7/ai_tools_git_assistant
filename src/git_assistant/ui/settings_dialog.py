@@ -294,6 +294,15 @@ class SettingsDialog(QDialog):
             )
             # And the remote a push goes to, which is the branch's to track.
             panel.repo_picker.branchesChanged.connect(self.identity_bar.show_remote)
+            # Submodules brought up from the list change what the tab shows -- the
+            # parent's changes, a submodule's branches -- so it reads it all again,
+            # as it does whenever it is opened.
+            panel.repo_picker.submodulesUpdated.connect(
+                lambda _repo, panel=panel: panel.refresh_repos()
+            )
+        self.compare_panel.other_picker.submodulesUpdated.connect(
+            lambda _repo: self.compare_panel.refresh_repos()
+        )
         for panel in (self.commit_panel, self.tags_panel):
             panel.remotes_page.remotesChanged.connect(self.identity_bar.show_remote)
         # The provider is application-wide, so a change on any tab that offers

@@ -7,6 +7,8 @@ The workers:
 - ``AgentWorker``      : runs the ticked repository audits, which can take minutes.
 - ``SetupWorker``      : installs LM Studio and downloads a model.
 - ``CloneWorker``      : clones a repository, passing on git's progress.
+- ``SubmoduleUpdateWorker`` : brings submodules to the latest master, one result
+  at a time.
 - ``FunctionWorker``   : runs an arbitrary callable (e.g. listing models) off-thread.
 
 Each is a QObject meant to be moved onto a QThread; see ``run_worker`` for the
@@ -335,6 +337,54 @@ class CloneWorker(QObject):
                     on_progress=self.progress.emit,
                     on_percent=self.percent.emit,
                     is_cancelled=lambda: self._cancelled,
+                )
+            )
+        except Exception as exc:  # surface any failure to the UI
+            self.error.emit(str(exc))
+
+
+class SubmoduleUpdateWorker(QObject):
+    """Brings submodules to the latest master: a fetch each, several at once.
+
+    Says when each submodule begins and how it ended, as it happens -- fifty
+    fetches are a minute, and a window that fills in row by row is one that can be
+    watched rather than waited out. Stopping lets the ones already begun finish:
+    a checkout interrupted halfway is worse than one that never started.
+    """
+
+    begun = pyqtSignal(int)  # a submodule's place in the order given
+    #: Its place, and what its fetch is waiting for after the server turned it away.
+    waiting = pyqtSignal(int, str)
+    done = pyqtSignal(int, object)  # its place, and its submodule_update.Outcome
+    finished = pyqtSignal(object)  # list[submodule_update.Outcome], in that order
+    error = pyqtSignal(str)
+
+    def __init__(
+        self, chains: list, rules_for: Callable | None = None, *, pace=None
+    ) -> None:
+        super().__init__()
+        self._chains = chains
+        self._rules_for = rules_for
+        #: A submodule_update.Pace, shared with any run before this one.
+        self._pace = pace
+        self._cancelled = False
+
+    def cancel(self) -> None:
+        self._cancelled = True
+
+    def run(self) -> None:
+        from git_assistant import submodule_update
+
+        try:
+            self.finished.emit(
+                submodule_update.update_all(
+                    self._chains,
+                    rules_for=self._rules_for,
+                    started=self.begun.emit,
+                    finished=self.done.emit,
+                    waiting=self.waiting.emit,
+                    is_cancelled=lambda: self._cancelled,
+                    pace=self._pace,
                 )
             )
         except Exception as exc:  # surface any failure to the UI

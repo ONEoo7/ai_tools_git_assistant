@@ -18,12 +18,15 @@ by name, added and taken off from any row's right-click menu. Chosen rather than
 worked out, so -- unlike recency -- it stays put until the user moves it.
 
 Under All, a repository is listed inside the folder it sits in -- every repository
-in ``C:\toolbox`` under a **toolbox** row -- and a repository's submodules inside a
-**Submodules** row of its own, down through the directories they are kept in. The
-folders and the repositories with submodules start folded, so a hundred and seventy
-repositories are a list of their folders; everything inside a repository starts
-open, so unfolding one shows all of it. A folder or a Submodules row is not a
-repository: clicking one opens or folds it, and chooses nothing.
+in ``C:\toolbox`` under a **toolbox** row. Under every group, a repository's
+submodules are inside a **Submodules** row of its own, down through the directories
+they are kept in: a favorite project is one click from any of its submodules rather
+than a hunt for them under All. The folders and the repositories with submodules
+start folded, so a hundred and seventy repositories are a list of their folders;
+everything inside a repository starts open, so unfolding one shows all of it. A
+folder or a Submodules row is not a repository: clicking one opens or folds it, and
+chooses nothing. Right-clicking a Submodules row offers to bring every submodule
+listed under it to the latest master -- see `git_assistant.submodule_update`.
 
 Each row names the branch that repository is on, after the name and in its own
 colour. It is the fact you need before you act on a repository and the one this
@@ -35,10 +38,11 @@ makes you check somewhere else first.
 from __future__ import annotations
 
 import os
+from contextlib import contextmanager
 from pathlib import Path
 
 from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QColor, QPalette
+from PyQt6.QtGui import QColor, QIcon, QPalette
 from PyQt6.QtWidgets import (
     QApplication,
     QLabel,
@@ -62,6 +66,8 @@ ALL_GROUP = "All"
 
 ADD_FAVORITE = "Add to Favorites"
 REMOVE_FAVORITE = "Remove from Favorites"
+#: On a Submodules row's menu.
+UPDATE_SUBMODULES = "Update submodules to latest master"
 
 #: On every group's title, because a right-click is not something a list says
 #: it answers to.
@@ -92,6 +98,11 @@ DIRECTORY_KIND = "directory"
 
 #: The row a repository's submodules are listed under.
 SUBMODULES = "Submodules"
+
+#: The icons of folder and Submodules rows, fetched once. The style fetches each from
+#: the shell -- ten milliseconds a time, measured on Windows 11 -- and every tab builds
+#: its list again whenever it is shown.
+_ICONS: dict[QStyle.StandardPixmap, QIcon] = {}
 
 #: Space between a repository's name and its branch. Wide enough that the two
 #: read as two things; the colour does the rest.
@@ -241,6 +252,10 @@ class RepoPicker(QWidget):
     #: because which repository is selected has not changed.
     branchesChanged = pyqtSignal()  # noqa: N815 - Qt signal naming
 
+    #: The submodules of the repository named were fetched and switched: whatever a
+    #: tab shows of it or of them was read before. Emitted after `branchesChanged`.
+    submodulesUpdated = pyqtSignal(str)  # noqa: N815 - Qt signal naming
+
     def __init__(self, settings: Settings, parent=None) -> None:
         super().__init__(parent)
         self.settings = settings
@@ -251,6 +266,10 @@ class RepoPicker(QWidget):
         self._opened: dict[str, bool] = {}
         #: True while the list opens and folds rows itself, which is not the user.
         self._arranging = False
+        #: Each repository's branch while rows are made, so one listed three times --
+        #: a favorite used recently, with its submodules -- is read once. None between
+        #: builds: the next one reads again, for a checkout made in the meantime.
+        self._branches: dict[str, str] | None = None
 
         self.filter_edit = QLineEdit()
         self.filter_edit.setPlaceholderText("Filter repositories...")
@@ -343,16 +362,28 @@ class RepoPicker(QWidget):
         **Favorites** and **Recently Used** as well as under **All** -- and half
         an answer on screen is worse than the stale one it replaced.
         """
-        for item in self._items():
-            path = item.data(0, Qt.ItemDataRole.UserRole)
-            if path:
-                self._label_branch(item, path)
+        with self._reading_branches():
+            for item in self._items():
+                path = item.data(0, Qt.ItemDataRole.UserRole)
+                if path:
+                    self._label_branch(item, path)
         self.branchesChanged.emit()
 
-    @staticmethod
-    def _label_branch(item: QTreeWidgetItem, path: str) -> None:
+    @contextmanager
+    def _reading_branches(self):
+        """While rows are labelled: each repository's branch read once, not once a row."""
+        self._branches = {}
+        try:
+            yield
+        finally:
+            self._branches = None
+
+    def _label_branch(self, item: QTreeWidgetItem, path: str) -> None:
         """Note which branch ``path`` is on, for the delegate and the tooltip."""
-        branch = git_ops.head_branch(path)
+        known = self._branches if self._branches is not None else {}
+        if path not in known:
+            known[path] = git_ops.head_branch(path)
+        branch = known[path]
         item.setData(0, BRANCH_ROLE, branch)
         # The branch is elided out of a narrow list before the name is, so the
         # tooltip is where it can always be read in full.
@@ -362,26 +393,29 @@ class RepoPicker(QWidget):
         """Reload from settings (call after repositories are added or removed)."""
         self.repo_list.blockSignals(True)
         self.repo_list.clear()
+        roots = build_repo_tree(self._all_entries())
+        nodes = _by_path(roots)
 
-        favorites = self._favorites_group()
-        if favorites is not None:
-            self.repo_list.addTopLevelItem(favorites)
-            favorites.setExpanded(True)
+        with self._reading_branches():
+            favorites = self._favorites_group(nodes)
+            if favorites is not None:
+                self.repo_list.addTopLevelItem(favorites)
+                favorites.setExpanded(True)
 
-        recent = self._recent_entries()
-        if recent:
-            header = self._make_header(RECENT_GROUP)
-            for entry in recent:
-                # Flat: this is a ranking, not a hierarchy, and a submodule that
-                # was used recently is a row in its own right here.
-                header.addChild(self._make_item(RepoNode(entry)))
-            self.repo_list.addTopLevelItem(header)
-            header.setExpanded(True)
+            recent = self._recent_entries()
+            if recent:
+                header = self._make_header(RECENT_GROUP)
+                for entry in recent:
+                    # A ranking, not a hierarchy: a submodule used recently is a row
+                    # in its own right here, not a reason to list its parent too.
+                    header.addChild(self._make_shortcut(entry, nodes, RECENT_GROUP))
+                self.repo_list.addTopLevelItem(header)
+                header.setExpanded(True)
 
-        everything = self._make_header(ALL_GROUP)
-        self._fill_all(everything)
-        self.repo_list.addTopLevelItem(everything)
-        everything.setExpanded(True)
+            everything = self._make_header(ALL_GROUP)
+            self._fill_all(everything, roots)
+            self.repo_list.addTopLevelItem(everything)
+            everything.setExpanded(True)
 
         # Selected after the rows exist: setCurrentItem does nothing for an item
         # that is not in the tree yet. Under All rather than the shortcut, so
@@ -396,10 +430,10 @@ class RepoPicker(QWidget):
         # Opens and folds every row as it starts, or as it was left by hand.
         self._apply_filter(self.filter_edit.text())
 
-    def _fill_all(self, header: QTreeWidgetItem) -> None:
+    def _fill_all(self, header: QTreeWidgetItem, roots: list[RepoNode]) -> None:
         """Every repository, inside the folder it sits in, by folder name and then name."""
         by_folder: dict[str, tuple[str, list[RepoNode]]] = {}
-        for node in build_repo_tree(self._all_entries()):
+        for node in roots:
             folder = os.path.dirname(os.path.normpath(node.entry.path))
             by_folder.setdefault(norm_path(folder), (folder, []))[1].append(node)
         labels = _folder_labels([folder for folder, _nodes in by_folder.values()])
@@ -407,10 +441,12 @@ class RepoPicker(QWidget):
             by_folder.items(), key=lambda item: labels[item[1][0]].casefold()
         ):
             row = self._make_container(
-                labels[folder], FOLDER_KIND, f"folder:{key}", opened=False, tip=folder
+                labels[folder], FOLDER_KIND, f"{ALL_GROUP}|folder:{key}", opened=False, tip=folder
             )
             for node in sorted(nodes, key=lambda one: _repo_name(one.entry).casefold()):
-                row.addChild(self._make_repo_item(node, _repo_name(node.entry), root=True))
+                row.addChild(
+                    self._make_repo_item(node, _repo_name(node.entry), root=True, group=ALL_GROUP)
+                )
             header.addChild(row)
 
     def _make_container(
@@ -424,32 +460,48 @@ class RepoPicker(QWidget):
         item.setData(0, _OPEN_ROLE, opened)
         item.setToolTip(0, tip)
         item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsSelectable)
-        icon = (
+        pixmap = (
             QStyle.StandardPixmap.SP_DirLinkIcon
             if kind == SUBMODULES_KIND
             else QStyle.StandardPixmap.SP_DirIcon
         )
-        item.setIcon(0, self.style().standardIcon(icon))
+        if pixmap not in _ICONS:
+            _ICONS[pixmap] = self.style().standardIcon(pixmap)
+        item.setIcon(0, _ICONS[pixmap])
         return item
 
-    def _make_repo_item(self, node: RepoNode, name: str, *, root: bool) -> QTreeWidgetItem:
-        """A repository under All, and its submodules in a row of their own beneath it.
+    def _make_repo_item(
+        self, node: RepoNode, name: str, *, root: bool, group: str
+    ) -> QTreeWidgetItem:
+        """A repository, and its submodules in a row of their own beneath it.
 
         Folded when it is a repository of its own with submodules to show; a
         submodule's submodules open, like everything else inside a repository.
+        Remembered open or folded under ``group`` alone: a favorite opened is not
+        its copy under All opened too.
         """
         entry: RepoEntry = node.entry
         item = QTreeWidgetItem([name])
         item.setData(0, Qt.ItemDataRole.UserRole, entry.path)
         item.setData(0, KIND_ROLE, REPO_KIND)
-        item.setData(0, _KEY_ROLE, f"repo:{norm_path(entry.path)}")
+        item.setData(0, _KEY_ROLE, f"{group}|repo:{norm_path(entry.path)}")
         item.setData(0, _OPEN_ROLE, not root)
         self._label_branch(item, entry.path)
         if node.children:
-            item.addChild(self._make_submodules(node))
+            item.addChild(self._make_submodules(node, group))
         return item
 
-    def _make_submodules(self, node: RepoNode) -> QTreeWidgetItem:
+    def _make_shortcut(
+        self, entry: RepoEntry, nodes: dict[str, RepoNode], group: str
+    ) -> QTreeWidgetItem:
+        """A row of Favorites or Recently Used: named with its folder, submodules beneath it."""
+        node = nodes.get(norm_path(entry.path))
+        children = node.children if node is not None else []
+        return self._make_repo_item(
+            RepoNode(entry, children), entry.display(), root=True, group=group
+        )
+
+    def _make_submodules(self, node: RepoNode, group: str) -> QTreeWidgetItem:
         """``Submodules``, and in it each submodule down the directories it is kept in.
 
         Every directory on the way a row of its own, directories before the
@@ -460,9 +512,10 @@ class RepoPicker(QWidget):
         holder = self._make_container(
             SUBMODULES,
             SUBMODULES_KIND,
-            f"submodules:{norm_path(base)}",
+            f"{group}|submodules:{norm_path(base)}",
             opened=True,
-            tip=f"{len(node.children)} submodule(s) of {_repo_name(node.entry)}",
+            tip=f"{len(node.children)} submodule(s) of {_repo_name(node.entry)}.\n"
+            f"Right-click to update them to the latest master.",
         )
         # A directory: its own directories by name, and the submodules in it.
         tree: dict = {"dirs": {}, "repos": []}
@@ -477,12 +530,12 @@ class RepoPicker(QWidget):
             for _key, (name, inner) in sorted(place["dirs"].items()):
                 path = os.path.join(where, name)
                 directory = self._make_container(
-                    name, DIRECTORY_KIND, f"dir:{norm_path(path)}", opened=True, tip=path
+                    name, DIRECTORY_KIND, f"{group}|dir:{norm_path(path)}", opened=True, tip=path
                 )
                 fill(directory, inner, path)
                 item.addChild(directory)
             for name, child in sorted(place["repos"], key=lambda pair: pair[0].casefold()):
-                item.addChild(self._make_repo_item(child, name, root=False))
+                item.addChild(self._make_repo_item(child, name, root=False, group=group))
 
         fill(holder, tree, base)
         return holder
@@ -513,10 +566,14 @@ class RepoPicker(QWidget):
             first = self.repo_list.topLevelItem(0)
             if first is not None and first.text(0) == FAVORITES_GROUP:
                 self.repo_list.takeTopLevelItem(0)
-            group = self._favorites_group()
+            with self._reading_branches():
+                group = self._favorites_group(_by_path(build_repo_tree(self._all_entries())))
             if group is not None:
                 self.repo_list.insertTopLevelItem(0, group)
                 group.setExpanded(True)
+                # Rows open or fold once they are in the list, not before: each
+                # favorite as it starts, or as it was left before this rebuilt it.
+                self._arrange_as_left(self._under(group))
             # The selected row may have been one of the favorites just replaced.
             # Qt moves the selection to a neighbour of its own choosing, and the
             # remembered repository is the one that has to stay selected. The row
@@ -537,8 +594,8 @@ class RepoPicker(QWidget):
         finally:
             self.repo_list.blockSignals(False)
         # Only while there is something typed. With the box empty nothing is
-        # hidden, and filtering folds every row -- including the ones opened by
-        # hand, which this was careful to leave open.
+        # hidden, and filtering lays every row out afresh -- folding any the list
+        # opened itself to show a selection, which this was careful to leave open.
         if self.filter_edit.text().strip():
             self._apply_filter(self.filter_edit.text())
 
@@ -548,7 +605,7 @@ class RepoPicker(QWidget):
             for i in range(self.repo_list.topLevelItemCount())
         ]
 
-    def _favorites_group(self) -> QTreeWidgetItem | None:
+    def _favorites_group(self, nodes: dict[str, RepoNode]) -> QTreeWidgetItem | None:
         """The Favorites group, by name, or None while there are none."""
         by_path = {r.path: r for r in self.settings.repos}
         entries = sorted(
@@ -559,22 +616,58 @@ class RepoPicker(QWidget):
             return None
         header = self._make_header(FAVORITES_GROUP)
         for entry in entries:
-            # Flat, as the recent ones are: a favorite submodule is a row of its
-            # own here rather than a reason to show its parent too.
-            header.addChild(self._make_item(RepoNode(entry)))
+            # As the recent ones are: a favorite submodule is a row of its own here
+            # rather than a reason to show its parent too.
+            header.addChild(self._make_shortcut(entry, nodes, FAVORITES_GROUP))
         return header
 
     def _on_menu(self, point) -> None:
         item = self.repo_list.itemAt(point)
+        if item is not None and item.data(0, KIND_ROLE) == SUBMODULES_KIND:
+            holder = item
+            menu = QMenu(self)
+            menu.addAction(UPDATE_SUBMODULES, lambda: self._update_submodules(holder))
+            menu.exec(self.repo_list.viewport().mapToGlobal(point))
+            return
         path = item.data(0, Qt.ItemDataRole.UserRole) if item is not None else ""
         if not path:
-            return  # a group's title, or the space below the last row
+            return  # a group's title, a folder, or the space below the last row
         menu = QMenu(self)
         if self.settings.is_favorite(path):
             menu.addAction(REMOVE_FAVORITE, lambda: self.set_favorite(path, False))
         else:
             menu.addAction(ADD_FAVORITE, lambda: self.set_favorite(path, True))
         menu.exec(self.repo_list.viewport().mapToGlobal(point))
+
+    # ---- submodules ----------------------------------------------------------
+    def _update_submodules(self, holder: QTreeWidgetItem) -> None:
+        """Offer to bring every submodule under ``holder`` to the latest master.
+
+        What is needed of the row is read before the window opens: a list rebuilt
+        behind a modal window -- by a rescan, say -- takes its rows with it.
+        """
+        # Imported here: every tab has this list, and few of them ever open this.
+        from git_assistant import submodule_update
+        from git_assistant.ui import submodule_update_dialog
+
+        owner = holder.parent()
+        repo = owner.data(0, Qt.ItemDataRole.UserRole) if owner is not None else ""
+        chains = _submodule_chains(holder, repo)
+        if not repo or not chains:
+            return
+        dialog = submodule_update_dialog.SubmoduleUpdateDialog(
+            repo,
+            chains,
+            rules_for=submodule_update.fetch_rules(self.settings),
+            parent=self,
+        )
+        dialog.exec()
+        ran = dialog.ran
+        dialog.deleteLater()
+        if ran:
+            # Most of them are on another branch now, which every row names.
+            self.refresh_branches()
+            self.submodulesUpdated.emit(repo)
 
     def _recent_entries(self) -> list[RepoEntry]:
         """Every repository used, most recent first, skipping any since removed.
@@ -630,15 +723,6 @@ class RepoPicker(QWidget):
 
         return list(rec(parent))
 
-    def _make_item(self, node: RepoNode) -> QTreeWidgetItem:
-        """A row of Favorites or Recently Used: a shortcut, named with its folder."""
-        entry: RepoEntry = node.entry
-        item = QTreeWidgetItem([entry.display()])
-        item.setData(0, Qt.ItemDataRole.UserRole, entry.path)
-        item.setData(0, KIND_ROLE, REPO_KIND)
-        self._label_branch(item, entry.path)
-        return item
-
     def _apply_filter(self, text: str) -> None:
         """Hide repositories whose name does not contain the filter text.
 
@@ -679,11 +763,15 @@ class RepoPicker(QWidget):
             group.setHidden(not any(shown))
             self._arrange(group, True)
         if not needle:
-            for item in self._items():
-                key = item.data(0, _KEY_ROLE)
-                if key and item.childCount():
-                    self._arrange(item, self._opened.get(key, bool(item.data(0, _OPEN_ROLE))))
+            self._arrange_as_left(self._items())
             self._reveal(chosen)
+
+    def _arrange_as_left(self, items) -> None:
+        """Open or fold each of ``items`` as it starts, or as it was left by hand."""
+        for item in items:
+            key = item.data(0, _KEY_ROLE)
+            if key and item.childCount():
+                self._arrange(item, self._opened.get(key, bool(item.data(0, _OPEN_ROLE))))
 
     def _chosen_item(self) -> QTreeWidgetItem | None:
         """The selected repository's row: the tree's current one, or its copy under All."""
@@ -735,6 +823,49 @@ class RepoPicker(QWidget):
 def _repo_name(entry: RepoEntry) -> str:
     """A repository as a folder row lists it: its label, or the folder it is."""
     return entry.label or Path(entry.path).name or entry.path
+
+
+def _submodule_chains(holder: QTreeWidgetItem, repo: str):
+    """Each submodule listed under a Submodules row, and the ones inside it after it.
+
+    Every repository row beneath the row, down through the directories and the
+    Submodules rows of submodules: what is listed under it is what it stands for.
+    One chain per submodule of ``repo``, in the order listed -- the one it is in
+    before each submodule inside it, so none is brought up ahead of its container.
+    Each with the repository it is a submodule of.
+    """
+    from git_assistant.submodule_update import Target
+
+    chains: list[list[Target]] = []
+
+    def walk(item: QTreeWidgetItem, superproject: str, chain: list | None) -> None:
+        for i in range(item.childCount()):
+            child = item.child(i)
+            path = child.data(0, Qt.ItemDataRole.UserRole)
+            if not path:  # a directory, or a submodule's own Submodules row
+                walk(child, superproject, chain)
+                continue
+            target = Target(path, superproject)
+            if chain is None:
+                chains.append([target])
+                walk(child, path, chains[-1])
+            else:
+                chain.append(target)
+                walk(child, path, chain)
+
+    walk(holder, repo, None)
+    return chains
+
+
+def _by_path(roots: list[RepoNode]) -> dict[str, RepoNode]:
+    """Every repository in the tree by `norm_path`: where a shortcut finds its submodules."""
+    found: dict[str, RepoNode] = {}
+    waiting = list(roots)
+    while waiting:
+        node = waiting.pop()
+        found[norm_path(node.entry.path)] = node
+        waiting.extend(node.children)
+    return found
 
 
 def _folder_labels(folders: list[str]) -> dict[str, str]:

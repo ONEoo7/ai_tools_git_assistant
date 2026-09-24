@@ -388,6 +388,14 @@ def _recorded_commits(repo: Path, paths: list[str]) -> dict[str, str]:
     return recorded
 
 
+def recorded_commit(repo: str | Path, path: str) -> str:
+    """The commit ``repo``'s HEAD records for the submodule at ``path``, or ``""``.
+
+    ``path`` from the top of ``repo``, with forward slashes, as .gitmodules has it.
+    """
+    return _recorded_commits(Path(repo), [path]).get(path, "")
+
+
 def submodule_states(repo: str | Path, max_depth: int = 4) -> list[SubmoduleState]:
     """Every submodule of ``repo``, with the commit recorded for it and the one checked out.
 
@@ -540,7 +548,22 @@ def has_uncommitted_changes(repo: str | Path) -> bool:
     return bool(res.ok and res.stdout.strip())
 
 
-def switch_branch(repo: str | Path, name: str) -> GitResult:
+#: Put before a command that changes a checkout, so the submodules inside are left
+#: where they are even with ``submodule.recurse`` set. For a caller that brings each
+#: submodule up itself, after checks of its own: git doing it first, to the commits
+#: the new checkout records, would be a second answer to the same question -- and
+#: would leave behind whatever commits a submodule has on no branch, before anything
+#: had looked.
+_LEAVE_SUBMODULES = ("-c", "submodule.recurse=false")
+
+
+def _leaving(leave_submodules: bool) -> list[str]:
+    return list(_LEAVE_SUBMODULES) if leave_submodules else []
+
+
+def switch_branch(
+    repo: str | Path, name: str, *, leave_submodules: bool = False
+) -> GitResult:
     """Check out an existing local branch.
 
     ``git switch`` rather than ``git checkout``: it only ever means "change
@@ -548,8 +571,114 @@ def switch_branch(repo: str | Path, name: str) -> GitResult:
     request to discard that file's changes. Git refuses the switch by itself
     when carrying the local changes over would overwrite something, and that
     refusal is returned here rather than being worked around.
+
+    ``leave_submodules`` keeps the submodules inside where they are, whatever
+    ``submodule.recurse`` says.
     """
-    return _run(repo, ["switch", name])
+    return _run(repo, [*_leaving(leave_submodules), "switch", name])
+
+
+def track_branch(
+    repo: str | Path, name: str, remote: str, *, leave_submodules: bool = False
+) -> GitResult:
+    """Create local ``name`` from ``remote``'s copy of it, tracking that, and check it out.
+
+    For a branch the repository has never had locally -- ``master`` in a submodule,
+    which is checked out at a commit rather than on a branch. ``--track`` rather
+    than trusting ``branch.autoSetupMerge``: a branch made from the remote's is one
+    that pulls from it, whatever that setting says.
+    """
+    return _run(
+        repo,
+        [*_leaving(leave_submodules), "switch", "--create", name, "--track", f"{remote}/{name}"],
+    )
+
+
+def fast_forward(repo: str | Path, onto: str) -> GitResult:
+    """Move the checked-out branch forward to ``onto``, when that is all it takes.
+
+    ``--ff-only``: a branch with commits of its own that ``onto`` does not have is
+    refused rather than merged. A merge commit is a decision, and not one to make
+    on somebody's behalf. The submodules inside stay where they are whatever
+    ``submodule.recurse`` says: ``git merge`` is not one of the commands it reaches.
+    """
+    return _run(repo, ["merge", "--ff-only", onto])
+
+
+def move_branch(repo: str | Path, name: str, to: str, *, expected: str, why: str) -> GitResult:
+    """Point branch ``name``, which is not checked out, at commit ``to``.
+
+    Only while it is still at ``expected``: git checks that and moves it in one
+    step, so a branch that moved since it was looked at is refused rather than
+    overwritten. For a fast-forward the caller has made sure of -- ``to`` holds
+    every commit ``name`` does -- done before switching to it, so the working tree
+    is rewritten once rather than for the old commit and then again for the new.
+    ``why`` goes into the branch's reflog.
+    """
+    return _run(repo, ["update-ref", "-m", why, f"refs/heads/{name}", to, expected])
+
+
+def resolve_commit(repo: str | Path, rev: str) -> str:
+    """The full hash of the commit ``rev`` names, or ``""`` when it names none."""
+    res = _run(repo, ["rev-parse", "--verify", "--quiet", f"{rev}^{{commit}}"])
+    return res.stdout.strip() if res.ok else ""
+
+
+def ahead_behind(repo: str | Path, branch: str, other: str) -> tuple[int, int] | None:
+    """``(commits branch has that other has not, commits other has that branch has not)``.
+
+    None when git cannot say: either of them missing, or no repository at all.
+    """
+    res = _run(repo, ["rev-list", "--left-right", "--count", f"{branch}...{other}", "--"])
+    counts = res.stdout.split() if res.ok else []
+    if len(counts) != 2 or not all(count.isdigit() for count in counts):
+        return None
+    return int(counts[0]), int(counts[1])
+
+
+def commits_on_no_branch(repo: str | Path, *, kept: tuple[str, ...] = ()) -> int | None:
+    """How many commits only the checked-out one leads to: on no branch, tag or remote.
+
+    What switching away from a detached HEAD leaves behind, reachable from nothing
+    but the reflog -- which git warns about as it does it, and does all the same.
+    ``kept`` are commits that count as safe anyway: the one a superproject records
+    for its submodule, which it can check out again from there. One this repository
+    does not have is passed over rather than failing the question.
+
+    None when git cannot say, which is not the same as none.
+    """
+    res = _run(
+        repo,
+        [
+            "rev-list", "--count", "--ignore-missing", "HEAD",
+            "--not", "--branches", "--remotes", "--tags", *kept, "--",
+        ],
+    )
+    count = res.stdout.strip()
+    return int(count) if res.ok and count.isdigit() else None
+
+
+# ---- stashing ------------------------------------------------------------------------
+def changes_to_stash(repo: str | Path) -> GitResult:
+    """The changes `stash_changes` would put away, a line each: none for a clean one.
+
+    Changed and untracked files. Not ignored ones, and not the submodules inside --
+    git's stash takes neither, and a switch that leaves submodules alone never
+    touches them.
+    """
+    return _run(
+        repo, ["status", "--porcelain", "--untracked-files=normal", "--ignore-submodules=all"]
+    )
+
+
+def stash_changes(repo: str | Path, message: str) -> GitResult:
+    """Put every change away in a new stash called ``message``, untracked files too.
+
+    ``--include-untracked``: a new file is as much somebody's work as an edited
+    one, and a switch of branch either carries it into the other branch or
+    refuses over it. Ignored files stay where they are: build output is not work.
+    """
+    return _run(repo, ["stash", "push", "--include-untracked", "--message", message])
 
 
 # scp-style remote, e.g. git@github.com:ONEoo7/ai_tools.git
@@ -662,6 +791,15 @@ def _push_remote(config: GitConfig, branch: str) -> str:
         if name and name in names:
             return name
     return names[0] if names else ""
+
+
+def pull_remote(repo: str | Path, branch: str) -> str:
+    """The remote ``branch`` is brought up from, or ``""`` for none.
+
+    Found as a push's is: the one it tracks if it tracks one, then ``origin``, then
+    the first there is -- so a branch never checked out here still has an answer.
+    """
+    return _push_remote(read_config(repo), branch)
 
 
 def blocked_by_ownership(repo: str | Path) -> bool:
