@@ -18,7 +18,6 @@ story when the index is lost or torn.
 from __future__ import annotations
 
 import json
-import os
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -35,6 +34,7 @@ from git_assistant.agents.base import (
     Status,
     Table,
 )
+from git_assistant.atomic import write_atomically
 from git_assistant.config import APP_NAME, repo_key
 
 SCHEMA_VERSION = 1
@@ -284,15 +284,24 @@ def _headline(agent_id: str, report: Report) -> dict:
 
 
 def _write_index(directory: Path, runs: list[StoredRun]) -> None:
-    """Rewritten on every run, so it is replaced atomically rather than truncated."""
+    """Rewritten on every run, so it is replaced atomically rather than truncated --
+    waiting out an antivirus or the search indexer holding it open for a moment,
+    which on Windows is enough to refuse the swap. See git_assistant.atomic."""
     payload = {
         "version": SCHEMA_VERSION,
         "repo_path": runs[0].repo_path if runs else "",
         "runs": [r.to_index() for r in runs],
     }
-    tmp = directory / f"{INDEX_FILE}.{uuid.uuid4().hex[:8]}.tmp"
-    tmp.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
-    os.replace(tmp, directory / INDEX_FILE)
+    write_atomically(directory / INDEX_FILE, json.dumps(payload, indent=2, ensure_ascii=False))
+
+
+def _discard_index(directory: Path) -> bool:
+    """Throw the cache away so the next read rebuilds it from the run files."""
+    try:
+        (directory / INDEX_FILE).unlink(missing_ok=True)
+    except OSError:
+        return False
+    return True
 
 
 def record(
@@ -327,16 +336,33 @@ def record(
         existing = _load_index(directory)
         payload = {**run.to_index(), "version": SCHEMA_VERSION, "report": report_to_dict(report)}
         # Compact: this file is read by the program, and the prose inside it is
-        # already long enough without two spaces of indent per line.
-        (directory / f"{run.run_id}.json").write_text(
+        # already long enough without two spaces of indent per line. Whole or not
+        # at all: a half-written run file is a run nobody can open, listed anyway.
+        write_atomically(
+            directory / f"{run.run_id}.json",
             json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
-            encoding="utf-8",
         )
+    except OSError as exc:
+        return None, str(exc)  # nothing reached the disk; the run really is lost
+
+    # Past this line the run file exists, and the run file is the record. The index
+    # is a cache derived from it, so a failure below is not a lost audit and must
+    # not be reported as one.
+    try:
         runs = _dedupe([run, *existing])
         runs = _prune(directory, runs, limit)
         _write_index(directory, runs)
     except OSError as exc:
-        return None, str(exc)
+        # The index on disk no longer describes the directory: it predates this run,
+        # and `_prune` may already have deleted files it still lists. Left alone it
+        # would hide the run just saved -- for good, since a readable index is never
+        # re-derived. Dropping it costs one directory listing.
+        discarded = _discard_index(directory)
+        return run, (
+            f"saved, but the history list could not be written ({exc})"
+            if discarded
+            else f"saved, but the history list is out of date ({exc})"
+        )
     return run, ""
 
 
@@ -379,6 +405,7 @@ def _delete_file(directory: Path, run_id: str) -> bool:
 
 
 def delete_run(run: StoredRun) -> bool:
+    """Forget one run. False while it is still listed: its file could not be deleted."""
     directory = runs_dir(run.repo_path)
     if not _delete_file(directory, run.run_id):
         return False
@@ -386,22 +413,28 @@ def delete_run(run: StoredRun) -> bool:
     try:
         _write_index(directory, remaining)
     except OSError:
-        return False
+        # Its file is gone, and an index still listing it would list a run nobody
+        # can open. Without the index, the next read lists the files that are there.
+        return _discard_index(directory)
     return True
 
 
 def set_pinned(run: StoredRun, pinned: bool) -> bool:
-    """Pin a run so the retention cap never removes it (the baseline to beat)."""
+    """Pin a run so the retention cap never removes it (the baseline to beat).
+
+    False when it could not be saved, and ``run`` is then as it was: a pin the index
+    does not have must not be shown as one.
+    """
     directory = runs_dir(run.repo_path)
     runs = _load_index(directory)
     for stored in runs:
         if stored.run_id == run.run_id:
             stored.pinned = pinned
-            run.pinned = pinned
     try:
         _write_index(directory, runs)
     except OSError:
         return False
+    run.pinned = pinned
     return True
 
 

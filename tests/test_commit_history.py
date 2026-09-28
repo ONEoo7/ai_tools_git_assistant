@@ -1,8 +1,10 @@
 """Generated commit messages, kept so regenerating cannot lose a better one."""
 
+import os
+
 import pytest
 
-from git_assistant import commit_history
+from git_assistant import atomic, commit_history
 from git_assistant.commit_generator import GenerationResult
 
 
@@ -103,7 +105,7 @@ def test_the_message_that_became_a_commit_is_marked():
 def test_marking_one_message_does_not_mark_the_others():
     first, _ = _record(message="feat: one")
     _record(message="feat: two")
-    commit_history.mark_committed(first)
+    assert commit_history.mark_committed(first) is True
 
     committed = [r.subject() for r in commit_history.list_runs("/x/demo") if r.committed]
     assert committed == ["feat: one"]
@@ -302,3 +304,84 @@ def test_a_transcript_that_cannot_be_written_does_not_lose_the_message(monkeypat
     assert stored is not None and problem == ""
     assert commit_history.list_runs("/x/demo")[0].message == result.message
     assert commit_history.load_calls(stored) == []
+
+
+# ---- a file held open by another program --------------------------------------------
+# On Windows the swap that saves the list fails while an antivirus, the search indexer
+# or a second copy of the application has the file open. It clears in milliseconds.
+# This is how a message marked as committed was lost, once, with nothing said.
+class Held:
+    """An `os.replace` refused the first ``refusals`` times. Holds the real one."""
+
+    def __init__(self, refusals):
+        self.refusals = refusals
+        self.calls = 0
+        self._real = os.replace
+
+    def __call__(self, src, dst):
+        self.calls += 1
+        if self.calls <= self.refusals:
+            raise PermissionError(13, "Access is denied")
+        return self._real(src, dst)
+
+
+@pytest.fixture
+def no_waiting(monkeypatch):
+    monkeypatch.setattr(atomic, "sleep", lambda _seconds: None)
+
+
+def test_a_mark_is_saved_when_the_file_is_held_open_for_a_moment(monkeypatch, no_waiting):
+    first, _ = _record(message="feat: one")
+    _record(message="feat: two")
+    held = Held(refusals=1)
+    monkeypatch.setattr(os, "replace", held)
+
+    assert commit_history.mark_committed(first) is True
+
+    committed = [r.subject() for r in commit_history.list_runs("/x/demo") if r.committed]
+    assert committed == ["feat: one"] and held.calls == 2
+
+
+def test_a_change_that_could_not_be_saved_says_so_and_leaves_everything_as_it_was(
+    monkeypatch, no_waiting
+):
+    stored, _ = _record()
+    monkeypatch.setattr(os, "replace", Held(refusals=99))
+
+    assert commit_history.mark_committed(stored) is False
+    assert commit_history.set_pinned(stored, True) is False
+    assert commit_history.delete_run(stored) is False
+
+    # The caller's copy is what the file says: no mark, no pin that is not on disk.
+    assert (stored.committed, stored.pinned) == (False, False)
+    (back,) = commit_history.list_runs("/x/demo")
+    assert (back.committed, back.pinned) == (False, False)
+    assert list(commit_history.runs_root().rglob("*.tmp")) == []
+
+
+def test_a_message_that_could_not_be_recorded_says_why(monkeypatch, no_waiting):
+    monkeypatch.setattr(os, "replace", Held(refusals=99))
+
+    stored, problem = _record()
+
+    assert stored is None and "Access is denied" in problem
+
+
+def test_a_transcript_held_open_for_a_moment_is_kept_too(monkeypatch, no_waiting):
+    """The calls behind a message go through the same swap, and wait the same way."""
+    result = _result()
+    result.calls = [_call(1)]
+    real, refused = os.replace, []
+
+    def calls_file_held_once(src, dst):
+        if f"{os.sep}{commit_history.CALLS_DIR}{os.sep}" in str(dst) and not refused:
+            refused.append(dst)
+            raise PermissionError(13, "Access is denied")
+        return real(src, dst)
+
+    monkeypatch.setattr(os, "replace", calls_file_held_once)
+
+    stored, problem = commit_history.record("/x/demo", result)
+
+    assert problem == "" and refused
+    assert [c.index for c in commit_history.load_calls(stored)] == [1]

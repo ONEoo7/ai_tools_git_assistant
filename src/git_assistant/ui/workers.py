@@ -46,11 +46,13 @@ class GeneratorWorker(QObject):
     finished = pyqtSignal(object)  # GenerationResult
     error = pyqtSignal(str)
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, *, names_only: bool = False) -> None:
         super().__init__()
         # What to send is the repository's answer; who to send it to is the
         # user's. See git_assistant.repo_config.Bound.
         self._settings = repo_config.bind(settings, settings.active_repo)
+        #: Send only the names of the changed files: the box on the dialog before it.
+        self._names_only = names_only
         self._cancelled = False
 
     def cancel(self) -> None:
@@ -73,6 +75,7 @@ class GeneratorWorker(QObject):
             result: GenerationResult = generator.generate(
                 progress=self.progress.emit,
                 is_cancelled=lambda: self._cancelled,
+                names_only=self._names_only,
             )
             result.calls = list(recorder.calls)
             self.finished.emit(result)

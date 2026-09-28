@@ -1046,3 +1046,76 @@ def test_an_unjudged_run_says_nothing_about_scores(qapp, with_repo, staged):
 
     assert panel._record_scores(_run()) == []
     assert leaderboard.load().rows == []
+
+
+# ---- a history that could not be saved ------------------------------------------------
+def _warnings(monkeypatch):
+    shown = []
+    monkeypatch.setattr(
+        "git_assistant.ui.review_panel.QMessageBox.warning",
+        lambda parent, title, text, *a, **k: shown.append((title, text)),
+    )
+    return shown
+
+
+def _held(*_args):
+    raise PermissionError(13, "Access is denied")
+
+
+def test_a_pin_that_could_not_be_saved_is_said_and_not_shown(
+    qapp, with_repo, staged, monkeypatch
+):
+    """For as long as another program holds the index: the retries run out, and say so."""
+    import os
+
+    from git_assistant import atomic
+
+    stored, _ = history.record(_run())
+    panel = ReviewPanel(with_repo)
+    shown = _warnings(monkeypatch)
+    monkeypatch.setattr(atomic, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(os, "replace", _held)
+
+    panel._on_pin(stored, True)
+
+    ((title, text),) = shown
+    assert "could not be pinned" in text
+    assert str(history.runs_dir("/x/demo") / history.INDEX_FILE) in text
+    assert not history.list_runs("/x/demo")[0].pinned and not stored.pinned
+
+
+def test_reviews_that_could_not_be_deleted_are_said_and_kept(
+    qapp, with_repo, staged, monkeypatch
+):
+    history.record(_run())
+    history.record(_later_run())
+    panel = ReviewPanel(with_repo)
+    panel.runs_tree.selectAll()
+    stuck = panel._selected_runs()[0].run_id
+    _confirm(monkeypatch)
+    shown = _warnings(monkeypatch)
+    real = history.delete_run
+    monkeypatch.setattr(
+        history, "delete_run", lambda stored: False if stored.run_id == stuck else real(stored)
+    )
+
+    panel._on_delete_run()
+
+    ((title, text),) = shown
+    assert "1 of the 2 review(s) could not be deleted" in text
+    assert [r.run_id for r in history.list_runs("/x/demo")] == [stuck]
+    assert panel.runs_tree.topLevelItemCount() == 1
+
+
+def test_reviews_that_could_not_be_cleared_are_said(qapp, with_repo, staged, monkeypatch):
+    history.record(_run())
+    panel = ReviewPanel(with_repo)
+    _confirm(monkeypatch)
+    shown = _warnings(monkeypatch)
+    monkeypatch.setattr(history, "clear_repo", lambda repo: False)
+
+    panel._on_clear_history()
+
+    ((title, text),) = shown
+    assert "could not be cleared" in text
+    assert panel.runs_tree.topLevelItemCount() == 1

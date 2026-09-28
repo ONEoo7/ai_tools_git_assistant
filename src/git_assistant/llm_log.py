@@ -23,6 +23,7 @@ from git_assistant.tokenizer import estimate_tokens
 #: What a call was for. Phases are named, not numbered, because a run's shape
 #: depends on the diff: one call, or fifteen.
 SINGLE = "single-shot"
+NAMES = "from file names only"
 MAP = "summarizing a chunk"
 REDUCE = "condensing notes"
 FINAL = "writing the message"

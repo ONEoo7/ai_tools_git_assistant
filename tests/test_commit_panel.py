@@ -1484,3 +1484,212 @@ def test_the_columns_are_fitted_until_then(qapp, settings, tmp_path, monkeypatch
     panel._populate_files([_coverage(long_path, "sent", ["x\n"] * 2, set())])
 
     assert panel.file_list.columnWidth(0) > narrow
+
+
+# ---- sending only the names of the files --------------------------------------------
+def _panel_with_a_staged_file(settings, tmp_path):
+    panel = _panel_with_repo(settings, tmp_path)
+    repo = tmp_path / "repo"
+    (repo / "app.py").write_text("print('hi')\n", encoding="utf-8")
+    _run_git(repo, "add", "app.py")
+    return panel
+
+
+def _start_answered(monkeypatch, panel, answer):
+    """Press Generate with the dialog answered by ``answer(priced)``; the worker made."""
+    monkeypatch.setattr(
+        "git_assistant.ui.preview_dialog.confirm", lambda parent, priced: answer(priced)
+    )
+    started = []
+    monkeypatch.setattr(
+        "git_assistant.ui.preview_dialog.run_worker", lambda w: started.append(w)
+    )
+    panel._start()
+    return started[0] if started else None
+
+
+def test_the_box_left_ticked_sends_only_the_names(qapp, settings, tmp_path, monkeypatch):
+    panel = _panel_with_a_staged_file(settings, tmp_path)
+
+    def tick(priced):
+        assert priced.names_only is not None  # on offer, with its own figure
+        priced.only_names = True
+        return True
+
+    assert _start_answered(monkeypatch, panel, tick)._names_only is True
+
+
+def test_the_box_as_it_starts_is_what_the_run_does(qapp, settings, tmp_path, monkeypatch):
+    from git_assistant import estimate
+
+    panel = _panel_with_a_staged_file(settings, tmp_path)
+    assert _start_answered(monkeypatch, panel, lambda priced: True)._names_only is False
+
+    monkeypatch.setattr(estimate, "NAMES_ONLY_ABOVE", 1)  # a change "over" it
+    assert _start_answered(monkeypatch, panel, lambda priced: True)._names_only is True
+
+
+def test_a_run_from_names_says_so_of_every_file_and_not_as_a_warning(qapp, settings):
+    from PyQt6.QtCore import Qt
+    from PyQt6.QtGui import QColor
+
+    from git_assistant.commit_generator import FileCoverage
+
+    panel = CommitPanel(settings, auto_start=False)
+    named = FileCoverage(path="src/app.py", lines=["+a\n", "+b\n"], omitted={0, 1}, reason="named")
+    noise = FileCoverage(
+        path="uv.lock", lines=["x\n"], omitted={0}, reason="filtered", detail="*.lock"
+    )
+
+    panel._populate_files([named, noise])
+
+    rows = {
+        panel.file_list.topLevelItem(i).text(0): panel.file_list.topLevelItem(i)
+        for i in range(panel.file_list.topLevelItemCount())
+    }
+    assert rows["src/app.py"].text(1) == "name only - its changes were not sent"
+    assert rows["src/app.py"].foreground(1).color() == QColor(Qt.GlobalColor.darkYellow)
+    assert rows["uv.lock"].text(1) == "ignored: *.lock"
+    assert "only the names of 1 were sent" in panel.files_label.text()
+
+
+# ---- a list of messages that could not be saved -------------------------------------
+def _warnings(monkeypatch):
+    shown = []
+    monkeypatch.setattr(
+        QMessageBox,
+        "warning",
+        staticmethod(lambda parent, title, text, *a, **k: shown.append((title, text))),
+    )
+    return shown
+
+
+def _answer_yes(monkeypatch):
+    monkeypatch.setattr(
+        QMessageBox, "question", staticmethod(lambda *a, **k: QMessageBox.StandardButton.Yes)
+    )
+
+
+def _recorded(panel, message="feat: kept"):
+    stored, problem = commit_history.record(panel._current_repo_path(), _result(message))
+    assert problem == ""
+    panel._refresh_history(select=stored)
+    return stored
+
+
+def _held(*_args):
+    raise PermissionError(13, "Access is denied")
+
+
+def test_a_pin_that_could_not_be_saved_is_said_and_not_shown(
+    qapp, settings, tmp_path, monkeypatch
+):
+    """For as long as another program holds the file: the retries run out, and say so."""
+    import os
+
+    from git_assistant import atomic
+
+    panel = _panel_with_repo(settings, tmp_path)
+    stored = _recorded(panel)
+    shown = _warnings(monkeypatch)
+    monkeypatch.setattr(atomic, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(os, "replace", _held)
+
+    panel._on_pin(stored, True)
+
+    ((title, text),) = shown
+    assert "could not be pinned" in text
+    assert str(commit_history.runs_path(panel._current_repo_path())) in text
+    assert not commit_history.list_runs(panel._current_repo_path())[0].pinned
+    assert "📌" not in panel.runs_tree.topLevelItem(0).text(0)
+
+
+def test_messages_that_could_not_be_deleted_are_said_and_kept(
+    qapp, settings, tmp_path, monkeypatch
+):
+    panel = _panel_with_repo(settings, tmp_path)
+    _recorded(panel, "feat: one")
+    _recorded(panel, "feat: two")
+    _select_all_runs(panel)
+    _answer_yes(monkeypatch)
+    shown = _warnings(monkeypatch)
+    real = commit_history.delete_run
+    monkeypatch.setattr(
+        commit_history,
+        "delete_run",
+        lambda stored: False if stored.subject() == "feat: one" else real(stored),
+    )
+
+    panel._on_delete_run()
+
+    ((title, text),) = shown
+    assert "1 of the 2 message(s) could not be deleted" in text
+    listed = [r.subject() for r in commit_history.list_runs(panel._current_repo_path())]
+    assert listed == ["feat: one"]
+
+
+def test_a_list_that_could_not_be_cleared_is_said_and_left(
+    qapp, settings, tmp_path, monkeypatch
+):
+    panel = _panel_with_repo(settings, tmp_path)
+    _recorded(panel)
+    _answer_yes(monkeypatch)
+    shown = _warnings(monkeypatch)
+    monkeypatch.setattr(commit_history, "clear_repo", lambda repo: False)
+
+    panel._on_clear_history()
+
+    ((title, text),) = shown
+    assert "could not be cleared" in text
+    assert panel.runs_tree.topLevelItemCount() == 1
+
+
+def test_a_commit_whose_mark_could_not_be_saved_is_still_said_to_be_made(
+    qapp, settings, tmp_path, monkeypatch
+):
+    from git_assistant.ui import history_pane
+
+    monkeypatch.setattr(history_pane, "run_worker", lambda worker: worker.run())
+    repo = _repo_with_branches(tmp_path)
+    (repo / "b.txt").write_text("b\n", encoding="utf-8")
+    _run_git(repo, "add", "b.txt")
+    panel = _panel_for(settings, repo)
+    panel._shown_run = _recorded(panel, "add b")
+    panel.editor.setPlainText("add b")
+    _answer_yes(monkeypatch)
+    informed = []
+    monkeypatch.setattr(QMessageBox, "information", staticmethod(lambda *a, **k: informed.append(a)))
+    shown = _warnings(monkeypatch)
+    monkeypatch.setattr(commit_history, "mark_committed", lambda stored: False)
+
+    panel._on_commit()
+
+    ((title, text),) = shown
+    assert title == "Committed" and "could not be marked as the committed one" in text
+    assert informed == []
+    assert _run_git(repo, "log", "-1", "--format=%s").stdout.decode().strip() == "add b"
+    panel.close()
+
+
+def test_a_commit_whose_mark_was_saved_says_only_that_it_was_made(
+    qapp, settings, tmp_path, monkeypatch
+):
+    from git_assistant.ui import history_pane
+
+    monkeypatch.setattr(history_pane, "run_worker", lambda worker: worker.run())
+    repo = _repo_with_branches(tmp_path)
+    (repo / "b.txt").write_text("b\n", encoding="utf-8")
+    _run_git(repo, "add", "b.txt")
+    panel = _panel_for(settings, repo)
+    panel._shown_run = _recorded(panel, "add b")
+    panel.editor.setPlainText("add b")
+    _answer_yes(monkeypatch)
+    informed = []
+    monkeypatch.setattr(QMessageBox, "information", staticmethod(lambda *a, **k: informed.append(a)))
+    shown = _warnings(monkeypatch)
+
+    panel._on_commit()
+
+    assert shown == [] and len(informed) == 1
+    assert commit_history.list_runs(str(repo))[0].committed
+    panel.close()

@@ -57,6 +57,7 @@ from git_assistant.ui.staging_dialog import StagingDialog, diff_colours
 from git_assistant.ui import side_panel as side_panel_mod
 from git_assistant.ui import theme
 from git_assistant.ui.side_panel import SidePanel
+from git_assistant.ui.unsaved import history_not_saved
 from git_assistant.ui.workers import (
     FunctionWorker,
     GeneratorWorker,
@@ -170,6 +171,8 @@ def _why(cov: FileCoverage) -> str:
     sent = total - cov.omitted_count
     if cov.reason == "staged":
         return "to be sent"
+    if cov.reason == "named":
+        return "name only - its changes were not sent"
     if cov.reason == "filtered":
         if cov.detail == BINARY:
             return "binary - git produced no diff text"
@@ -847,15 +850,17 @@ class CommitPanel(QWidget):
         if self._before_generate is not None:
             # Pick up any settings edited in sibling tabs but not yet saved.
             self._before_generate()
-        # What this is about to send, while it can still be declined.
-        if not confirm(self, estimate.for_commit(self.bound())):
+        # What this is about to send, while it can still be declined -- and, for a
+        # change too large to be worth sending whole, whether to send only names.
+        priced = estimate.for_commit(self.bound())
+        if not confirm(self, priced):
             return
         self._set_busy(True)
         self.regen_btn.setText("Regenerate")
         self.progress.setText("Starting...")
         self.status.setText("")
         self._reset_calls()  # these belong to the run about to start
-        worker = GeneratorWorker(self.settings)
+        worker = GeneratorWorker(self.settings, names_only=priced.only_names)
         worker.progress.connect(self.progress.setText)
         worker.call.connect(self._on_call)
         worker.finished.connect(self._on_finished)
@@ -1068,11 +1073,18 @@ class CommitPanel(QWidget):
             != QMessageBox.StandardButton.Yes
         ):
             return
+        kept = []
         for stored in chosen:
-            commit_history.delete_run(stored)
-            if self._shown_run is not None and stored.run_id == self._shown_run.run_id:
+            if not commit_history.delete_run(stored):
+                kept.append(stored)
+            elif self._shown_run is not None and stored.run_id == self._shown_run.run_id:
                 self._shown_run = None
         self._refresh_history()
+        if kept:
+            self._history_not_saved(
+                f"{len(kept)} of the {len(chosen)} message(s) could not be deleted, "
+                "and are still in the list."
+            )
 
     def _on_runs_menu(self, point) -> None:
         chosen = self._selected_runs()
@@ -1092,8 +1104,12 @@ class CommitPanel(QWidget):
         menu.exec(self.runs_tree.viewport().mapToGlobal(point))
 
     def _on_pin(self, stored, pinned: bool) -> None:
-        commit_history.set_pinned(stored, pinned)
+        saved = commit_history.set_pinned(stored, pinned)
         self._refresh_history(select=stored)
+        if not saved:
+            self._history_not_saved(
+                f"The message could not be {'pinned' if pinned else 'unpinned'}."
+            )
 
     def _on_clear_history(self) -> None:
         repo = self._current_repo_path()
@@ -1109,9 +1125,25 @@ class CommitPanel(QWidget):
             )
             == QMessageBox.StandardButton.Yes
         ):
-            commit_history.clear_repo(repo)
+            if not commit_history.clear_repo(repo):
+                self._history_not_saved("The messages could not be cleared.")
+                return
             self._shown_run = None
             self._refresh_history()
+
+    def _history_not_saved(self, what: str) -> None:
+        """Say that a change to the list of generated messages did not reach the disk.
+
+        Said rather than swallowed: the list is read back from the file, so a change
+        that was not saved simply is not there -- and a click that silently did
+        nothing is worse than one that says why.
+        """
+        history_not_saved(
+            self,
+            what,
+            listing="generated messages",
+            where=commit_history.runs_path(self._current_repo_path()),
+        )
 
     # ---- omitted-content view ---------------------------------------------
     def _populate_files(
@@ -1125,6 +1157,7 @@ class CommitPanel(QWidget):
         incomplete = sum(1 for c in self._coverage if not c.fully_sent)
         summarized = sum(1 for c in self._coverage if c.reason == "summarized")
         excerpted = sum(1 for c in self._coverage if c.reason == "excerpt")
+        named = sum(1 for c in self._coverage if c.reason == "named")
         # Before a run there is nothing to report about what reached the model.
         if staged:
             kept = sum(1 for c in self._coverage if c.reason == "staged")
@@ -1136,6 +1169,13 @@ class CommitPanel(QWidget):
                 notes.append(f"{excerpted} kept by hand")
             note = f", {', '.join(notes)}" if notes else ""
             self.files_label.setText(f"Staged files ({kept}){note}")
+        elif named:
+            # Everything "omitted", and by request: not the warning the count below
+            # would read as.
+            self.files_label.setText(
+                f"Staged files ({len(self._coverage)}) - only the names of {named} "
+                "were sent, as asked; none of their changes"
+            )
         elif total_omitted:
             self.files_label.setText(
                 f"Staged files ({len(self._coverage)}) - {incomplete} with omitted "
@@ -1162,9 +1202,10 @@ class CommitPanel(QWidget):
             item.setToolTip(0, cov.path + hints.get(cov.reason, ""))
             item.setToolTip(1, item.text(1))
             # An excerpt is not a warning: red is for content that went missing,
-            # and this is content that arrived where none did before.
+            # and this is content that arrived where none did before. Nor is a
+            # name sent alone, which is what was asked for.
             colour = None
-            if cov.reason in ("excerpt", "summarized"):
+            if cov.reason in ("excerpt", "summarized", "named"):
                 colour = Qt.GlobalColor.darkYellow
             elif cov.omitted_count:
                 colour = Qt.GlobalColor.red
@@ -1403,15 +1444,26 @@ class CommitPanel(QWidget):
         if result.ok:
             # Which of twenty stored messages is the one that shipped is the
             # first thing asked of the list; record it while we know.
+            marked = True
             if self._shown_run is not None and message == self._shown_run.message.strip():
-                commit_history.mark_committed(self._shown_run)
+                marked = commit_history.mark_committed(self._shown_run)
                 self._refresh_history(select=self._shown_run)
             # The new commit on the graph, and nothing staged any more.
             self._load_staged_files()
             self.history.show_repo(repo.path)
-            QMessageBox.information(
-                self, "Committed", result.stdout.strip() or "Commit created."
-            )
+            done = result.stdout.strip() or "Commit created."
+            if marked:
+                QMessageBox.information(self, "Committed", done)
+            else:
+                # The commit is made either way; only the list's note of it is not.
+                where = commit_history.runs_path(repo.path)
+                QMessageBox.warning(
+                    self,
+                    "Committed",
+                    f"{done}\n\nIt could not be marked as the committed one in the "
+                    f"list of generated messages: {where} could not be saved. "
+                    "Another program may have had it open.",
+                )
             self.committed.emit()
         else:
             QMessageBox.critical(

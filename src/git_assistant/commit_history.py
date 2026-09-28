@@ -24,7 +24,6 @@ tens of megabytes a repository somewhere nobody looks.
 from __future__ import annotations
 
 import json
-import os
 import uuid
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
@@ -32,6 +31,7 @@ from pathlib import Path
 
 from platformdirs import user_config_dir
 
+from git_assistant.atomic import write_atomically
 from git_assistant.config import APP_NAME, repo_key
 
 SCHEMA_VERSION = 1
@@ -219,11 +219,7 @@ def _write_calls(repo_path: str, run_id: str, calls: list) -> None:
             "made": len(calls),
             "calls": _calls_within_budget(calls),
         }
-        tmp = path.with_name(f"{path.name}.{uuid.uuid4().hex[:8]}.tmp")
-        tmp.write_text(
-            json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8"
-        )
-        os.replace(tmp, path)
+        write_atomically(path, json.dumps(payload, indent=2, ensure_ascii=False))
     except OSError:
         pass
 
@@ -275,7 +271,12 @@ def list_runs(repo_path: str) -> list[StoredMessage]:
 
 # ---- writing ---------------------------------------------------------------------
 def _write(repo_path: str, runs: list[StoredMessage]) -> None:
-    """Replaced, never truncated: an interrupted write must not eat the history."""
+    """Replaced, never truncated: an interrupted write must not eat the history.
+
+    And waited for, while an antivirus or the search indexer has the file open --
+    which on Windows is enough to refuse the swap, and was enough to lose a message
+    marked as committed without a word. See git_assistant.atomic.
+    """
     path = runs_path(repo_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
@@ -283,9 +284,7 @@ def _write(repo_path: str, runs: list[StoredMessage]) -> None:
         "repo_path": repo_path,
         "runs": [asdict(r) for r in runs],
     }
-    tmp = path.with_name(f"{path.name}.{uuid.uuid4().hex[:8]}.tmp")
-    tmp.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
-    os.replace(tmp, path)
+    write_atomically(path, json.dumps(payload, indent=2, ensure_ascii=False))
 
 
 def _prune(runs: list[StoredMessage], limit: int) -> list[StoredMessage]:
@@ -356,16 +355,22 @@ def record(
 
 
 def _update(stored: StoredMessage, **changes) -> bool:
+    """Change one stored message on disk; ``stored`` follows only once it is there.
+
+    False when it could not be written, and ``stored`` is then as it was: a caller
+    showing it must not show a pin, or a commit, that the file does not have.
+    """
     runs = _read(runs_path(stored.repo_path))
     for run in runs:
         if run.run_id == stored.run_id:
             for key, value in changes.items():
                 setattr(run, key, value)
-                setattr(stored, key, value)
     try:
         _write(stored.repo_path, runs)
     except OSError:
         return False
+    for key, value in changes.items():
+        setattr(stored, key, value)
     return True
 
 

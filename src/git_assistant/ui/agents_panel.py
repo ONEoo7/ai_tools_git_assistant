@@ -61,6 +61,7 @@ from git_assistant.ui.repo_pane import INFERENCE_TAB, RepoPane, inference_page
 from git_assistant.ui.repo_picker import RepoPicker
 from git_assistant.ui import side_panel as side_panel_mod
 from git_assistant.ui.side_panel import SidePanel
+from git_assistant.ui.unsaved import history_not_saved
 from git_assistant.ui.workers import AgentWorker, run_worker
 
 NO_REPOS_MESSAGE = "No repositories configured - add one in Repositories."
@@ -787,8 +788,13 @@ class AgentsPanel(QWidget):
                 limit=self.audit_rules().history_limit,
             )
             stored_runs[outcome.agent_id] = stored
-            if problem:
+            if problem and stored is None:
                 notes.append(f"{prefix}not saved to history: {problem}")
+            elif problem:
+                # It *is* saved -- the run file is the record, and only the index
+                # that lists it went wrong. "Not saved" would send someone to run
+                # a five-minute audit again for a report already on disk.
+                notes.append(f"{prefix}{problem}")
             notes += [f"{prefix}{warning}" for warning in report.warnings]
 
         done = [outcome for outcome in runs if outcome.ok]
@@ -983,15 +989,23 @@ class AgentsPanel(QWidget):
             f"Delete {len(chosen)} recorded run(s)? The repository is not touched.",
         ) != QMessageBox.StandardButton.Yes:
             return
-        for run in chosen:
-            history.delete_run(run)
+        kept = [run for run in chosen if not history.delete_run(run)]
         self._refresh_history()
+        if kept:
+            self._history_not_saved(
+                f"{len(kept)} of the {len(chosen)} run(s) could not be deleted, and "
+                "are still in the list."
+            )
 
     def _on_pin_run(self) -> None:
         """Pin a baseline so the retention cap never removes it."""
-        for run in self._selected_runs():
-            history.set_pinned(run, not run.pinned)
+        chosen = self._selected_runs()
+        failed = [run for run in chosen if not history.set_pinned(run, not run.pinned)]
         self._refresh_history()
+        if failed:
+            self._history_not_saved(
+                f"The pin could not be changed on {len(failed)} of the {len(chosen)} run(s)."
+            )
 
     def _on_clear_history(self) -> None:
         repo = self._repo_path()
@@ -1004,8 +1018,22 @@ class AgentsPanel(QWidget):
             "The repository itself is not touched.",
         ) != QMessageBox.StandardButton.Yes:
             return
-        history.clear_repo(repo)
+        cleared = history.clear_repo(repo)
+        # Drawn again either way: a clear that stopped partway has still taken some.
         self._refresh_history()
+        if not cleared:
+            self._history_not_saved(
+                "The history could not be cleared: what is still listed is still there."
+            )
+
+    def _history_not_saved(self, what: str) -> None:
+        """Say that a change to the list of recorded runs did not reach the disk."""
+        history_not_saved(
+            self,
+            what,
+            listing="recorded audits",
+            where=history.runs_dir(self._repo_path()) / history.INDEX_FILE,
+        )
 
     def _on_runs_menu(self, point) -> None:
         chosen = self._selected_runs()

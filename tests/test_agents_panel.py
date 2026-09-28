@@ -1572,3 +1572,111 @@ def test_opening_the_dialog_writes_no_settings(qapp, with_repo):
     SettingsDialog(with_repo)
 
     assert not repo_config.exists(repo_config.Tier.USER)
+
+
+# ---- a history that could not be saved ------------------------------------------------
+def _warnings(monkeypatch):
+    from PyQt6.QtWidgets import QMessageBox
+
+    shown = []
+    monkeypatch.setattr(
+        QMessageBox,
+        "warning",
+        staticmethod(lambda parent, title, text, *a, **k: shown.append((title, text))),
+    )
+    return shown
+
+
+def _answer_yes(monkeypatch):
+    from PyQt6.QtWidgets import QMessageBox
+
+    monkeypatch.setattr(
+        QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes
+    )
+
+
+def _audited(panel, times=1):
+    for _ in range(times):
+        panel._on_finished(
+            _runs(_report_for(repo=panel._repo_path(), agent_id=panel._agent_id()))
+        )
+
+
+def _held(*_args):
+    raise PermissionError(13, "Access is denied")
+
+
+def test_a_pin_that_could_not_be_saved_is_said_and_not_shown(qapp, with_repo, monkeypatch):
+    """For as long as another program holds the index: the retries run out, and say so."""
+    import os
+
+    from git_assistant import atomic
+
+    panel = AgentsPanel(with_repo)
+    _audited(panel)
+    panel.runs_tree.setCurrentItem(panel.runs_tree.topLevelItem(0))
+    shown = _warnings(monkeypatch)
+    monkeypatch.setattr(atomic, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(os, "replace", _held)
+
+    panel._on_pin_run()
+
+    ((title, text),) = shown
+    assert "The pin could not be changed on 1 of the 1 run(s)." in text
+    assert str(history.runs_dir(panel._repo_path()) / history.INDEX_FILE) in text
+    assert not history.list_runs(panel._repo_path())[0].pinned
+
+
+def test_runs_that_could_not_be_deleted_are_said_and_kept(qapp, with_repo, monkeypatch):
+    panel = AgentsPanel(with_repo)
+    _audited(panel, times=2)
+    panel.runs_tree.selectAll()
+    stuck = panel._selected_runs()[0].run_id
+    _answer_yes(monkeypatch)
+    shown = _warnings(monkeypatch)
+    real = history.delete_run
+    monkeypatch.setattr(
+        history, "delete_run", lambda run: False if run.run_id == stuck else real(run)
+    )
+
+    panel._on_delete_run()
+
+    ((title, text),) = shown
+    assert "1 of the 2 run(s) could not be deleted" in text
+    assert [r.run_id for r in history.list_runs(panel._repo_path())] == [stuck]
+    assert panel.runs_tree.topLevelItemCount() == 1
+
+
+def test_a_history_that_could_not_be_cleared_is_said(qapp, with_repo, monkeypatch):
+    panel = AgentsPanel(with_repo)
+    _audited(panel)
+    _answer_yes(monkeypatch)
+    shown = _warnings(monkeypatch)
+    monkeypatch.setattr(history, "clear_repo", lambda repo: False)
+
+    panel._on_clear_history()
+
+    ((title, text),) = shown
+    assert "could not be cleared" in text
+    assert panel.runs_tree.topLevelItemCount() == 1
+
+
+def test_an_audit_saved_but_not_yet_listed_is_not_said_to_be_unsaved(
+    qapp, with_repo, monkeypatch
+):
+    """The run file is on disk: "not saved" would send someone to run it again."""
+    real = history.record
+    monkeypatch.setattr(
+        history,
+        "record",
+        lambda report, **kw: (
+            real(report, **kw)[0],
+            "saved, but the history list could not be written (held)",
+        ),
+    )
+    panel = AgentsPanel(with_repo)
+
+    _audited(panel)
+
+    assert "saved, but the history list could not be written" in panel.status.text()
+    assert "not saved" not in panel.status.text()

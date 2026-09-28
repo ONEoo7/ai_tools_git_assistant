@@ -84,6 +84,24 @@ The map and reduce calls are independent, so they run **in parallel** — four a
 a time by default, `model.parallel_calls`, and never more than the provider's own
 limit allows. `1` is sequential.
 
+## 5. File names only
+
+The dialog that prices a commit message offers **Send only file names**: one call,
+however large the change, carrying the names of the changed files grouped by what
+happened to each — added, deleted, renamed, copied, modified — and none of their
+changes. The model is told that is all it has. The repository's own template is
+used, with the totals line of `--stat` in place of the whole of it, since the rest
+of `--stat` is the same names again.
+
+The box is **ticked to begin with when the changes come to more than 128,000
+tokens**: a map-reduce over a diff that size is dozens of calls, mostly summarising
+lines no message will quote. Its own token count is shown beside the full run's,
+and the headline follows the box, so what is about to be spent is always the run
+the box describes. Names that would not fit even alone are left out from the
+modified files first and counted. Ignored files stay ignored.
+
+After the run, every file in *Staged files* says **name only**.
+
 ## Before it spends anything
 
 Pressing *Generate*, *Review* or *Run* prices the run first: how many calls, and

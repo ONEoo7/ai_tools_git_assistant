@@ -98,3 +98,96 @@ def test_agreeing_runs_it(qapp, monkeypatch):
 
     monkeypatch.setattr(QMessageBox, "exec", press_run)
     assert confirm(None, _estimate()) is True
+
+
+# ---- sending only file names ---------------------------------------------------------
+def _commit_estimate(only_names=False):
+    names = Estimate(
+        feature="Commit message",
+        calls=1,
+        input_tokens=3_412,
+        output_tokens=2_048,
+        model="qwen3.5-4b",
+        provider="lmstudio",
+        lines=["The names of 1,234 file(s), grouped by what happened to each."],
+    )
+    return _estimate(
+        feature="Commit message",
+        calls=15,
+        input_tokens=245_000,
+        output_tokens=7_808,
+        lines=["The diff is larger than the window, so it is summarised in pieces."],
+        names_only=names,
+        only_names=only_names,
+    )
+
+
+def _opened(monkeypatch, act):
+    """``confirm`` with the dialog handed to ``act`` instead of shown."""
+    monkeypatch.setattr(QMessageBox, "exec", lambda box: act(box) or 0)
+
+
+def test_the_run_from_names_is_priced_beside_the_whole_one():
+    text = describe(_commit_estimate())
+
+    assert text.splitlines()[0].startswith("15 call(s), about 245,000 tokens in")
+    assert "Send only file names: 1 call(s), about 3,412 tokens in and 2,048 out" in text
+    assert "The names of 1,234 file(s)" in text
+
+
+def test_ticked_the_headline_is_the_run_that_will_happen():
+    assert describe(_commit_estimate(only_names=True)).splitlines()[0].startswith(
+        "1 call(s), about 3,412 tokens in"
+    )
+
+
+def test_the_box_starts_as_the_estimate_says(qapp, monkeypatch):
+    seen = []
+    _opened(
+        monkeypatch,
+        lambda box: seen.append((box.checkBox().text(), box.checkBox().isChecked(), box.text())),
+    )
+
+    confirm(None, _commit_estimate(only_names=True))
+
+    (text, ticked, headline), = seen
+    assert (text, ticked) == ("Send only file names", True)
+    assert "3,412" in headline
+
+
+def test_ticking_it_moves_the_headline_and_is_what_the_run_does(qapp, monkeypatch):
+    priced = _commit_estimate()
+    headlines = []
+
+    def tick_and_run(box):
+        headlines.append(box.text())
+        box.checkBox().setChecked(True)
+        headlines.append(box.text())
+        box.defaultButton().click()
+
+    _opened(monkeypatch, tick_and_run)
+
+    assert confirm(None, priced) is True
+    assert "245,000" in headlines[0] and "3,412" in headlines[1]
+    assert priced.only_names is True
+
+
+def test_unticking_it_sends_the_changes(qapp, monkeypatch):
+    priced = _commit_estimate(only_names=True)
+
+    def untick_and_run(box):
+        box.checkBox().setChecked(False)
+        box.defaultButton().click()
+
+    _opened(monkeypatch, untick_and_run)
+
+    assert confirm(None, priced) is True and priced.only_names is False
+
+
+def test_a_run_with_nothing_to_choose_has_no_box(qapp, monkeypatch):
+    seen = []
+    _opened(monkeypatch, lambda box: seen.append(box.checkBox()))
+
+    confirm(None, _estimate())
+
+    assert seen == [None]

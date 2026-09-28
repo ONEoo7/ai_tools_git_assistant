@@ -8,6 +8,10 @@ Flow:
    the notes if they themselves overflow ("reduce"), then synthesize the final
    Conventional-Commits message from the notes.
 
+Or, when asked, **only the names** of the changed files: one call however large the
+change, written from what happened to which file rather than from the lines. See
+`names_prompt`.
+
 Rendering avoids ``str.format`` so literal braces in a diff never raise.
 """
 
@@ -20,6 +24,7 @@ from git_assistant import commit_style, git_ops, llm_log, prompts
 from git_assistant.config import Settings
 from git_assistant.diff_strategy import (
     Excerpt,
+    FileDiff,
     build_units_with_coverage,
     drop_reason,
     excerpt_included,
@@ -47,6 +52,24 @@ DEFAULT_CONTEXT_WINDOW = 8192
 MAP_OUTPUT_TOKENS = 384
 MAX_REDUCE_DEPTH = 3
 
+#: The strategy of a run that sent only the names of the changed files.
+NAMES_ONLY = "names only"
+
+#: What the model is told when it is given the names of the changed files instead
+#: of their changes -- so it writes from what it has, rather than guessing at what
+#: it has not.
+NAMES_ONLY_NOTE = (
+    "Only the names of the changed files are given below, grouped by what happened "
+    "to each; their contents were not sent. Write the message from the names alone, "
+    "and do not invent details they do not show."
+)
+
+#: What can happen to a file, in the order a list of names gives them: the rarer and
+#: more telling first, so a list too long for the window loses modified files -- the
+#: many -- before a single addition or deletion.
+ADDED, DELETED, RENAMED, COPIED, MODIFIED = "Added", "Deleted", "Renamed", "Copied", "Modified"
+KINDS = (ADDED, DELETED, RENAMED, COPIED, MODIFIED)
+
 ProgressFn = Callable[[str], None]
 CancelFn = Callable[[], bool]
 
@@ -59,6 +82,9 @@ __all__ = [
     "FileCoverage",
     "GenerationResult",
     "MIN_PARALLEL_CONTEXT",
+    "NAMES_ONLY",
+    "NamesPrompt",
+    "names_prompt",
     "render_template",
 ]
 
@@ -75,6 +101,7 @@ class FileCoverage:
     # "truncated"  - part of the file never reached the model
     # "filtered"   - dropped as noise before the prompt was built
     # "excerpt"    - ignored, but un-ignored by hand: its head was sent
+    # "named"      - only its name was sent, as asked: none of its changes
     reason: str
     #: For a dropped file, which rule dropped it: the glob that matched, or
     #: `diff_strategy.BINARY`. "Omitted" is not something anyone can act on;
@@ -166,6 +193,96 @@ def render_template(template: str, *, branch: str, diffstat: str, diff: str) -> 
         .replace("{diffstat}", diffstat)
         .replace("{diff}", diff)
     )
+
+
+def file_kind(file: FileDiff) -> tuple[str, str]:
+    """What happened to a file -- one of `KINDS` -- and how a list names it.
+
+    Read off git's header for the file, which says so in words: ``new file mode``,
+    ``deleted file mode``, ``rename from``. A renamed or copied file is named with
+    where it came from: ``old/path -> new/path``.
+    """
+    kind, came_from = MODIFIED, ""
+    # The header alone: the changes start at the first hunk, and a file of a hundred
+    # thousand changed lines is not read through to find out it was modified.
+    for line in file.text.split("\n@@", 1)[0].splitlines():
+        if line.startswith("new file mode"):
+            kind = ADDED
+        elif line.startswith("deleted file mode"):
+            kind = DELETED
+        elif line.startswith("rename from "):
+            kind, came_from = RENAMED, line[len("rename from ") :].strip()
+        elif line.startswith("copy from "):
+            kind, came_from = COPIED, line[len("copy from ") :].strip()
+    return kind, f"{came_from} -> {file.path}" if came_from else file.path
+
+
+@dataclass(frozen=True)
+class NamesPrompt:
+    """The one prompt that carries the changed files' names instead of their changes."""
+
+    user: str
+    #: What the call carries, the system message included, as estimated.
+    tokens: int
+    #: How many of the files it names, of how many there were: fewer when the names
+    #: alone would not fit the window.
+    listed: int
+    total: int
+
+
+def names_prompt(
+    template: str, *, branch: str, diffstat: str, files: list[FileDiff], budget: int
+) -> NamesPrompt:
+    """The prompt naming ``files`` instead of showing their changes, within ``budget``.
+
+    The repository's own template, so its rules for a message still hold. Where it
+    wants the changes, the names, grouped by what happened to each (`KINDS`); where
+    it wants git's ``--stat``, only its last line, the totals -- the rest of it is the
+    same list of names again, with the size of each change beside it, and on a change
+    large enough to want this at all that is most of what there is to send.
+
+    Names that would not fit are left out from the end -- modified files first, see
+    `KINDS` -- and the list says how many there were.
+    """
+    named: dict[str, list[str]] = {kind: [] for kind in KINDS}
+    for file in files:
+        kind, name = file_kind(file)
+        named[kind].append(name)
+    lines = diffstat.strip().splitlines()
+    totals = lines[-1].strip() if lines else ""
+    system = estimate_tokens(prompts.COMMIT_SYSTEM)
+
+    def render(kept: int) -> str:
+        blocks, left = [NAMES_ONLY_NOTE], kept
+        for kind in KINDS:
+            if not named[kind]:
+                continue
+            shown = named[kind][: max(0, left)]
+            left -= len(shown)
+            listing = "".join(f"\n  {name}" for name in shown)
+            blocks.append(f"{kind} ({len(named[kind])}):{listing}")
+        if kept < len(files):
+            blocks.append(
+                f"... and {len(files) - kept} more file(s), not named: the list was "
+                "cut to fit."
+            )
+        return render_template(template, branch=branch, diffstat=totals, diff="\n\n".join(blocks))
+
+    user = render(len(files))
+    tokens = system + estimate_tokens(user)
+    if tokens <= budget:
+        return NamesPrompt(user, tokens, len(files), len(files))
+    # Too many names for the window: the most that fit, found by halving -- a score of
+    # counts however many thousand names there are, each of the prompt as it will go.
+    fits, too_many = 0, len(files)
+    while too_many - fits > 1:
+        middle = (fits + too_many) // 2
+        if system + estimate_tokens(render(middle)) <= budget:
+            fits = middle
+        else:
+            too_many = middle
+    user = render(fits)
+    return NamesPrompt(user, system + estimate_tokens(user), fits, len(files))
 
 
 def _noop(_: str) -> None:  # default progress sink
@@ -261,7 +378,9 @@ class CommitGenerator:
         *,
         progress: ProgressFn = _noop,
         is_cancelled: CancelFn = _never,
+        names_only: bool = False,
     ) -> GenerationResult:
+        """Write the message: from the changes, or from ``names_only`` of the files."""
         s = self.settings
         repo = s.active_repo
         if not repo:
@@ -309,6 +428,19 @@ class CommitGenerator:
         context = self._context_window()
         usable = self._usable(context)
         out_tokens = self._reserved_output(context)
+        if names_only:
+            return self._from_names(
+                files,
+                branch=branch,
+                diffstat=diffstat,
+                context=context,
+                usable=usable,
+                out_tokens=out_tokens,
+                dropped=dropped,
+                filtered_coverage=filtered_coverage,
+                progress=progress,
+                is_cancelled=is_cancelled,
+            )
         # Concurrency is bounded by the context: parallel slots share the window.
         self._workers = self.effective_parallel(context)
         # A model the server has not loaded yet cannot take a fan-out; see
@@ -437,6 +569,55 @@ class CommitGenerator:
                 max_tokens=out_tokens,
                 calls_before=1 + self._last_chunk_count,
             ),
+        )
+
+    def _from_names(
+        self,
+        files: list[FileDiff],
+        *,
+        branch: str,
+        diffstat: str,
+        context: int,
+        usable: int,
+        out_tokens: int,
+        dropped: list[str],
+        filtered_coverage: list[FileCoverage],
+        progress: ProgressFn,
+        is_cancelled: CancelFn,
+    ) -> GenerationResult:
+        """One call, carrying the names of the changed files and none of their changes."""
+        named = names_prompt(
+            self._template(), branch=branch, diffstat=diffstat, files=files, budget=usable
+        )
+        cut = (
+            f" ({named.listed} of them named, to fit)" if named.listed < named.total else ""
+        )
+        progress(f"Sending only the names of {named.total} file(s){cut}...")
+        self._check_cancel(is_cancelled)
+        self._phase(llm_log.NAMES)
+        message = self.client.chat(
+            model=self.settings.active_model(),
+            system=prompts.COMMIT_SYSTEM,
+            user=named.user,
+            max_tokens=out_tokens,
+        )
+        coverage = []
+        for file in files:
+            lines = file.text.splitlines(keepends=True)
+            coverage.append(
+                FileCoverage(
+                    path=file.path, lines=lines, omitted=set(range(len(lines))), reason="named"
+                )
+            )
+        return GenerationResult(
+            message=message,
+            strategy=NAMES_ONLY,
+            context_window=context,
+            input_budget=usable,
+            input_tokens=named.tokens,
+            dropped_files=dropped,
+            file_coverage=coverage + filtered_coverage,
+            retry=Retry(system=prompts.COMMIT_SYSTEM, user=named.user, max_tokens=out_tokens),
         )
 
     # ---- parallel execution ------------------------------------------------

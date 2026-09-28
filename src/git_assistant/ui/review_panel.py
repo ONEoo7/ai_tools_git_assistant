@@ -67,6 +67,7 @@ from git_assistant.ui.repo_pane import INFERENCE_TAB, RepoPane, inference_page
 from git_assistant.ui.repo_picker import RepoPicker
 from git_assistant.ui import side_panel as side_panel_mod
 from git_assistant.ui.side_panel import SidePanel
+from git_assistant.ui.unsaved import history_not_saved
 from git_assistant.ui.workers import ReviewWorker, run_worker
 
 NO_REPOS_MESSAGE = "No repositories configured - add one in Repositories."
@@ -1496,9 +1497,13 @@ class ReviewPanel(QWidget):
             != QMessageBox.StandardButton.Yes
         ):
             return
-        for stored in chosen:
-            history.delete_run(stored)
+        kept = [stored for stored in chosen if not history.delete_run(stored)]
         self._refresh_history()
+        if kept:
+            self._history_not_saved(
+                f"{len(kept)} of the {len(chosen)} review(s) could not be deleted, and "
+                "are still in the list."
+            )
 
     def _on_runs_menu(self, point) -> None:
         chosen = self._selected_runs()
@@ -1518,8 +1523,12 @@ class ReviewPanel(QWidget):
         menu.exec(self.runs_tree.viewport().mapToGlobal(point))
 
     def _on_pin(self, stored, pinned: bool) -> None:
-        history.set_pinned(stored, pinned)
+        saved = history.set_pinned(stored, pinned)
         self._refresh_history(select=stored)
+        if not saved:
+            self._history_not_saved(
+                f"The review could not be {'pinned' if pinned else 'unpinned'}."
+            )
 
     def _on_clear_history(self) -> None:
         repo = self._repo_path()
@@ -1535,8 +1544,22 @@ class ReviewPanel(QWidget):
             )
             == QMessageBox.StandardButton.Yes
         ):
-            history.clear_repo(repo)
+            cleared = history.clear_repo(repo)
+            # Drawn again either way: a clear that stopped partway has still taken some.
             self._refresh_history()
+            if not cleared:
+                self._history_not_saved(
+                    "The reviews could not be cleared: what is still listed is still there."
+                )
+
+    def _history_not_saved(self, what: str) -> None:
+        """Say that a change to the list of recorded reviews did not reach the disk."""
+        history_not_saved(
+            self,
+            what,
+            listing="recorded reviews",
+            where=history.runs_dir(self._repo_path()) / history.INDEX_FILE,
+        )
 
 
 # ---- text -----------------------------------------------------------------------------

@@ -8,7 +8,8 @@ rather than afterwards in the usage table.
 The arithmetic mirrors what each feature really does, and where it can it calls
 the same helpers rather than a copy of them: the reviewer's own ``build_prompt``
 sizes a review, and the commit estimate packs chunks with the same
-``build_units_with_coverage``/``pack_units`` the generator uses. What it must
+``build_units_with_coverage``/``pack_units`` the generator uses -- and prices the
+names-only alternative from the generator's own ``names_prompt``. What it must
 not do is contact the provider -- the dialog has to appear the moment the button
 is pressed -- so the context window is the configured one rather than the
 model's reported one, which is the only thing here that can be wrong.
@@ -18,10 +19,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from git_assistant import git_ops, prompts, usage
+from git_assistant import commit_style, git_ops, prompts, usage
 from git_assistant.commit_generator import (
     DEFAULT_CONTEXT_WINDOW,
     MAP_OUTPUT_TOKENS,
+    names_prompt,
     render_template,
 )
 from git_assistant.config import Settings
@@ -34,6 +36,12 @@ from git_assistant.diff_strategy import (
 )
 from git_assistant.parallel import effective_parallel
 from git_assistant.tokenizer import estimate_tokens, input_budget, reserved_output
+
+#: Changes larger than this many tokens are written up from their files' names unless
+#: the box is unticked. The whole of a diff that size is a long map-reduce -- dozens of
+#: calls, most of them summarising lines no commit message will ever quote -- and
+#: what happened to which file is usually most of what the message says anyway.
+NAMES_ONLY_ABOVE = 128_000
 
 
 @dataclass
@@ -58,10 +66,20 @@ class Estimate:
     input_cap: int = 0
     #: Anything the user should know before agreeing (nothing marked, no rules).
     problem: str = ""
+    #: The same run sending only the names of the changed files, where that is on
+    #: offer: a commit message, whose diff can be far more than is worth sending.
+    names_only: Estimate | None = None
+    #: Whether only the names go: what the dialog's box starts at, and what it was
+    #: left at when the run was agreed to.
+    only_names: bool = False
 
     @property
     def total(self) -> int:
         return self.input_tokens + self.output_tokens
+
+    def chosen(self) -> Estimate:
+        """The run that will happen: this one, or the one sending only names."""
+        return self.names_only if self.only_names and self.names_only is not None else self
 
     def summary(self) -> str:
         if self.input_unknown:
@@ -130,11 +148,25 @@ def for_commit(settings: Settings) -> Estimate:
     context = _context(settings)
     answer = reserved_output(context, settings.safety_margin)
     usable = input_budget(context, answer)
-    template = settings.template_for_repo(repo)
+    # With the length rules after it, as the generator sends it.
+    template = commit_style.with_rules(
+        settings.template_for_repo(repo), commit_style.Limits.of(settings)
+    )
     full = render_template(
         template, branch=branch, diffstat=diffstat, diff="\n".join(f.text for f in files)
     )
     full_tokens = estimate_tokens(prompts.COMMIT_SYSTEM) + estimate_tokens(full)
+    out.names_only = _names_only(
+        out,
+        template,
+        branch=branch,
+        diffstat=diffstat,
+        files=files,
+        usable=usable,
+        answer=answer,
+        full_tokens=full_tokens,
+    )
+    out.only_names = full_tokens > NAMES_ONLY_ABOVE
 
     if full_tokens <= usable:
         out.calls = 1
@@ -175,6 +207,50 @@ def for_commit(settings: Settings) -> Estimate:
         f"One final call to write the message: about {final_in:,} in, "
         f"up to {answer:,} out.",
     ] + excerpted
+    return out
+
+
+def _names_only(
+    whole: Estimate,
+    template: str,
+    *,
+    branch: str,
+    diffstat: str,
+    files: list,
+    usable: int,
+    answer: int,
+    full_tokens: int,
+) -> Estimate:
+    """The commit run sending only the names of ``files``: one call, however many.
+
+    Priced from the very prompt the generator would send -- `names_prompt` -- so the
+    figure beside the box is what ticking it spends, to the token of the estimate.
+    """
+    named = names_prompt(
+        template, branch=branch, diffstat=diffstat, files=files, budget=usable
+    )
+    out = Estimate(
+        feature=whole.feature,
+        calls=1,
+        input_tokens=named.tokens,
+        output_tokens=answer,
+        model=whole.model,
+        provider=whole.provider,
+    )
+    out.lines = [
+        f"The names of {named.total:,} file(s), grouped by what happened to each: "
+        f"{named.tokens:,} tokens, and none of their changes."
+    ]
+    if named.listed < named.total:
+        out.lines.append(
+            f"Even the names do not all fit: the first {named.listed:,} are named, "
+            "and the rest counted."
+        )
+    if full_tokens > NAMES_ONLY_ABOVE:
+        out.lines.append(
+            f"Ticked to begin with: the changes come to {full_tokens:,} tokens, more "
+            f"than {NAMES_ONLY_ABOVE:,}."
+        )
     return out
 
 

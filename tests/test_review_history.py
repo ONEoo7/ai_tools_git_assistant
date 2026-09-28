@@ -5,6 +5,7 @@ import time
 
 import pytest
 
+from git_assistant import atomic
 from git_assistant.agents import history as agent_history
 from git_assistant.review import history
 from git_assistant.review.parse import Finding
@@ -178,13 +179,15 @@ def no_waiting(monkeypatch):
     which is the difference between a regression test and a decoration.
     """
     monkeypatch.setattr(time, "sleep", lambda _seconds: None)
+    # And the helper the stores share, which keeps its own for tests to patch.
+    monkeypatch.setattr(atomic, "sleep", lambda _seconds: None)
 
 
 class Sticky:
     """An `os.replace` that denies the first `failures` calls.
 
-    Holds the real one: `history.os` is the same module object as this file's
-    `os`, so patching it and then calling `os.replace` here recurses forever.
+    Holds the real one: what is patched is `os.replace` itself, for every store
+    that swaps a file into place, so calling it here would recurse forever.
     """
 
     def __init__(self, failures: int):
@@ -202,7 +205,7 @@ class Sticky:
 def test_a_scanner_holding_the_index_is_waited_out(monkeypatch, no_waiting):
     """The common case: it clears in milliseconds, so the review is not lost."""
     replace = Sticky(failures=2)
-    monkeypatch.setattr(history.os, "replace", replace)
+    monkeypatch.setattr(os, "replace", replace)
 
     stored, problem = history.record(_run())
 
@@ -218,7 +221,7 @@ def test_a_review_that_reached_the_disk_is_never_reported_as_lost(monkeypatch, n
     Reporting "not saved" for a review that is sitting on disk sends someone to
     re-run forty model calls they already have.
     """
-    monkeypatch.setattr(history.os, "replace", Sticky(failures=99))
+    monkeypatch.setattr(os, "replace", Sticky(failures=99))
 
     stored, problem = history.record(_run())
 
@@ -239,7 +242,7 @@ def test_a_review_survives_an_index_that_could_not_be_written(monkeypatch, no_wa
     and proves nothing. The damage needs an index that already exists.
     """
     history.record(_run(when="2026-08-01T10:00:00Z"))
-    monkeypatch.setattr(history.os, "replace", Sticky(failures=99))
+    monkeypatch.setattr(os, "replace", Sticky(failures=99))
 
     history.record(_run(when="2026-08-05T10:00:00Z"))
 
@@ -268,7 +271,7 @@ def test_retention_still_holds_when_one_index_write_is_denied(monkeypatch, no_wa
                 raise PermissionError(13, "Access is denied")
         return real_replace(src, dst)
 
-    monkeypatch.setattr(history.os, "replace", replace)
+    monkeypatch.setattr(os, "replace", replace)
     for day in range(1, 6):
         history.record(_run(when=f"2026-08-0{day}T10:00:00Z"), limit=3)
 
@@ -281,7 +284,7 @@ def test_retention_still_holds_when_one_index_write_is_denied(monkeypatch, no_wa
 
 def test_giving_up_leaves_no_temporary_file_behind(monkeypatch, no_waiting):
     """Otherwise the directory fills with `index.json.<hex>.tmp`, one per denial."""
-    monkeypatch.setattr(history.os, "replace", Sticky(failures=99))
+    monkeypatch.setattr(os, "replace", Sticky(failures=99))
 
     history.record(_run())
 
@@ -330,3 +333,28 @@ def test_recording_reports_a_problem_instead_of_raising_when_the_disk_refuses(mo
     )
     stored, problem = history.record(_run())
     assert stored is None and "full" in problem
+
+
+def test_a_pin_that_could_not_be_saved_is_not_on_the_caller_s_copy_either(
+    monkeypatch, no_waiting
+):
+    stored, _ = history.record(_run())
+    monkeypatch.setattr(os, "replace", Sticky(failures=99))
+
+    assert history.set_pinned(stored, True) is False
+
+    assert stored.pinned is False
+    assert history.list_runs("/x/demo")[0].pinned is False
+
+
+def test_a_deleted_review_is_gone_from_the_list_even_when_its_index_is_held(
+    monkeypatch, no_waiting
+):
+    """Its file is gone; an index still listing it would list a review nobody can open."""
+    keep, _ = history.record(_run(when="2026-08-01T10:00:00Z"))
+    gone, _ = history.record(_run(when="2026-08-02T10:00:00Z"))
+    monkeypatch.setattr(os, "replace", Sticky(failures=99))
+
+    assert history.delete_run(gone) is True
+
+    assert [r.run_id for r in history.list_runs("/x/demo")] == [keep.run_id]

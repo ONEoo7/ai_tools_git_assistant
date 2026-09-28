@@ -18,8 +18,6 @@ calls are for watching a run happen.
 from __future__ import annotations
 
 import json
-import os
-import time
 import uuid
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
@@ -27,6 +25,7 @@ from pathlib import Path
 
 from platformdirs import user_config_dir
 
+from git_assistant.atomic import replace_atomically
 from git_assistant.config import APP_NAME, repo_key
 from git_assistant.review.parse import Finding
 from git_assistant.review.reviewer import FileReview, ReviewRun
@@ -253,42 +252,9 @@ def load_run(stored: StoredReview) -> StoredReview | None:
 
 
 # ---- writing ---------------------------------------------------------------------------
-#: `os.replace` onto an existing file fails on Windows while any other process
-#: holds the destination open -- routinely an antivirus or the search indexer,
-#: reading a file written milliseconds earlier. It clears in tens of
-#: milliseconds, and this index is rewritten once per review, so waiting is the
-#: answer rather than treating a scanner's timing as a failed review.
-#:
-#: Measured on one machine: about 0.75% of writes hit it, which is often enough
-#: to have shown up as a flaky test rather than as anything anybody noticed.
-_REPLACE_ATTEMPTS = 5
-_REPLACE_BACKOFF = 0.02  # doubling, so ~0.3s of waiting before giving up
-
-
-def replace_atomically(tmp: Path, destination: Path) -> None:
-    """`os.replace`, retried while something else has the destination open.
-
-    Raises:
-        OSError: if it never succeeded. The temporary file is removed first --
-            leaving one beside the index every time this loses is how a
-            directory fills up with `index.json.<hex>.tmp`.
-    """
-    delay = _REPLACE_BACKOFF
-    for remaining in range(_REPLACE_ATTEMPTS - 1, -1, -1):
-        try:
-            os.replace(tmp, destination)
-            return
-        except OSError:
-            if not remaining:
-                try:
-                    tmp.unlink(missing_ok=True)
-                except OSError:
-                    pass  # the original failure is the one worth reporting
-                raise
-            time.sleep(delay)
-            delay *= 2
-
-
+# Replaced with `replace_atomically`, which waits out an antivirus or the search
+# indexer holding the index open: it is rewritten once per review, and a scanner's
+# timing is not a failed review. See git_assistant.atomic.
 def _write_index(directory: Path, runs: list[StoredReview]) -> None:
     """Rewritten on every review, so it is replaced atomically, not truncated."""
     payload = {
@@ -411,6 +377,7 @@ def _delete_file(directory: Path, run_id: str) -> bool:
 
 
 def delete_run(stored: StoredReview) -> bool:
+    """Forget one review. False while it is still listed: its file could not be deleted."""
     directory = runs_dir(stored.repo_path)
     if not _delete_file(directory, stored.run_id):
         return False
@@ -418,22 +385,28 @@ def delete_run(stored: StoredReview) -> bool:
     try:
         _write_index(directory, remaining)
     except OSError:
-        return False
+        # Its file is gone, and an index still listing it would list a review nobody
+        # can open. Without the index, the next read lists the files that are there.
+        return _discard_index(directory)
     return True
 
 
 def set_pinned(stored: StoredReview, pinned: bool) -> bool:
-    """Pin a review so the retention cap never removes it (the one to beat)."""
+    """Pin a review so the retention cap never removes it (the one to beat).
+
+    False when it could not be saved, and ``stored`` is then as it was: a pin the
+    index does not have must not be shown as one.
+    """
     directory = runs_dir(stored.repo_path)
     runs = _load_index(directory)
     for run in runs:
         if run.run_id == stored.run_id:
             run.pinned = pinned
-            stored.pinned = pinned
     try:
         _write_index(directory, runs)
     except OSError:
         return False
+    stored.pinned = pinned
     return True
 
 

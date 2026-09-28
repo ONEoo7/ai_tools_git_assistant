@@ -28,7 +28,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-from git_assistant.review.history import replace_atomically
+from git_assistant.atomic import replace_atomically
 from git_assistant.review.rule_files import rules_dir
 
 SCHEMA_VERSION = 1

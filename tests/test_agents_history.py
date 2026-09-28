@@ -1,9 +1,11 @@
 """Recording runs: what is kept, what is thrown away, and what survives damage."""
 
 import json
+import os
 
 import pytest
 
+from git_assistant import atomic
 from git_assistant.agents import history
 from git_assistant.agents.base import CheckResult, Fact, Report, Section, Status, Table
 
@@ -270,3 +272,134 @@ def test_a_run_says_when_and_where_it_ran():
 def test_an_unparseable_timestamp_does_not_crash_the_label():
     run = history.StoredRun(run_id="x", agent_id="a", repo_path="/x", started_at="soon")
     assert run.when_label() == "soon"
+
+
+# ---- an index held open by another program ------------------------------------------
+# On Windows the swap that saves the index fails while an antivirus, the search indexer
+# or a second copy of the application has the file open. It clears in milliseconds,
+# so it is waited out -- and where it is not, nothing is claimed that is not on disk.
+class Held:
+    """An `os.replace` refused the first ``refusals`` times. Holds the real one."""
+
+    def __init__(self, refusals):
+        self.refusals = refusals
+        self.calls = 0
+        self._real = os.replace
+
+    def __call__(self, src, dst):
+        self.calls += 1
+        if self.calls <= self.refusals:
+            raise PermissionError(13, "Access is denied")
+        return self._real(src, dst)
+
+
+@pytest.fixture
+def no_waiting(monkeypatch):
+    monkeypatch.setattr(atomic, "sleep", lambda _seconds: None)
+
+
+def _index(store):
+    return next((store / "agent_runs").rglob(history.INDEX_FILE), None)
+
+
+class IndexHeld(Held):
+    """As `Held`, for the index alone: the run files go through untouched."""
+
+    def __call__(self, src, dst):
+        if not str(dst).endswith(history.INDEX_FILE):
+            return self._real(src, dst)
+        return super().__call__(src, dst)
+
+
+def test_an_index_held_open_for_a_moment_is_waited_out(monkeypatch, no_waiting):
+    history.record(_report())
+    held = IndexHeld(refusals=1)
+    monkeypatch.setattr(os, "replace", held)
+
+    run, problem = history.record(_report())
+
+    assert problem == "" and held.calls == 2
+    assert [r.run_id for r in history.list_runs("/x/demo")][0] == run.run_id
+
+
+def test_a_run_file_held_open_for_a_moment_is_waited_out_too(monkeypatch, no_waiting):
+    """The run file is swapped into place as well, so it is written whole or not at all."""
+    held = Held(refusals=1)
+    monkeypatch.setattr(os, "replace", held)
+
+    run, problem = history.record(_report())
+
+    assert problem == "" and history.load_run(run).report is not None
+
+
+def test_an_audit_on_disk_is_not_reported_as_lost_when_only_its_index_is(
+    monkeypatch, no_waiting, store
+):
+    """The run file is the record; the index a cache of it. Left stale, the index
+    would hide this audit for good -- a readable index is never re-derived."""
+    earlier, _ = history.record(_report())
+    monkeypatch.setattr(os, "replace", IndexHeld(refusals=99))
+
+    run, problem = history.record(_report())
+
+    assert run is not None
+    assert problem.startswith("saved, but the history list could not be written")
+    assert _index(store) is None  # thrown away, so the next read rebuilds it
+    listed = [r.run_id for r in history.list_runs("/x/demo")]
+    assert set(listed) == {earlier.run_id, run.run_id}
+    assert list((store / "agent_runs").rglob("*.tmp")) == []
+
+
+def test_a_run_file_that_could_not_be_written_leaves_nothing_behind(monkeypatch, store):
+    real = history.Path.write_text
+
+    def disk_full(self, text, *args, **kwargs):
+        real(self, text[:10], *args, **kwargs)
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(history.Path, "write_text", disk_full)
+
+    run, problem = history.record(_report())
+
+    assert run is None and "No space left" in problem
+    assert [p for p in (store / "agent_runs").rglob("*") if p.is_file()] == []
+
+
+def test_a_pin_that_could_not_be_saved_is_not_on_the_caller_s_copy_either(
+    monkeypatch, no_waiting
+):
+    run, _ = history.record(_report())
+    monkeypatch.setattr(os, "replace", Held(refusals=99))
+
+    assert history.set_pinned(run, True) is False
+
+    assert run.pinned is False
+    assert history.list_runs("/x/demo")[0].pinned is False
+
+
+def test_a_deleted_run_is_gone_from_the_list_even_when_its_index_is_held(
+    monkeypatch, no_waiting, store
+):
+    """Its file is gone; an index still listing it would list a run nobody can open."""
+    keep, _ = history.record(_report())
+    gone, _ = history.record(_report())
+    monkeypatch.setattr(os, "replace", Held(refusals=99))
+
+    assert history.delete_run(gone) is True
+
+    assert [r.run_id for r in history.list_runs("/x/demo")] == [keep.run_id]
+
+
+def test_a_run_whose_file_could_not_be_deleted_stays_listed(monkeypatch, store):
+    run, _ = history.record(_report())
+    real = history.Path.unlink
+
+    def held(self, *args, **kwargs):
+        if self.name == f"{run.run_id}.json":
+            raise PermissionError(13, "Access is denied")
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(history.Path, "unlink", held)
+
+    assert history.delete_run(run) is False
+    assert [r.run_id for r in history.list_runs("/x/demo")] == [run.run_id]
