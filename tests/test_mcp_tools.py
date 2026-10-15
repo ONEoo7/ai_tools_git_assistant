@@ -6,6 +6,7 @@ import sys
 
 import pytest
 
+from conftest import git_init
 from git_assistant.config import RepoEntry, Settings
 from git_assistant.mcp import schema, tools
 from git_assistant.mcp.context import ToolContext, ToolError
@@ -23,9 +24,7 @@ def _git(repo, *args):
 
 @pytest.fixture
 def repo(tmp_path):
-    _git(tmp_path, "init")
-    _git(tmp_path, "config", "user.email", "t@e.example")
-    _git(tmp_path, "config", "user.name", "T")
+    git_init(tmp_path, config={"user.email": "t@e.example", "user.name": "T"})
     (tmp_path / "a.txt").write_text("one\n", encoding="utf-8")
     _git(tmp_path, "add", "a.txt")
     _git(tmp_path, "commit", "-m", "first")
@@ -193,7 +192,7 @@ def test_push_with_no_remote_named_goes_where_the_branch_tracks(ctx, repo, tmp_p
     bares = {}
     for name in ("origin", "backup"):
         bares[name] = tmp_path.parent / f"{tmp_path.name}-{name}.git"
-        _git(tmp_path.parent, "init", "-q", "--bare", str(bares[name]))
+        git_init(bares[name], bare=True)
         _git(repo, "remote", "add", name, str(bares[name]))
     _git(repo, "config", f"branch.{branch}.remote", "backup")
     _git(repo, "config", f"branch.{branch}.merge", f"refs/heads/{branch}")

@@ -13,6 +13,7 @@ import time
 
 import pytest
 
+from conftest import git_init
 from git_assistant import git_ops
 
 _NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
@@ -35,15 +36,11 @@ def _out(repo, *args):
 @pytest.fixture
 def source(tmp_path):
     """Three commits on main, and a branch one commit behind it."""
-    path = tmp_path / "source"
-    subprocess.run(
-        ["git", "init", "-q", "--initial-branch=main", str(path)],
-        capture_output=True,
-        creationflags=_NO_WINDOW,
-        check=True,
+    path = git_init(
+        tmp_path / "source",
+        branch="main",
+        config={"user.email": "test@example.com", "user.name": "Test"},
     )
-    _git(path, "config", "user.email", "test@example.com")
-    _git(path, "config", "user.name", "Test")
     for n in range(3):
         (path / "f.txt").write_text(f"{n}\n", encoding="utf-8")
         _git(path, "add", "f.txt")

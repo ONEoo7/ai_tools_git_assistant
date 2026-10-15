@@ -5,6 +5,7 @@ import sys
 
 import pytest
 
+from conftest import git_init
 from git_assistant import agents
 from git_assistant.agents import compare
 from git_assistant.agents.base import AgentContext
@@ -26,9 +27,7 @@ def _git(repo, *args):
 
 @pytest.fixture
 def repo(tmp_path):
-    _git(tmp_path, "init")
-    _git(tmp_path, "config", "user.email", "t@example.com")
-    _git(tmp_path, "config", "user.name", "T")
+    git_init(tmp_path, config={"user.email": "t@example.com", "user.name": "T"})
     return tmp_path
 
 

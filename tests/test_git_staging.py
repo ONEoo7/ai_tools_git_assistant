@@ -11,6 +11,7 @@ import sys
 
 import pytest
 
+from conftest import git_init
 from git_assistant import git_ops
 
 _NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
@@ -34,14 +35,17 @@ def repo(tmp_path):
     """A repository whose line endings answer to its own config and nothing else."""
     path = tmp_path / "work"
     path.mkdir()
-    _git(path, "init", "-q")
-    _git(path, "config", "user.email", "test@example.com")
-    _git(path, "config", "user.name", "Test")
-    # Set here, where it outranks the machine's own settings, so this machine's
-    # autocrlf cannot change what these tests see.
-    _git(path, "config", "core.autocrlf", "false")
-    _git(path, "config", "core.safecrlf", "false")
-    return path
+    # Line endings are set here, where they outrank the machine's own settings,
+    # so this machine's autocrlf cannot change what these tests see.
+    return git_init(
+        path,
+        config={
+            "user.email": "test@example.com",
+            "user.name": "Test",
+            "core.autocrlf": "false",
+            "core.safecrlf": "false",
+        },
+    )
 
 
 def _commit(repo, files, message="base"):
@@ -118,9 +122,7 @@ def test_a_partly_staged_file_counts_once_as_changed_and_once_as_unstaged(repo):
 def test_a_submodule_is_marked_as_one(repo, tmp_path):
     inner = tmp_path / "inner"
     inner.mkdir()
-    _git(inner, "init", "-q")
-    _git(inner, "config", "user.email", "test@example.com")
-    _git(inner, "config", "user.name", "Test")
+    git_init(inner, config={"user.email": "test@example.com", "user.name": "Test"})
     _commit(inner, {"s.txt": b"s\n"})
     _commit(repo, {"a.txt": b"a\n"})
     _git(

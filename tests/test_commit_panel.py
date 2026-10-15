@@ -6,6 +6,7 @@ pytest.importorskip("PyQt6.QtWidgets")
 
 from PyQt6.QtWidgets import QApplication, QMessageBox  # noqa: E402
 
+from conftest import git_init  # noqa: E402
 from git_assistant import commit_history  # noqa: E402
 from git_assistant.commit_generator import GenerationResult  # noqa: E402
 from git_assistant.config import RepoEntry, Settings  # noqa: E402
@@ -286,15 +287,9 @@ def test_a_provider_with_no_model_chosen_says_so(qapp, settings):
 
 def _repo(tmp_path):
     """A real repo, since Refresh re-runs `git diff` against one."""
-    import subprocess
-    import sys
-
-    flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
-    d = tmp_path / "repo"
-    d.mkdir()
-    for args in (["init"], ["config", "user.email", "t@e.example"], ["config", "user.name", "T"]):
-        subprocess.run(["git", "-C", str(d), *args], capture_output=True, creationflags=flags)
-    return d
+    return git_init(
+        tmp_path / "repo", config={"user.email": "t@e.example", "user.name": "T"}
+    )
 
 
 def test_refresh_clears_the_generated_message(qapp, settings, tmp_path):

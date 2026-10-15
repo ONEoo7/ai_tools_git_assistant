@@ -91,7 +91,11 @@ def confirm(parent: QWidget | None, estimate: Estimate) -> bool:
     box.setInformativeText(describe(estimate).split("\n", 2)[2].strip())
     names = None
     if estimate.names_only is not None:
-        names = QCheckBox(SEND_NAMES_ONLY)
+        # Made the box's, not Python's: `setCheckBox` leaves it Python's, and
+        # this function returning would free it while the box -- which outlives
+        # it -- still points at it. The next restyle of the box then reads freed
+        # memory: choosing the pink theme after any estimate ended the process.
+        names = QCheckBox(SEND_NAMES_ONLY, box)
         names.setChecked(estimate.only_names)
         names.setToolTip(
             "Write the message from the names of the changed files, grouped by "

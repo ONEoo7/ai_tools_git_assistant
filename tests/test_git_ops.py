@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from conftest import git_init
 from git_assistant import git_ops
 from git_assistant.commit_generator import render_template
 
@@ -25,9 +26,7 @@ def _git(repo, *args, stdin=None, env=None):
 
 @pytest.fixture
 def repo(tmp_path):
-    _git(tmp_path, "init")
-    _git(tmp_path, "config", "user.email", "test@example.com")
-    _git(tmp_path, "config", "user.name", "Test")
+    git_init(tmp_path, config={"user.email": "test@example.com", "user.name": "Test"})
     return tmp_path
 
 
@@ -239,11 +238,7 @@ def test_render_template_handles_braces():
 @pytest.fixture
 def repo_with_remote(repo, tmp_path):
     """A repo with one commit and a local bare remote as 'origin'."""
-    bare = tmp_path / "remote.git"
-    subprocess.run(
-        ["git", "init", "--bare", str(bare)],
-        capture_output=True, creationflags=_NO_WINDOW, check=True,
-    )
+    bare = git_init(tmp_path / "remote.git", bare=True)
     (repo / "a.txt").write_text("one\n", encoding="utf-8")
     _git(repo, "add", "a.txt")
     _git(repo, "commit", "-m", "initial")

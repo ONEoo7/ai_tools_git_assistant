@@ -21,7 +21,7 @@ from git_assistant.agent_cli import detect
 from git_assistant.agent_cli.client import CliClient, CliError
 from git_assistant.agents import gitstream
 
-from conftest import npm_install
+from conftest import git_init, npm_install
 
 _NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
 WINDOWS_ONLY = pytest.mark.skipif(
@@ -190,14 +190,12 @@ def test_a_stream_left_early_does_not_leave_the_real_git_working(heartbeat):
 def test_a_stream_read_to_the_end_is_not_killed(tmp_path, monkeypatch):
     """A git that has finished only needs its pipes closed; nothing is started
     to end it."""
-    repo = tmp_path / "repo"
-    for args in (
-        ["init", "-q", str(repo)],
-        ["-C", str(repo), "-c", "user.name=T", "-c", "user.email=t@e.c",
+    repo = git_init(tmp_path / "repo")
+    subprocess.run(
+        ["git", "-C", str(repo), "-c", "user.name=T", "-c", "user.email=t@e.c",
          "commit", "-q", "--allow-empty", "-m", "one"],
-    ):
-        subprocess.run(["git", *args], check=True, capture_output=True,
-                       creationflags=_NO_WINDOW)
+        check=True, capture_output=True, creationflags=_NO_WINDOW,
+    )
     ended = []
     monkeypatch.setattr(processes, "kill_tree", ended.append)
 

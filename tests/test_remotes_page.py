@@ -1,5 +1,6 @@
 """The Commit tab's remotes: listing them, adding and removing, choosing what is tracked."""
 
+import shutil
 import subprocess
 import sys
 
@@ -9,6 +10,7 @@ pytest.importorskip("PyQt6.QtWidgets")
 
 from PyQt6.QtWidgets import QApplication, QMessageBox  # noqa: E402
 
+from conftest import git_init  # noqa: E402
 from git_assistant import git_ops  # noqa: E402
 from git_assistant.config import RepoEntry, Settings  # noqa: E402
 from git_assistant.ui.remotes_page import TRACKED_MARK, RemotesPage  # noqa: E402
@@ -34,24 +36,40 @@ def qapp():
     return QApplication.instance() or QApplication([])
 
 
-@pytest.fixture
-def repo(tmp_path, monkeypatch):
-    """main and feature, two remotes, and nothing from the machine's git config."""
-    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(tmp_path / "absent-global"))
-    monkeypatch.setenv("GIT_CONFIG_SYSTEM", str(tmp_path / "absent-system"))
-    work = tmp_path / "ONEoo7" / "thing"
-    work.mkdir(parents=True)
-    _git(work, "init", "-q", "--initial-branch=main")
-    _git(work, "config", "user.email", "test@example.com")
-    _git(work, "config", "user.name", "Test")
-    (work / "a.txt").write_text("a\n", encoding="utf-8")
-    _git(work, "add", "a.txt")
-    _git(work, "commit", "-q", "-m", "initial")
-    _git(work, "branch", "feature")
-    _git(work, "remote", "add", "origin", ORIGIN)
-    _git(work, "remote", "add", "work", WORK)
-    git_ops.set_tracking_remote(work, "main", "origin")
+def _no_machine_config(folder, patch):
+    patch.setenv("GIT_CONFIG_GLOBAL", str(folder / "absent-global"))
+    patch.setenv("GIT_CONFIG_SYSTEM", str(folder / "absent-system"))
+
+
+@pytest.fixture(scope="module")
+def built(tmp_path_factory):
+    """Made once for the module and copied for each test: the nine git commands
+    that make it were most of every test's setup."""
+    base = tmp_path_factory.mktemp("remotes")
+    with pytest.MonkeyPatch.context() as patch:
+        _no_machine_config(base, patch)
+        work = base / "thing"
+        work.mkdir()
+        git_init(
+            work,
+            branch="main",
+            config={"user.email": "test@example.com", "user.name": "Test"},
+        )
+        (work / "a.txt").write_text("a\n", encoding="utf-8")
+        _git(work, "add", "a.txt")
+        _git(work, "commit", "-q", "-m", "initial")
+        _git(work, "branch", "feature")
+        _git(work, "remote", "add", "origin", ORIGIN)
+        _git(work, "remote", "add", "work", WORK)
+        git_ops.set_tracking_remote(work, "main", "origin")
     return work
+
+
+@pytest.fixture
+def repo(built, tmp_path, monkeypatch):
+    """main and feature, two remotes, and nothing from the machine's git config."""
+    _no_machine_config(tmp_path, monkeypatch)
+    return shutil.copytree(built, tmp_path / "ONEoo7" / "thing")
 
 
 @pytest.fixture

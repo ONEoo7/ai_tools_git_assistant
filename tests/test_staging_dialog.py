@@ -11,6 +11,7 @@ from PyQt6.QtCore import Qt  # noqa: E402
 from PyQt6.QtGui import QTextOption  # noqa: E402
 from PyQt6.QtWidgets import QApplication, QHBoxLayout, QMessageBox  # noqa: E402
 
+from conftest import committed  # noqa: E402
 from git_assistant import git_ops  # noqa: E402
 from git_assistant.ui import theme  # noqa: E402
 from git_assistant.ui.staging_dialog import (  # noqa: E402
@@ -68,19 +69,21 @@ def slot_errors(monkeypatch):
 
 @pytest.fixture
 def repo(tmp_path):
-    path = tmp_path / "work"
-    path.mkdir()
-    _git(path, "init", "-q")
-    _git(path, "config", "user.email", "test@example.com")
-    _git(path, "config", "user.name", "Test")
-    _git(path, "config", "core.autocrlf", "false")
-    (path / ".gitattributes").write_bytes(b"*.txt text eol=lf\n")
-    (path / "a.txt").write_bytes(BASE)
-    (path / "b.txt").write_bytes(BASE)
-    (path / "raw.dat").write_bytes(b"one\r\ntwo\r\n")
-    _git(path, "add", "-A")
-    _git(path, "commit", "-q", "-m", "base")
-    return path
+    return committed(
+        tmp_path / "work",
+        {
+            ".gitattributes": b"*.txt text eol=lf\n",
+            "a.txt": BASE,
+            "b.txt": BASE,
+            "raw.dat": b"one\r\ntwo\r\n",
+        },
+        message="base",
+        config={
+            "user.email": "test@example.com",
+            "user.name": "Test",
+            "core.autocrlf": "false",
+        },
+    )
 
 
 def _names(tree):

@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+from conftest import git_init
 from git_assistant import git_ops
 
 _NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
@@ -30,8 +31,7 @@ def _git(*args, cwd=None, env=None):
 
 def _init(path):
     path.mkdir(parents=True, exist_ok=True)
-    assert _git("init", "-q", str(path)).returncode == 0
-    return path
+    return git_init(path)
 
 
 def _git_accepts(repo):

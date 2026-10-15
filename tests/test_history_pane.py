@@ -1,5 +1,6 @@
 """The history graph on the Commit tab, drawn from a real repository."""
 
+import shutil
 import subprocess
 import sys
 
@@ -11,6 +12,7 @@ from PyQt6.QtCore import QUrl  # noqa: E402
 from PyQt6.QtGui import QGuiApplication  # noqa: E402
 from PyQt6.QtWidgets import QApplication, QMenu  # noqa: E402
 
+from conftest import git_init  # noqa: E402
 from git_assistant import git_ops  # noqa: E402
 from git_assistant.ui import history_pane as pane_module  # noqa: E402
 from git_assistant.ui.history_pane import (  # noqa: E402
@@ -44,16 +46,20 @@ def qapp():
     return QApplication.instance() or QApplication([])
 
 
-@pytest.fixture(autouse=True)
-def git_home(tmp_path, monkeypatch):
-    config = tmp_path / "global.gitconfig"
+def _git_home(folder, patch):
+    config = folder / "global.gitconfig"
     config.write_text(
         "[user]\n\tname = Bogdan Taloi\n\temail = bogdan@example.com\n"
         "[init]\n\tdefaultBranch = master\n",
         encoding="utf-8",
     )
-    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(config))
-    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    patch.setenv("GIT_CONFIG_GLOBAL", str(config))
+    patch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+
+
+@pytest.fixture(autouse=True)
+def git_home(tmp_path, monkeypatch):
+    _git_home(tmp_path, monkeypatch)
 
 
 @pytest.fixture(autouse=True)
@@ -72,21 +78,33 @@ def _commit(repo, message, *, author=None):
     return _git(repo, "rev-parse", "HEAD").stdout.strip()
 
 
-@pytest.fixture
-def repo(tmp_path):
-    """first, second (tagged v1.0, by someone else), third on master; a side branch off first."""
-    path = tmp_path / "repo"
-    path.mkdir()
-    _git(path, "init", "-q")
-    first = _commit(path, "first")
-    second = _commit(path, "second\n\nwhy it was done", author="Denis Anitei <denis@example.com>")
-    _git(path, "tag", "v1.0", second)
-    third = _commit(path, "third")
-    _git(path, "branch", "side", first)
-    _git(path, "checkout", "-q", "side")
-    side = _commit(path, "side work")
-    _git(path, "checkout", "-q", "master")
+@pytest.fixture(scope="module")
+def built(tmp_path_factory):
+    """first, second (tagged v1.0, by someone else), third on master; a side branch off first.
+
+    Made once for the module and copied for each test: its sixteen git commands
+    were most of every test's time.
+    """
+    base = tmp_path_factory.mktemp("history")
+    with pytest.MonkeyPatch.context() as patch:
+        _git_home(base, patch)
+        path = base / "repo"
+        path.mkdir()
+        git_init(path)
+        first = _commit(path, "first")
+        second = _commit(path, "second\n\nwhy it was done", author="Denis Anitei <denis@example.com>")
+        _git(path, "tag", "v1.0", second)
+        third = _commit(path, "third")
+        _git(path, "branch", "side", first)
+        _git(path, "checkout", "-q", "side")
+        side = _commit(path, "side work")
+        _git(path, "checkout", "-q", "master")
     return {"path": path, "first": first, "second": second, "third": third, "side": side}
+
+
+@pytest.fixture
+def repo(built, tmp_path):
+    return {**built, "path": shutil.copytree(built["path"], tmp_path / "repo")}
 
 
 @pytest.fixture

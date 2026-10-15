@@ -16,6 +16,7 @@ pytest.importorskip("PyQt6.QtWidgets")
 from PyQt6.QtCore import Qt  # noqa: E402
 from PyQt6.QtWidgets import QApplication, QStyleOptionViewItem  # noqa: E402
 
+from conftest import git_init  # noqa: E402
 from git_assistant.config import RepoEntry, Settings  # noqa: E402
 from git_assistant.ui.repo_picker import (  # noqa: E402
     ADD_FAVORITE,
@@ -44,9 +45,7 @@ def _git(repo, *args):
 def _repo(path, branch):
     """A repository with one commit, on ``branch``."""
     path.mkdir(parents=True, exist_ok=True)
-    _git(path, "init", "-q")
-    _git(path, "config", "user.email", "test@example.com")
-    _git(path, "config", "user.name", "Test")
+    git_init(path, config={"user.email": "test@example.com", "user.name": "Test"})
     (path / "f.txt").write_text("one\n", encoding="utf-8")
     _git(path, "add", "f.txt")
     _git(path, "commit", "-q", "-m", "initial")

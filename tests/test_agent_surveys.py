@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+from conftest import git_init
 from git_assistant.agents import branches as branches_mod
 from git_assistant.agents import submodules as sub
 from git_assistant.agents.branches import BranchInfo, StaleRules
@@ -46,9 +47,9 @@ def repo(tmp_path):
     """A repository on `main` with one commit."""
     where = tmp_path / "parent"
     where.mkdir()
-    git(where, "init", "-b", "main")
-    git(where, "config", "user.email", "t@example.com")
-    git(where, "config", "user.name", "T")
+    git_init(
+        where, branch="main", config={"user.email": "t@example.com", "user.name": "T"}
+    )
     (where / "a.txt").write_text("one", encoding="utf-8")
     git(where, "add", "-A")
     git(where, "commit", "-m", "first", when=NOW - timedelta(days=400))
@@ -231,9 +232,9 @@ def with_submodule(tmp_path, repo):
     """A real submodule, tagged v1.0.0, added to `repo`."""
     child = tmp_path / "dep"
     child.mkdir()
-    git(child, "init", "-b", "main")
-    git(child, "config", "user.email", "t@example.com")
-    git(child, "config", "user.name", "T")
+    git_init(
+        child, branch="main", config={"user.email": "t@example.com", "user.name": "T"}
+    )
     (child / "lib.txt").write_text("one", encoding="utf-8")
     git(child, "add", "-A")
     git(child, "commit", "-m", "one", when=NOW - timedelta(days=100))

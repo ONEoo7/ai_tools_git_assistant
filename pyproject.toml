@@ -43,6 +43,12 @@ dev = [
     # and a suite that never finishes says nothing about which test did it.
     # With this, it fails in a minute with the stack it was blocked in.
     "pytest-timeout>=2.3",
+    # `pytest --testmon` runs only the tests whose code changed since the last
+    # run, from a coverage map kept in .testmondata. Every test pays for the git
+    # processes it starts whether or not anything it covers was touched, so
+    # after an edit to one panel this is the difference between the suite and
+    # that panel's tests.
+    "pytest-testmon>=2.2",
 ]
 build = [
     "pyinstaller>=6.0",
@@ -67,7 +73,10 @@ pythonpath = ["src"]
 testpaths = ["tests"]
 # A backstop, not the guard: unanswered dialogs are caught in conftest, where
 # the failure names the test and takes a second. This is for the rest -- a git
-# command waiting on a prompt, a worker that never finishes. No test here takes
-# three seconds, so anything approaching a minute is stuck.
-timeout = 60
+# command waiting on a prompt, a worker that never finishes. The slowest tests
+# build nested submodules and take twenty seconds on their own; where every git
+# process is scanned as it starts and twenty workers start them at once, they
+# have taken nearly sixty. A timeout here ends the whole worker, and every
+# result it had not yet reported with it, so the line sits well clear of that.
+timeout = 180
 timeout_method = "thread"

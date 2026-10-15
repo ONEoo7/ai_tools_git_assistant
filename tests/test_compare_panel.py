@@ -14,6 +14,7 @@ pytest.importorskip("PyQt6.QtWidgets")
 from PyQt6.QtGui import QGuiApplication  # noqa: E402
 from PyQt6.QtWidgets import QApplication, QMenu  # noqa: E402
 
+from conftest import git_init  # noqa: E402
 from git_assistant import submodule_compare as compare  # noqa: E402
 from git_assistant.config import RepoEntry, Settings  # noqa: E402
 from git_assistant.ui import compare_panel as panel_module  # noqa: E402
@@ -71,7 +72,7 @@ def inline(monkeypatch):
 
 def _library(path, *messages):
     path.mkdir(parents=True)
-    _git(path, "init", "-q")
+    git_init(path)
     for number, message in enumerate(messages):
         (path / "f.txt").write_text(f"{number}\n", encoding="utf-8")
         _git(path, "add", "-A")

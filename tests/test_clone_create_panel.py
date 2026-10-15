@@ -16,6 +16,7 @@ pytest.importorskip("PyQt6.QtWidgets")
 from PyQt6.QtCore import Qt  # noqa: E402
 from PyQt6.QtWidgets import QApplication, QMessageBox  # noqa: E402
 
+from conftest import git_init  # noqa: E402
 from git_assistant import git_ops, starter_files  # noqa: E402
 from git_assistant.config import RepoEntry, Settings  # noqa: E402
 from git_assistant.review import languages  # noqa: E402
@@ -42,10 +43,15 @@ def _git(repo, *args):
 
 def _repo(path, *, commit=True):
     path.mkdir(parents=True)
-    _git(path, "init", "-q", "--initial-branch=main")
-    _git(path, "config", "user.email", "test@example.com")
-    _git(path, "config", "user.name", "Test")
-    _git(path, "config", "core.autocrlf", "false")
+    git_init(
+        path,
+        branch="main",
+        config={
+            "user.email": "test@example.com",
+            "user.name": "Test",
+            "core.autocrlf": "false",
+        },
+    )
     if commit:
         (path / "f.txt").write_text("one\n", encoding="utf-8")
         _git(path, "add", "f.txt")

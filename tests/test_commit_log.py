@@ -1,10 +1,12 @@
 """Reading a history for a graph of it, and what a commit is part of -- from real repositories."""
 
+import shutil
 import subprocess
 import sys
 
 import pytest
 
+from conftest import git_init
 from git_assistant import git_ops
 from git_assistant.git_ops import REF_BRANCH, REF_HEAD, REF_REMOTE, REF_TAG, RefLabel
 
@@ -30,32 +32,47 @@ def _commit(repo, name, message):
     return _git(repo, "rev-parse", "HEAD").stdout.strip()
 
 
-@pytest.fixture(autouse=True)
-def git_home(tmp_path, monkeypatch):
-    config = tmp_path / "global.gitconfig"
+def _git_home(folder, patch):
+    config = folder / "global.gitconfig"
     config.write_text(
         "[user]\n\tname = Bogdan Taloi\n\temail = bogdan@example.com\n"
         "[init]\n\tdefaultBranch = master\n",
         encoding="utf-8",
     )
-    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(config))
-    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
-    monkeypatch.setenv("GIT_AUTHOR_DATE", f"{AUTHORED} +0000")
+    patch.setenv("GIT_CONFIG_GLOBAL", str(config))
+    patch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    patch.setenv("GIT_AUTHOR_DATE", f"{AUTHORED} +0000")
+
+
+@pytest.fixture(autouse=True)
+def git_home(tmp_path, monkeypatch):
+    _git_home(tmp_path, monkeypatch)
+
+
+@pytest.fixture(scope="module")
+def built(tmp_path_factory):
+    """master: first, second (tagged), a merged feature, pushed to origin; one unmerged branch.
+
+    Made once for the module, and each test is handed a copy of the repository:
+    its twenty-eight git commands were most of every test's time. The copy's
+    origin is still this one, which no test here fetches from or pushes to.
+    """
+    base = tmp_path_factory.mktemp("history")
+    with pytest.MonkeyPatch.context() as patch:
+        _git_home(base, patch)
+        return _build(base)
 
 
 @pytest.fixture
-def history(tmp_path):
-    """master: first, second (tagged), a merged feature, pushed to origin; one unmerged branch."""
-    remote = tmp_path / "remote.git"
-    subprocess.run(
-        ["git", "init", "-q", "--bare", str(remote)],
-        capture_output=True,
-        creationflags=_NO_WINDOW,
-        check=True,
-    )
-    repo = tmp_path / "repo"
+def history(built, tmp_path):
+    return {**built, "repo": shutil.copytree(built["repo"], tmp_path / "repo")}
+
+
+def _build(base):
+    remote = git_init(base / "remote.git", bare=True)
+    repo = base / "repo"
     repo.mkdir()
-    _git(repo, "init", "-q")
+    git_init(repo)
     first = _commit(repo, "a.txt", "first")
     second = _commit(repo, "a.txt", "second\n\nwith a body\nof two lines")
     _git(repo, "tag", "-a", "v1.0", "-m", "release", second)
@@ -143,7 +160,7 @@ def test_a_history_is_read_to_its_limit(history):
 def test_a_repository_with_no_commit_has_no_history(tmp_path):
     empty = tmp_path / "empty"
     empty.mkdir()
-    _git(empty, "init", "-q")
+    git_init(empty)
 
     assert git_ops.commit_log(empty) == []
 
@@ -151,7 +168,7 @@ def test_a_repository_with_no_commit_has_no_history(tmp_path):
 def test_a_message_holding_a_separator_is_read_whole(tmp_path):
     repo = tmp_path / "odd"
     repo.mkdir()
-    _git(repo, "init", "-q")
+    git_init(repo)
     _commit(repo, "a.txt", "subject\n\nbody with a \x1f in it")
     _git(repo, "tag", "t1")
 

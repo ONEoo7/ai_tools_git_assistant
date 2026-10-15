@@ -10,6 +10,7 @@ import sys
 
 import pytest
 
+from conftest import git_init
 from git_assistant import git_ops
 from git_assistant.staging import PartialPatchError, build_patch, line_numbers, parse
 
@@ -29,10 +30,14 @@ def _git(repo, *args):
 def repo(tmp_path):
     path = tmp_path / "work"
     path.mkdir()
-    _git(path, "init", "-q")
-    _git(path, "config", "user.email", "test@example.com")
-    _git(path, "config", "user.name", "Test")
-    _git(path, "config", "core.autocrlf", "false")
+    git_init(
+        path,
+        config={
+            "user.email": "test@example.com",
+            "user.name": "Test",
+            "core.autocrlf": "false",
+        },
+    )
     return path
 
 

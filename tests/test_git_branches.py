@@ -10,6 +10,7 @@ import sys
 
 import pytest
 
+from conftest import committed, git_init
 from git_assistant import git_ops
 
 _NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
@@ -28,9 +29,7 @@ def _git(repo, *args, env=None):
 
 def _init(path):
     path.mkdir(parents=True, exist_ok=True)
-    _git(path, "init")
-    _git(path, "config", "user.email", "test@example.com")
-    _git(path, "config", "user.name", "Test")
+    git_init(path, config={"user.email": "test@example.com", "user.name": "Test"})
     return path
 
 
@@ -43,21 +42,17 @@ def _commit(repo, text, message):
 @pytest.fixture
 def repo(tmp_path):
     """One repository with one commit."""
-    path = _init(tmp_path / "work")
-    _commit(path, "one\n", "initial")
-    return path
+    return committed(
+        tmp_path / "work",
+        {"f.txt": "one\n"},
+        config={"user.email": "test@example.com", "user.name": "Test"},
+    )
 
 
 @pytest.fixture
 def remote(tmp_path, repo):
     """The same repository, with a local bare remote as origin."""
-    bare = tmp_path / "remote.git"
-    subprocess.run(
-        ["git", "init", "--bare", str(bare)],
-        capture_output=True,
-        creationflags=_NO_WINDOW,
-        check=True,
-    )
+    bare = git_init(tmp_path / "remote.git", bare=True)
     _git(repo, "remote", "add", "origin", str(bare))
     return repo
 
@@ -441,10 +436,8 @@ def test_nothing_blocks_nothing():
 
 def test_what_it_reports_is_what_git_refuses(tmp_path):
     """The authority is git, so the test asks git."""
-    repo = tmp_path / "r"
-    repo.mkdir()
+    repo = git_init(tmp_path / "r")
     for args in (
-        ["init", "-q", "."],
         ["-c", "user.email=t@e.x", "-c", "user.name=T", "commit", "-q",
          "--allow-empty", "-m", "first"],
         ["branch", "dev"],

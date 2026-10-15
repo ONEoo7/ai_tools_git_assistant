@@ -12,6 +12,7 @@ pytest.importorskip("PyQt6.QtWidgets")
 
 from PyQt6.QtWidgets import QApplication  # noqa: E402
 
+from conftest import git_init  # noqa: E402
 from git_assistant import git_ops  # noqa: E402
 from git_assistant.config import RepoEntry, Settings  # noqa: E402
 from git_assistant.ui import settings_dialog as dialog_module  # noqa: E402
@@ -202,13 +203,7 @@ def test_a_label_is_what_it_sorts_by(qapp):
 # ---- finding repositories on disk ----------------------------------------------------
 def _real_repo(path):
     path.mkdir(parents=True)
-    subprocess.run(
-        ["git", "-C", str(path), "init", "-q"],
-        capture_output=True,
-        creationflags=_NO_WINDOW,
-        check=True,
-    )
-    return path
+    return git_init(path)
 
 
 @pytest.fixture

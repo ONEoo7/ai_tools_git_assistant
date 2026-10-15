@@ -155,6 +155,27 @@ def test_the_box_starts_as_the_estimate_says(qapp, monkeypatch):
     assert "3,412" in headline
 
 
+def test_the_box_can_be_restyled_after_it_has_been_answered(qapp, monkeypatch):
+    """The box outlives `confirm`, and its tick box has to as well.
+
+    The tick box was Python's, so `confirm` returning freed it while the box
+    still pointed at it, and the next theme to restyle the box read freed
+    memory: an access violation, and the whole process with it.
+    """
+    import gc
+
+    from git_assistant.ui import theme
+
+    _opened(monkeypatch, lambda box: None)
+    confirm(None, _commit_estimate())
+    gc.collect()
+
+    try:
+        theme.apply(qapp, theme.PONY)
+    finally:
+        theme.apply(qapp, theme.SYSTEM)
+
+
 def test_ticking_it_moves_the_headline_and_is_what_the_run_does(qapp, monkeypatch):
     priced = _commit_estimate()
     headlines = []

@@ -1,11 +1,13 @@
 """The consistency audit: what it reports, and what it refuses to propose."""
 
+import shutil
 import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 
+from conftest import git_init
 from git_assistant import agents
 from git_assistant.agents import history as history_mod
 from git_assistant.agents.base import AgentContext
@@ -33,14 +35,31 @@ def git(repo, *args, when=None):
     return done.stdout
 
 
+@pytest.fixture(scope="module")
+def built(tmp_path_factory):
+    """The repository and the dependency, made once for the module and copied for
+    each test: their seventeen git commands were most of every test's time."""
+    base = tmp_path_factory.mktemp("audit")
+    return {"repo": _repo(base), "dep": _dep(base)}
+
+
 @pytest.fixture
-def repo(tmp_path):
+def repo(built, tmp_path):
+    return shutil.copytree(built["repo"], tmp_path / "widget")
+
+
+@pytest.fixture
+def dep(built, tmp_path):
+    return shutil.copytree(built["dep"], tmp_path / "dep")
+
+
+def _repo(base):
     """`main`, one old merged branch, one old unmerged branch."""
-    where = tmp_path / "widget"
+    where = base / "widget"
     where.mkdir()
-    git(where, "init", "-b", "main")
-    git(where, "config", "user.email", "t@example.com")
-    git(where, "config", "user.name", "T")
+    git_init(
+        where, branch="main", config={"user.email": "t@example.com", "user.name": "T"}
+    )
     (where / "a.txt").write_text("one", encoding="utf-8")
     git(where, "add", "-A")
     git(where, "commit", "-m", "first", when=NOW - timedelta(days=500))
@@ -146,14 +165,13 @@ def test_the_submodule_section_names_the_repository_it_read(settings, repo):
 
 
 # ---- submodules, of the selected repository and nothing else -------------------------
-@pytest.fixture
-def dep(tmp_path):
+def _dep(base):
     """A dependency with two tagged versions, to be vendored."""
-    where = tmp_path / "dep"
+    where = base / "dep"
     where.mkdir()
-    git(where, "init", "-b", "main")
-    git(where, "config", "user.email", "t@example.com")
-    git(where, "config", "user.name", "T")
+    git_init(
+        where, branch="main", config={"user.email": "t@example.com", "user.name": "T"}
+    )
     for tag in ("v1.0.0", "v2.0.0"):
         (where / "lib.txt").write_text(tag, encoding="utf-8")
         git(where, "add", "-A")
@@ -172,9 +190,9 @@ def other_repo(tmp_path, dep):
     """A second configured repository, vendoring the same dependency."""
     where = tmp_path / "gadget"
     where.mkdir()
-    git(where, "init", "-b", "main")
-    git(where, "config", "user.email", "t@example.com")
-    git(where, "config", "user.name", "T")
+    git_init(
+        where, branch="main", config={"user.email": "t@example.com", "user.name": "T"}
+    )
     (where / "b.txt").write_text("one", encoding="utf-8")
     git(where, "add", "-A")
     git(where, "commit", "-m", "first", when=NOW - timedelta(days=50))

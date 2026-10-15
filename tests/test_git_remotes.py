@@ -5,6 +5,7 @@ import sys
 
 import pytest
 
+from conftest import git_init
 from git_assistant import git_ops
 
 _NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
@@ -21,14 +22,7 @@ def _git(repo, *args):
 
 
 def _bare(path):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    subprocess.run(
-        ["git", "init", "-q", "--bare", str(path)],
-        capture_output=True,
-        creationflags=_NO_WINDOW,
-        check=True,
-    )
-    return path
+    return git_init(path, bare=True)
 
 
 def _branches_in(bare):
@@ -49,9 +43,11 @@ def repo(tmp_path, monkeypatch):
     monkeypatch.setenv("GIT_CONFIG_SYSTEM", str(tmp_path / "absent-system"))
     work = tmp_path / "work"
     work.mkdir()
-    _git(work, "init", "-q", "--initial-branch=main")
-    _git(work, "config", "user.email", "test@example.com")
-    _git(work, "config", "user.name", "Test")
+    git_init(
+        work,
+        branch="main",
+        config={"user.email": "test@example.com", "user.name": "Test"},
+    )
     (work / "a.txt").write_text("a\n", encoding="utf-8")
     _git(work, "add", "a.txt")
     _git(work, "commit", "-q", "-m", "initial")

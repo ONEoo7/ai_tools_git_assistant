@@ -14,6 +14,7 @@ pytest.importorskip("PyQt6.QtWidgets")
 
 from PyQt6.QtWidgets import QApplication, QMessageBox  # noqa: E402
 
+from conftest import committed, git_init  # noqa: E402
 from git_assistant import git_ops, repo_config  # noqa: E402
 from git_assistant.config import RepoEntry, Settings  # noqa: E402
 from git_assistant.ui.branches_tags_panel import BranchesTagsPanel  # noqa: E402
@@ -47,15 +48,11 @@ def config_store(tmp_path, monkeypatch):
 
 @pytest.fixture
 def repo(tmp_path):
-    path = tmp_path / "work"
-    path.mkdir()
-    _git(path, "init")
-    _git(path, "config", "user.email", "test@example.com")
-    _git(path, "config", "user.name", "Stefan Ghitescu")
-    (path / "f.txt").write_text("one\n", encoding="utf-8")
-    _git(path, "add", "f.txt")
-    _git(path, "commit", "-m", "initial")
-    return path
+    return committed(
+        tmp_path / "work",
+        {"f.txt": "one\n"},
+        config={"user.email": "test@example.com", "user.name": "Stefan Ghitescu"},
+    )
 
 
 @pytest.fixture
@@ -679,13 +676,7 @@ def test_an_identity_saved_without_a_name_does_not_blank_the_user(qapp, repo):
 
 # ---- remotes -------------------------------------------------------------------------
 def _bare(path):
-    subprocess.run(
-        ["git", "init", "-q", "--bare", str(path)],
-        capture_output=True,
-        creationflags=_NO_WINDOW,
-        check=True,
-    )
-    return path
+    return git_init(path, bare=True)
 
 
 def _heads(bare):

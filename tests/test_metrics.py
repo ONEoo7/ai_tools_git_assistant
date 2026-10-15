@@ -3,6 +3,7 @@ import sys
 
 import pytest
 
+from conftest import git_init
 from git_assistant import metrics
 
 _NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
@@ -50,9 +51,7 @@ def test_aggregate_sums_across_repos():
 
 @pytest.fixture
 def repo(tmp_path):
-    _git(tmp_path, "init")
-    _git(tmp_path, "config", "user.email", "t@e.com")
-    _git(tmp_path, "config", "user.name", "T")
+    git_init(tmp_path, config={"user.email": "t@e.com", "user.name": "T"})
     return tmp_path
 
 

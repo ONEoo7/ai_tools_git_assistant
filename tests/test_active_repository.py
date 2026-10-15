@@ -5,6 +5,7 @@ its branch are read -- and it has to stay right through a checkout, which change
 the branch without changing which repository is selected.
 """
 
+import shutil
 import subprocess
 import sys
 
@@ -14,6 +15,7 @@ pytest.importorskip("PyQt6.QtWidgets")
 
 from PyQt6.QtWidgets import QApplication, QWidget  # noqa: E402
 
+from conftest import git_init  # noqa: E402
 from git_assistant import git_ops  # noqa: E402
 from git_assistant.config import RepoEntry, Settings  # noqa: E402
 from git_assistant.identities import IdentityStore  # noqa: E402
@@ -35,9 +37,7 @@ def _git(repo, *args):
 
 def _repo(path, branch):
     path.mkdir(parents=True)
-    _git(path, "init", "-q")
-    _git(path, "config", "user.email", "test@example.com")
-    _git(path, "config", "user.name", "Test")
+    git_init(path, config={"user.email": "test@example.com", "user.name": "Test"})
     (path / "f.txt").write_bytes(b"f\n")
     _git(path, "add", "-A")
     _git(path, "commit", "-q", "-m", "base")
@@ -56,11 +56,25 @@ def app(qapp):
     theme.apply(qapp, theme.SYSTEM)  # never leave it on the next test
 
 
+#: Where each repository is, under the folder it is made in.
+_PLACES = {"alpha": ("ONEoo7/alpha", "main"), "beta": ("forks/beta", "feature/login")}
+
+
+@pytest.fixture(scope="module")
+def built(tmp_path_factory):
+    """Made once for the module and copied for each test: the six git commands
+    that make the two were most of every test's setup."""
+    base = tmp_path_factory.mktemp("repos")
+    for where, branch in _PLACES.values():
+        _repo(base / where, branch)
+    return base
+
+
 @pytest.fixture
-def repos(tmp_path):
+def repos(built, tmp_path):
     return {
-        "alpha": _repo(tmp_path / "ONEoo7" / "alpha", "main"),
-        "beta": _repo(tmp_path / "forks" / "beta", "feature/login"),
+        name: shutil.copytree(built / where, tmp_path / where)
+        for name, (where, _branch) in _PLACES.items()
     }
 
 

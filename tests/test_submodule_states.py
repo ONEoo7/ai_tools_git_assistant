@@ -5,6 +5,7 @@ import sys
 
 import pytest
 
+from conftest import git_init
 from git_assistant import git_ops
 
 _NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
@@ -39,7 +40,7 @@ def git_home(tmp_path, monkeypatch):
 def library(path, *messages):
     """A repository with a commit for each of ``messages``, the last one checked out."""
     path.mkdir(parents=True)
-    _git(path, "init", "-q")
+    git_init(path)
     for number, message in enumerate(messages):
         (path / "f.txt").write_text(f"{number}\n", encoding="utf-8")
         _git(path, "add", "-A")

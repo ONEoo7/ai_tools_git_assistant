@@ -5,6 +5,7 @@ import sys
 
 import pytest
 
+from conftest import git_init
 from git_assistant.agents import checks, config_audit, probe as probe_mod
 from git_assistant.agents.base import AgentContext, Status
 from git_assistant.agents.report import to_markdown
@@ -25,9 +26,7 @@ def _git(repo, *args, check=True):
 
 @pytest.fixture
 def repo(tmp_path):
-    _git(tmp_path, "init")
-    _git(tmp_path, "config", "user.email", "t@e.example")
-    _git(tmp_path, "config", "user.name", "T")
+    git_init(tmp_path, config={"user.email": "t@e.example", "user.name": "T"})
     (tmp_path / "a.txt").write_bytes(b"hello\n")
     _git(tmp_path, "add", "a.txt")
     _git(tmp_path, "commit", "-m", "first")

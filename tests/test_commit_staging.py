@@ -9,6 +9,7 @@ pytest.importorskip("PyQt6.QtWidgets")
 
 from PyQt6.QtWidgets import QApplication, QHBoxLayout, QPushButton  # noqa: E402
 
+from conftest import git_init  # noqa: E402
 from git_assistant import git_ops  # noqa: E402
 from git_assistant.config import RepoEntry, Settings  # noqa: E402
 from git_assistant.ui import preview_dialog, theme  # noqa: E402
@@ -36,10 +37,14 @@ def qapp():
 def repo(tmp_path):
     path = tmp_path / "work"
     path.mkdir()
-    _git(path, "init", "-q")
-    _git(path, "config", "user.email", "test@example.com")
-    _git(path, "config", "user.name", "Test")
-    _git(path, "config", "core.autocrlf", "false")
+    git_init(
+        path,
+        config={
+            "user.email": "test@example.com",
+            "user.name": "Test",
+            "core.autocrlf": "false",
+        },
+    )
     (path / ".gitattributes").write_bytes(b"*.txt text eol=lf\n")
     for name in ("staged.txt", "part.txt", "edited.txt"):
         (path / name).write_bytes(b"a\nb\n")

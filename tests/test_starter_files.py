@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+from conftest import git_init
 from git_assistant import git_ops
 from git_assistant import starter_files as sf
 from git_assistant.agents import checks
@@ -39,10 +40,15 @@ def _git(repo, *args):
 def repo(tmp_path):
     path = tmp_path / "project"
     path.mkdir()
-    _git(path, "init", "-q", "--initial-branch=main")
-    _git(path, "config", "user.email", "test@example.com")
-    _git(path, "config", "user.name", "Test")
-    _git(path, "config", "core.autocrlf", "false")
+    git_init(
+        path,
+        branch="main",
+        config={
+            "user.email": "test@example.com",
+            "user.name": "Test",
+            "core.autocrlf": "false",
+        },
+    )
     return path
 
 

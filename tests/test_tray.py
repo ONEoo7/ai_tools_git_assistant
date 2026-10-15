@@ -15,21 +15,14 @@ pytest.importorskip("PyQt6.QtWidgets")
 
 from PyQt6.QtWidgets import QApplication  # noqa: E402
 
+from conftest import git_init  # noqa: E402
 from git_assistant.config import RepoEntry, Settings  # noqa: E402
 from git_assistant.ui import tray as tray_module  # noqa: E402
-
-_NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
 
 
 def _repo(path):
     path.mkdir(parents=True)
-    subprocess.run(
-        ["git", "-C", str(path), "init", "-q"],
-        capture_output=True,
-        creationflags=_NO_WINDOW,
-        check=True,
-    )
-    return path
+    return git_init(path)
 
 
 def _wait_until(qapp, done, what, slot_errors, timeout=30.0):
